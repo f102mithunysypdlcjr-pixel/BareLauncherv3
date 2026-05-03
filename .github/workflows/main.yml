@@ -39,7 +39,7 @@ jobs:
             -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }} \
             --no-daemon --stacktrace
         env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx2g"
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
