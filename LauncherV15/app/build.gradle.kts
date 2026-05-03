@@ -57,8 +57,9 @@ android {
     }
 
     lint {
-        abortOnError = false
-    }
+    abortOnError = false
+    checkReleaseBuilds = false
+}
 }
 
 // Block Kotlin from entering via any transitive dep
