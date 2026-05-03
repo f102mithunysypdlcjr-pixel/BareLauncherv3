@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build & Sign Release APK
+    name: Build and Sign Release APK
     runs-on: ubuntu-24.04
 
     steps:
@@ -26,20 +26,20 @@ jobs:
           gradle-version: "8.7"
 
       - name: Decode keystore
-        run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/release.jks
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/release.jks
 
-      - name: Build & sign release APK
+      - name: Build and sign release APK
         working-directory: LauncherV15
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
         run: |
           gradle :app:assembleRelease \
             -Pandroid.injected.signing.store.file=/tmp/release.jks \
             -Pandroid.injected.signing.store.password=${{ secrets.KEYSTORE_PASSWORD }} \
             -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS }} \
             -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }} \
+            -Pandroid.injected.signing.store.type=pkcs12 \
             --no-daemon --stacktrace
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
