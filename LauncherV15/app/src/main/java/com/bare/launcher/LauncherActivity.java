@@ -134,8 +134,8 @@ public class LauncherActivity extends Activity {
     // A1: cell is icon + 2dp padding each side so icons don't touch
     private static final int    CELL_W_DP       = 84;
     private static final int    CELL_H_DP       = 84;
-    // A4: ring stroke; no padding — ring touches icon edge
-    private static final int    RING_STROKE_DP  = 3;
+    // Ring stroke: 5dp — thick enough to be clearly visible at TV viewing distance
+    private static final int    RING_STROKE_DP  = 5;
     private static final long   CLOCK_MS        = 1_000L;
     private static final String PREFS           = "bare_launcher";
     private static final String KEY_WP_URI      = "wp_uri";
@@ -314,14 +314,17 @@ public class LauncherActivity extends Activity {
         wallpaperView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         rootLayout.addView(wallpaperView);
 
-        // A5: Ring size = icon_size + stroke (ring straddles the icon perimeter)
-        // With RING_PADDING_DP=0, the ring circle radius = icon_radius + stroke/2
-        // so the inner edge of the stroke exactly touches the icon edge.
-        int iconPx    = dp(ICON_SIZE_DP);
-        int strokePx  = dp(RING_STROKE_DP);
-        int ringSize  = iconPx + strokePx * 2; // ring canvas slightly larger than icon
-        ringView = new RingView(this, density, iconPx, strokePx);
+        // Ring canvas size: icon diameter + stroke on each side so the stroke
+        // straddles the icon perimeter with its inner edge flush to the icon edge.
+        // ringSize = iconPx + strokePx * 2 means:
+        //   - ring canvas centre aligns with icon centre when ring is centred on icon
+        //   - drawn circle radius = iconPx/2 + strokePx/2 → inner edge at iconPx/2
+        int iconPx   = dp(ICON_SIZE_DP);
+        int strokePx = dp(RING_STROKE_DP);
+        int ringSize = iconPx + strokePx * 2;
+        ringView = new RingView(this, strokePx);
         ringView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // LayoutParams set to ringSize; setX/setY will position it — size never changes
         ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
         ringView.setVisibility(View.INVISIBLE);
         rootLayout.addView(ringView);
@@ -646,9 +649,16 @@ public class LauncherActivity extends Activity {
                             .setDuration(120).start();
                     if (focused) {
                         focusedIndex = boundIndex;
-                        // A11: position ring after animation frame via post
-                        post(() -> positionRing(this));
+                        // positionRing is called directly — no post() needed.
+                        // getLocationOnScreen is valid here since the view is attached
+                        // and laid out. Using post() previously caused double-frame
+                        // delay with mid-animation scale values → ring misalignment.
+                        positionRing(this);
                         ensureVisible(boundIndex);
+                    } else {
+                        // Hide ring when this cell loses focus
+                        RingView rv = ringView;
+                        if (rv != null) rv.setVisibility(View.INVISIBLE);
                     }
                 });
 
@@ -969,48 +979,46 @@ public class LauncherActivity extends Activity {
     // =========================================================================
 
     /**
-     * A10: Position ring in root FrameLayout coordinate space.
-     * setX/setY are in the parent's local coordinate space (the root FrameLayout).
-     * We use getLocationOnScreen for both cell and root, then subtract root's
-     * screen origin to get the cell's position within the root.
+     * Positions the ring so it is perfectly centred on the focused cell.
      *
-     * A11: Called from CellView.post() after the 120ms scale animation starts,
-     * so the ring is positioned at the scaled (1.10×) bounds.
+     * Bugs fixed:
+     *  B1: positionRing previously computed a dynamic ringSz from cell.getScaleX()
+     *      mid-animation and used that to set setX/setY, but the RingView's actual
+     *      layout size was fixed. setX/setY translate the view's top-left corner;
+     *      if ringSz != ringView.getWidth() the centre is wrong → ring appears offset.
+     *  B2: Double post() (one in CellView focus listener, one here) meant positioning
+     *      ran two frames late with an unpredictable scale value mid-animation.
+     *  B3: Scale compensation (1.10×) is unnecessary — at TV viewing distance the
+     *      8px scale difference is imperceptible and the math was causing the offset.
+     *
+     * Correct approach:
+     *  - Ring view size is fixed at (iconPx + strokePx*2) — never changes.
+     *  - To centre the ring on the cell: ring.setX = cellCentreInRoot - ringView.width/2
+     *  - Cell centre in root coords = cell screen position - root screen position + cell half-size
+     *  - Called directly (no post()) since it's already inside CellView.post().
      */
     private void positionRing(View cell) {
         final RingView rv = ringView;
         final FrameLayout root = rootLayout;
-        if (rv == null || root == null) return;
+        if (rv == null || root == null || !cell.isAttachedToWindow()) return;
 
-        rv.post(() -> {
-            if (destroyed) return;
-            final RingView rvInner = ringView;
-            final FrameLayout rootInner = rootLayout;
-            if (rvInner == null || rootInner == null) return;
+        int[] cellScreen = new int[2];
+        int[] rootScreen = new int[2];
+        cell.getLocationOnScreen(cellScreen);
+        root.getLocationOnScreen(rootScreen);
 
-            int[] cellLoc = new int[2];
-            int[] rootLoc = new int[2];
-            cell.getLocationOnScreen(cellLoc);
-            rootInner.getLocationOnScreen(rootLoc);
+        // Cell centre expressed in root's coordinate space
+        float cellCx = (cellScreen[0] - rootScreen[0]) + cell.getWidth()  / 2f;
+        float cellCy = (cellScreen[1] - rootScreen[1]) + cell.getHeight() / 2f;
 
-            // Cell centre in root's coordinate space
-            float cellCxInRoot = (cellLoc[0] - rootLoc[0]) + cell.getWidth()  / 2f;
-            float cellCyInRoot = (cellLoc[1] - rootLoc[1]) + cell.getHeight() / 2f;
-
-            // A11: Account for scale animation — cell appears 1.10× larger when focused.
-            // The ring should enclose the scaled icon, so expand by scale factor.
-            float scale = cell.getScaleX(); // 1.10 when focused, or still animating
-            float scaledIconR = (dp(ICON_SIZE_DP) / 2f) * scale;
-
-            // Position ring centred on the cell, with ring radius = scaledIconR + stroke/2
-            // (ring stroke straddles the radius, so inner edge touches the icon perimeter)
-            float ringR  = scaledIconR + dp(RING_STROKE_DP) / 2f;
-            float ringSz = ringR * 2f;
-
-            rvInner.setX(cellCxInRoot - ringSz / 2f);
-            rvInner.setY(cellCyInRoot - ringSz / 2f);
-            rvInner.setVisibility(View.VISIBLE);
-        });
+        // Ring view size is fixed — just centre it on the cell.
+        // getWidth() is 0 before first layout; fall back to computed size.
+        int rvW = rv.getWidth();
+        if (rvW == 0) rvW = dp(ICON_SIZE_DP) + dp(RING_STROKE_DP) * 2;
+        float halfRing = rvW / 2f;
+        rv.setX(cellCx - halfRing);
+        rv.setY(cellCy - halfRing);
+        rv.setVisibility(View.VISIBLE);
     }
 
     // =========================================================================
@@ -1232,18 +1240,28 @@ public class LauncherActivity extends Activity {
     }
 
     // =========================================================================
-    // RingView — A5: ring radius sized to touch icon edge with no gap
+    // RingView
     // =========================================================================
 
+    /**
+     * Draws a white circle ring that fills its view bounds, inset by strokeWidth/2
+     * so the stroke is fully visible (not clipped at the edge).
+     *
+     * The view is sized to (iconPx + strokePx*2) in buildRootLayout. This means:
+     *   - view centre = icon centre when positioned correctly
+     *   - drawn radius = view_width/2 - strokePx/2
+     *                  = (iconPx/2 + strokePx) - strokePx/2
+     *                  = iconPx/2 + strokePx/2
+     * So the INNER edge of the stroke sits exactly at iconPx/2 — flush to icon edge.
+     *
+     * onDraw uses getWidth()/getHeight() (actual measured dimensions), not any
+     * hardcoded value, so the ring always draws correctly inside its canvas.
+     */
     static final class RingView extends View {
-        private final Paint paint   = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final float iconPx; // icon radius in pixels
-        private final float strokePx;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-        RingView(Context ctx, float density, int iconSizePx, int strokePx) {
+        RingView(Context ctx, int strokePx) {
             super(ctx);
-            this.iconPx   = iconSizePx / 2f;
-            this.strokePx = strokePx;
             paint.setStyle(Paint.Style.STROKE);
             paint.setColor(Color.WHITE);
             paint.setStrokeWidth(strokePx);
@@ -1251,15 +1269,12 @@ public class LauncherActivity extends Activity {
 
         @Override
         protected void onDraw(Canvas canvas) {
-            // A5: ring is drawn at the icon's perimeter.
-            // The ring canvas is iconPx*2 + strokePx*2 wide, so the centre
-            // of the canvas aligns with the icon centre.
-            // Ring radius = iconPx + strokePx/2 so the INNER edge of the
-            // stroke sits exactly on the icon's edge (no gap).
             float cx = getWidth()  / 2f;
             float cy = getHeight() / 2f;
-            float ringRadius = iconPx + strokePx / 2f;
-            canvas.drawCircle(cx, cy, ringRadius, paint);
+            // Inset radius by half the stroke so the stroke is fully inside the canvas
+            // and the inner edge of the stroke sits exactly on the icon perimeter.
+            float radius = cx - paint.getStrokeWidth() / 2f;
+            if (radius > 0) canvas.drawCircle(cx, cy, radius, paint);
         }
     }
 }
