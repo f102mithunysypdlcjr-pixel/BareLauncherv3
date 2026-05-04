@@ -18,7 +18,6 @@ import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.Palette;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.AdaptiveIconDrawable;
@@ -794,16 +793,28 @@ public class LauncherActivity extends Activity {
         float transparencyRatio = (float) transparentSamples / totalSamples;
         if (transparencyRatio < 0.60f) return src; // icon is mostly opaque — leave as-is
 
-        // Predominantly transparent — extract dominant colour via Palette
-        Palette palette = Palette.from(src).generate();
-        int fillColour = palette.getDominantColor(0xFF555555);
-        // Ensure the fill colour is not itself transparent/near-transparent
-        if (Color.alpha(fillColour) < 128) fillColour = 0xFF555555;
-        // Force full opacity on the fill
-        fillColour = Color.argb(255,
-                Color.red(fillColour),
-                Color.green(fillColour),
-                Color.blue(fillColour));
+        // Predominantly transparent -- find dominant opaque colour manually.
+        // No external dependency: average R/G/B of opaque pixels in the sample.
+        // Falls back to neutral grey if no opaque pixels exist.
+        long rSum = 0, gSum = 0, bSum = 0;
+        int opaqueSamples = 0;
+        for (int sy = step / 2; sy < sz; sy += step) {
+            for (int sx = step / 2; sx < sz; sx += step) {
+                int pixel = src.getPixel(sx, sy);
+                if (Color.alpha(pixel) >= 128) {
+                    rSum += Color.red(pixel);
+                    gSum += Color.green(pixel);
+                    bSum += Color.blue(pixel);
+                    opaqueSamples++;
+                }
+            }
+        }
+        int fillColour = (opaqueSamples > 0)
+                ? Color.argb(255,
+                        (int)(rSum / opaqueSamples),
+                        (int)(gSum / opaqueSamples),
+                        (int)(bSum / opaqueSamples))
+                : 0xFF555555;
 
         // Paint filled circle background, then draw the icon on top
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
