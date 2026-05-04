@@ -1,58 +1,113 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+    package="com.bare.launcher"
+    android:versionCode="2"
+    android:versionName="2.0.0">
 
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         SDK TARGETS
+         minSdk 21 = Android 5 (covers all real-world Android TV hardware)
+         targetSdk 34 = Android 14 (required for Play Store 2024+)
+    ════════════════════════════════════════════════════════════════════════ -->
+    <uses-sdk
+        android:minSdkVersion="21"
+        android:targetSdkVersion="34" />
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         PERMISSIONS
+    ════════════════════════════════════════════════════════════════════════ -->
+
+    <!-- Wallpaper reading (Android 12 and below) -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.SET_WALLPAPER" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- Wallpaper reading (Android 13+) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
+    <!-- Set system wallpaper -->
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+
+    <!-- Required to enumerate installed apps for the launcher grid -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         HARDWARE FEATURES
+         Both declared as NOT required so the APK installs on phones too
+         (useful for sideloading / testing)
+    ════════════════════════════════════════════════════════════════════════ -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         PACKAGE VISIBILITY (Android 11+)
+         Required so queryIntentActivities returns results on API 30+
+         Without this the app grid is empty on modern Android TV firmware.
+    ════════════════════════════════════════════════════════════════════════ -->
     <queries>
-        <intent>
-            <action android:name="android.intent.action.MAIN" />
-            <category android:name="android.intent.category.LAUNCHER" />
-        </intent>
+        <!-- TV launcher intents -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
         </intent>
+        <!-- Phone/tablet launcher intents (for mixed-use devices) -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
-    <uses-feature android:name="android.software.leanback" android:required="false" />
-    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         APPLICATION
+    ════════════════════════════════════════════════════════════════════════ -->
     <application
-        android:allowBackup="false"
-        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.BareLauncher"
+        android:icon="@mipmap/ic_launcher"
         android:banner="@drawable/banner"
-        tools:targetApi="34">
+        android:theme="@style/LauncherTheme"
+        android:allowBackup="false"
+        android:supportsRtl="true"
+        android:hardwareAccelerated="true"
+        android:extractNativeLibs="true"
+        android:largeHeap="false">
 
+        <!-- ───────────────────────────────────────────────────────────────────
+             MAIN LAUNCHER ACTIVITY
+             Both HOME and LEANBACK_LAUNCHER so it works as default on:
+               • Android TV / Google TV
+               • Fire TV
+               • Regular Android (phones, tablets, boxes without Leanback)
+        ─────────────────────────────────────────────────────────────────── -->
         <activity
             android:name=".LauncherActivity"
             android:exported="true"
-            android:launchMode="singleTask"
             android:clearTaskOnLaunch="true"
             android:stateNotNeeded="true"
-            android:resizeableActivity="false"
+            android:launchMode="singleTask"
             android:screenOrientation="landscape"
-            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|uiMode">
+            android:resizeableActivity="false"
+            android:configChanges="keyboard|keyboardHidden|navigation|screenSize|uiMode"
+            android:windowSoftInputMode="stateUnspecified|adjustPan">
 
+            <!-- Intent filter 1: Standard Android HOME launcher -->
             <intent-filter android:priority="1">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
 
+            <!-- Intent filter 2: Android TV / Leanback launcher -->
             <intent-filter android:priority="1">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+
         </activity>
+
     </application>
 
 </manifest>
