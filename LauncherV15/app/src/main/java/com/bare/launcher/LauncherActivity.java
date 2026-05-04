@@ -816,11 +816,15 @@ public class LauncherActivity extends Activity {
         if (d == null) return null;
         int sz = dp(ICON_SIZE_DP);
 
-        // C2: Adaptive icons rendered at full size, not circle-clipped
+        // Adaptive icons: render at full size then circle-clip.
+        // AdaptiveIconDrawable draws a rounded-square by default — NOT a circle.
+        // We must clipToCircle() just like every other icon type.
+        // No background fill or inset needed — the adaptive icon fills its bounds.
         boolean isAdaptive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 && d instanceof AdaptiveIconDrawable;
         if (isAdaptive) {
-            return renderDrawable(d, sz);
+            Bitmap raw = renderDrawable(d, sz);
+            return clipToCircle(raw, sz);
         }
 
         // Non-adaptive: determine content scale based on transparency
