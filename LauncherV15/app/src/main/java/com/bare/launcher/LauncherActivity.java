@@ -511,7 +511,8 @@ public class LauncherActivity extends Activity {
             AppInfo app = appList.get(index);
             cv.bind(app, index);
             int left = cellLeft(index);
-            cv.layout(left, 0, left + cellW, cellH);
+           int topOffset = (getMeasuredHeight() - cellH) / 2;
+cv.layout(left, topOffset, left + cellW, topOffset + cellH);
         }
 
         private void repositionAttached() {
@@ -519,7 +520,8 @@ public class LauncherActivity extends Activity {
                 int idx  = attached.keyAt(i);
                 CellView cv = attached.valueAt(i);
                 int left = cellLeft(idx);
-                cv.layout(left, 0, left + cellW, cellH);
+               int topOffset = (getMeasuredHeight() - cellH) / 2;
+cv.layout(left, topOffset, left + cellW, topOffset + cellH);
             }
         }
 
@@ -767,10 +769,12 @@ public class LauncherActivity extends Activity {
             try {
                 ApplicationInfo ai = pm.getApplicationInfo(key, 0);
                 Drawable d = ai.loadIcon(pm);
-                Bitmap raw = drawableToBitmap(d);
-                raw = fillTransparentBackground(raw);
-                bmp = makeCircular(raw);
-                if (raw != bmp) raw.recycle();
+                boolean isAdaptive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        && d instanceof AdaptiveIconDrawable;
+Bitmap raw = drawableToBitmap(d);
+if (!isAdaptive) raw = fillTransparentBackground(raw);
+bmp = makeCircular(raw);
+if (raw != bmp) raw.recycle();
                 iconCache.put(key, bmp);
             } catch (PackageManager.NameNotFoundException | OutOfMemoryError ignored) {}
 
