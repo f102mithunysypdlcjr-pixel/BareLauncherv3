@@ -92,11 +92,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class LauncherActivity extends Activity {
 
     // ── Constants ─────────────────────────────────────────────────────────────
-    private static final int    ICON_SIZE_DP    = 80;
-    private static final int    CELL_W_DP       = 100;   // tighter without label
-    private static final int    CELL_H_DP       = 100;   // square cell, no label row
+    private static final int    ICON_SIZE_DP    = 52;
+    private static final int    CELL_W_DP       = 64;    // tight square, no label
+    private static final int    CELL_H_DP       = 64;    // square cell, no label row
     private static final int    RING_STROKE_DP  = 3;
-    private static final int    RING_PADDING_DP = 6;
+    private static final int    RING_PADDING_DP = 3;
     private static final long   CLOCK_MS        = 1_000L;
     private static final String PREFS           = "bare_launcher";
     private static final String KEY_WP_URI      = "wp_uri";
@@ -314,21 +314,44 @@ public class LauncherActivity extends Activity {
         clockView.setTypeface(TF_LIGHT);
         root.addView(clockView);
 
-        // Wallpaper button (top-right, opposite corner from clock)
-        wpBtn = new TextView(this);
-        wpBtn.setText("🖼");
-        wpBtn.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 22);
-        wpBtn.setTextColor(0xCCFFFFFF);
+        // Wallpaper button — minimal drawn landscape icon (circle+mountain+sun outline)
+        wpBtn = new TextView(this) {
+            private final Paint wp = buildWpPaint();
+            private Paint buildWpPaint() {
+                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                p.setColor(0xCCFFFFFF);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeCap(Paint.Cap.ROUND);
+                p.setStrokeJoin(Paint.Join.ROUND);
+                return p;
+            }
+            @Override protected void onDraw(Canvas canvas) {
+                int w = getWidth(), h = getHeight();
+                float s = Math.min(w, h) * 0.80f;
+                float cx = w / 2f, cy = h / 2f;
+                float l = cx - s/2f, r = cx + s/2f;
+                float t = cy - s/2f, b = cy + s/2f;
+                wp.setStrokeWidth(s * 0.10f);
+                // Outer circle
+                canvas.drawCircle(cx, cy, s / 2f, wp);
+                // Small sun circle top-right
+                canvas.drawCircle(cx + s * 0.17f, t + s * 0.23f, s * 0.12f, wp);
+                // Mountain path
+                android.graphics.Path mt = new android.graphics.Path();
+                mt.moveTo(l, b);
+                mt.lineTo(l + s * 0.40f, t + s * 0.50f);
+                mt.lineTo(l + s * 0.60f, t + s * 0.68f);
+                mt.lineTo(r, b);
+                canvas.drawPath(mt, wp);
+            }
+        };
+        int wpSize = dp(36);
         wpBtn.setFocusable(true);
         wpBtn.setFocusableInTouchMode(true);
         wpBtn.setClickable(true);
-        wpBtn.setPadding(dp(8), dp(4), dp(8), dp(4));
-        GradientDrawable wpBg = new GradientDrawable();
-        wpBg.setColor(0x44000000);
-        wpBg.setCornerRadius(dp(8));
-        wpBtn.setBackground(wpBg);
+        wpBtn.setAlpha(0.65f);
         wpBtn.setOnClickListener(v -> openStoragePicker());
-        wpBtn.setOnFocusChangeListener((v, f) -> v.setAlpha(f ? 1f : 0.6f));
+        wpBtn.setOnFocusChangeListener((v, f) -> v.setAlpha(f ? 1f : 0.65f));
         wpBtn.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             RecyclingShelfView s = shelf;
@@ -342,7 +365,7 @@ public class LauncherActivity extends Activity {
                 default: return false;
             }
         });
-        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(wpSize, wpSize);
         wpLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
         wpLp.setMargins(0, dp(24), dp(32), 0);
         wpBtn.setLayoutParams(wpLp);
@@ -548,36 +571,32 @@ public class LauncherActivity extends Activity {
 
         // ── CellView — F3: no label, square icon cell ─────────────────────────
 
-        final class CellView extends FrameLayout {
+        // CellView: plain View — draws bitmap directly in onDraw.
+        // Using a plain View instead of FrameLayout+ImageView means layout()
+        // is the only sizing call needed; no child measure/layout pass required,
+        // so icons are always visible regardless of how the parent positions them.
+        final class CellView extends View {
 
-            private final ImageView icon;
-            private AppInfo         boundApp;
-            private int             boundIndex;
+            private Bitmap  iconBitmap;   // null shows placeholder circle
+            private AppInfo boundApp;
+            private int     boundIndex;
+            // Paint reused across draws — allocated once per CellView
+            private final Paint drawPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
             CellView(Context ctx) {
                 super(ctx);
                 setFocusable(true);
                 setFocusableInTouchMode(true);
                 setClickable(true);
-                setClipChildren(false);
-
-                icon = new ImageView(ctx);
-                FrameLayout.LayoutParams ilp =
-                        new FrameLayout.LayoutParams(dp(ICON_SIZE_DP), dp(ICON_SIZE_DP));
-                ilp.gravity = android.view.Gravity.CENTER;
-                icon.setLayoutParams(ilp);
-                icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                addView(icon);
-
-                // F3: NO label TextView — removed entirely
+                setWillNotDraw(false);
 
                 setOnClickListener(v -> { if (boundApp != null) launchApp(boundApp); });
 
                 setOnFocusChangeListener((v, focused) -> {
-                    icon.animate().cancel();
-                    icon.animate()
-                            .scaleX(focused ? 1.12f : 1f)
-                            .scaleY(focused ? 1.12f : 1f)
+                    animate().cancel();
+                    animate()
+                            .scaleX(focused ? 1.10f : 1f)
+                            .scaleY(focused ? 1.10f : 1f)
                             .setDuration(120).start();
                     if (focused) {
                         focusedIndex = boundIndex;
@@ -606,12 +625,49 @@ public class LauncherActivity extends Activity {
                 });
             }
 
+            @Override
+            protected void onDraw(Canvas canvas) {
+                int w = getWidth();
+                int h = getHeight();
+                if (w <= 0 || h <= 0) return;
+                int sz = Math.min(w, h);
+                float cx = w / 2f;
+                float cy = h / 2f;
+                float r  = sz / 2f;
+
+                if (iconBitmap != null && !iconBitmap.isRecycled()) {
+                    // Draw the pre-clipped circular bitmap centred in the cell
+                    android.graphics.RectF dst = new android.graphics.RectF(
+                            cx - r, cy - r, cx + r, cy + r);
+                    canvas.drawBitmap(iconBitmap,
+                            new android.graphics.Rect(0, 0,
+                                    iconBitmap.getWidth(), iconBitmap.getHeight()),
+                            dst, drawPaint);
+                } else {
+                    // Placeholder: semi-transparent circle
+                    drawPaint.setColor(0x33FFFFFF);
+                    drawPaint.setStyle(Paint.Style.FILL);
+                    canvas.drawCircle(cx, cy, r, drawPaint);
+                    drawPaint.setColor(0x55FFFFFF);
+                    drawPaint.setStyle(Paint.Style.STROKE);
+                    drawPaint.setStrokeWidth(dp(1));
+                    canvas.drawCircle(cx, cy, r - dp(1), drawPaint);
+                    // Reset style for next draw
+                    drawPaint.setStyle(Paint.Style.FILL);
+                }
+            }
+
+            void setIconBitmap(Bitmap bmp) {
+                iconBitmap = bmp;
+                invalidate();
+            }
+
             void bind(AppInfo app, int index) {
                 boundApp   = app;
                 boundIndex = index;
-                icon.setTag(app.packageName);
-                icon.setImageDrawable(placeholderDrawable);
-                loadIconAsync(app, icon);
+                iconBitmap = null;         // clear stale icon immediately
+                invalidate();              // show placeholder while loading
+                loadIconAsync(app, this);  // pass CellView directly
             }
         }
     }
@@ -696,10 +752,10 @@ public class LauncherActivity extends Activity {
     // Icon loading — F8, F9, F14
     // =========================================================================
 
-    private void loadIconAsync(AppInfo app, ImageView target) {
+    private void loadIconAsync(AppInfo app, RecyclingShelfView.CellView target) {
         String key = app.packageName;
         Bitmap cached = iconCache.get(key);
-        if (cached != null) { target.setImageBitmap(cached); return; }
+        if (cached != null) { target.setIconBitmap(cached); return; }
 
         iconExecutor.execute(() -> {
             if (destroyed) return;
@@ -707,23 +763,21 @@ public class LauncherActivity extends Activity {
             try {
                 ApplicationInfo ai = pm.getApplicationInfo(key, 0);
                 Drawable d = ai.loadIcon(pm);
-                // drawableToBitmap returns a bitmap we always allocated ourselves
                 Bitmap raw = drawableToBitmap(d);
-                // F14: fill transparent background before clipping
                 raw = fillTransparentBackground(raw);
-                // F8: makeCircular creates its own Paint — no static shared state
                 bmp = makeCircular(raw);
-                // F9: raw was always allocated by us — safe to recycle after makeCircular
                 if (raw != bmp) raw.recycle();
                 iconCache.put(key, bmp);
             } catch (PackageManager.NameNotFoundException | OutOfMemoryError ignored) {}
 
             if (destroyed) return;
             final Bitmap fb = bmp;
+            // Race guard: check the cell is still bound to this app
             runOnUiThread(() -> {
-                if (!key.equals(target.getTag())) return; // view-reuse race guard
-                if (fb != null) target.setImageBitmap(fb);
-                else target.setImageDrawable(placeholderDrawable);
+                if (app.packageName.equals(
+                        target.boundApp != null ? target.boundApp.packageName : null)) {
+                    target.setIconBitmap(fb); // null shows placeholder — safe
+                }
             });
         });
     }
