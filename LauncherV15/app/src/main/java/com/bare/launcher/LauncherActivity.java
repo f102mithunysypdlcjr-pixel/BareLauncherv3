@@ -823,7 +823,21 @@ public class LauncherActivity extends Activity {
         boolean isAdaptive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 && d instanceof AdaptiveIconDrawable;
         if (isAdaptive) {
-            Bitmap raw = renderDrawable(d, sz);
+            // AdaptiveIconDrawable.draw() on a plain Canvas without a mask Path
+            // renders incorrectly — background fills as square, foreground may clip wrong.
+            // Correct approach: draw background layer then foreground layer manually
+            // onto our own bitmap, then circle-clip the result.
+            AdaptiveIconDrawable aid = (AdaptiveIconDrawable) d;
+            Bitmap raw = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(raw);
+            if (aid.getBackground() != null) {
+                aid.getBackground().setBounds(0, 0, sz, sz);
+                aid.getBackground().draw(c);
+            }
+            if (aid.getForeground() != null) {
+                aid.getForeground().setBounds(0, 0, sz, sz);
+                aid.getForeground().draw(c);
+            }
             return clipToCircle(raw, sz);
         }
 
