@@ -19,8 +19,6 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
-import android.graphics.Rect;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
@@ -812,62 +810,75 @@ public class LauncherActivity extends Activity {
 
     /**
      * Full icon processing pipeline:
-     *  1. Render drawable to bitmap (handling AdaptiveIconDrawable correctly — A6)
-     *  2. If not adaptive, fill transparent background with dominant colour (A3)
-     *  3. Clip to circle using saveLayer() for correct alpha compositing (A2)
+     *  1. Render drawable to a square bitmap
+     *  2. Composite onto a circle canvas with correct inset so content never crops
+     *  3. For transparent icons, fill background circle with dominant colour first
+     *
+     * Root cause of cropping: the icon content was rendered at exactly targetSz,
+     * then the circle clip at radius=targetSz/2 cut off the corners of any icon
+     * whose content reaches the bitmap edge (square icons, adaptive icons with
+     * foreground near the safe-zone boundary).
+     *
+     * Fix: the final circular bitmap is targetSz × targetSz. The circle fills it
+     * edge-to-edge. The icon content is drawn centred but scaled to ICON_CONTENT_SCALE
+     * (0.80) of the circle diameter — leaving 10% margin on each side so the full
+     * icon image sits visibly inside the circle with no cropping.
+     *
+     * Adaptive icons get the same treatment: render at targetSz (no 1.5× over-render)
+     * and let the scale factor handle the inset. This is simpler and correct because
+     * AdaptiveIconDrawable already composites background+foreground layers internally.
      */
+    // Icon content occupies 80% of the circle diameter — 10% inset each side.
+    // This ensures no icon content is ever clipped by the circle boundary.
+    private static final float ICON_CONTENT_SCALE = 0.80f;
+
     private Bitmap processIcon(Drawable d) {
         if (d == null) return null;
-        int targetSz = dp(ICON_SIZE_DP);
+        int circleSz = dp(ICON_SIZE_DP);   // final bitmap size = circle diameter
+        // Content area: the icon is drawn into this inner square, centred in circleSz
+        int contentSz = Math.round(circleSz * ICON_CONTENT_SCALE);
+        int inset = (circleSz - contentSz) / 2;  // pixels from circle edge to content
 
-        Bitmap raw;
         boolean isAdaptive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 && d instanceof AdaptiveIconDrawable;
 
-        if (isAdaptive) {
-            // A6: AdaptiveIconDrawable uses a 108dp canvas with 72dp safe zone.
-            // To fill the circle correctly, render at (target * 108/72) then crop.
-            // 108/72 = 1.5 — render 1.5× larger so safe zone = targetSz.
-            int renderSz = (int)(targetSz * 1.5f);
-            Bitmap full = Bitmap.createBitmap(renderSz, renderSz, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(full);
-            d.setBounds(0, 0, renderSz, renderSz);
-            d.draw(c);
-            // Crop centre (safe zone) at targetSz
-            int offset = (renderSz - targetSz) / 2;
-            raw = Bitmap.createBitmap(full, offset, offset, targetSz, targetSz);
-            full.recycle();
-        } else {
-            raw = renderDrawable(d, targetSz);
-        }
+        // Step 1: render the icon at contentSz — the size it will actually appear
+        Bitmap content = renderDrawable(d, contentSz);
+        if (content == null) return null;
 
-        if (raw == null) return null;
+        // Step 2: build the final circleSz bitmap with circle background if needed
+        Bitmap out = Bitmap.createBitmap(circleSz, circleSz, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(out);
 
-        // A3: For non-adaptive icons, detect and fill transparent background
-        Bitmap filled;
         if (!isAdaptive) {
-            filled = fillTransparentBackground(raw, targetSz);
-            if (filled != raw) raw.recycle();
-        } else {
-            filled = raw;
+            // Non-adaptive: detect transparent icons and fill background circle first.
+            int fillColour = detectFillColour(content, contentSz);
+            if (fillColour != 0) {
+                Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                bgPaint.setColor(fillColour);
+                canvas.drawCircle(circleSz / 2f, circleSz / 2f, circleSz / 2f, bgPaint);
+            }
         }
+        // Draw icon content centred at the inset position — same path for adaptive
+        // and non-adaptive. contentSz = 80% of circleSz means 10% margin on every
+        // side, so icon content never reaches the circle edge and is never clipped.
+        canvas.drawBitmap(content, inset, inset,
+                new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
+        content.recycle();
 
-        // A2: Clip to circle using saveLayer() — correct offscreen compositing
-        Bitmap circular = makeCircular(filled, targetSz);
-        if (circular != filled) filled.recycle();
-
-        return circular;
+        // Step 3: clip to circle using saveLayer() for correct alpha compositing (A2)
+        return clipToCircle(out, circleSz);
     }
 
     /**
-     * Renders any Drawable to a Bitmap of the given size.
-     * Always returns a freshly allocated bitmap (safe for caller to recycle).
+     * Renders any Drawable to a square Bitmap of exactly sz × sz.
+     * Always returns a freshly allocated bitmap — safe for caller to recycle.
      */
     private Bitmap renderDrawable(Drawable d, int sz) {
         if (d instanceof BitmapDrawable) {
             Bitmap src = ((BitmapDrawable) d).getBitmap();
             if (src != null && !src.isRecycled()) {
-                // Always copy — never return the drawable's internal bitmap
+                // createScaledBitmap always allocates a new bitmap — safe to recycle
                 return Bitmap.createScaledBitmap(src, sz, sz, true);
             }
         }
@@ -885,19 +896,13 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * A3: Detects predominantly transparent icons and fills with a grey background
-     * (neutral, visible at any wallpaper). The fill is a circle clipped to the
-     * icon boundary so no background bleeds outside the circle area.
+     * Samples a 6×6 grid of the icon bitmap to decide whether it needs a
+     * filled background circle. Returns the fill colour to use (ARGB), or
+     * 0 if the icon is already mostly opaque and needs no background.
      *
-     * Uses a fixed neutral grey (0xFF555555) instead of palette extraction —
-     * zero dependency, consistent appearance, avoids colour clashes.
-     *
-     * Returns input unchanged if the icon is mostly opaque.
+     * Fill colour = average RGB of opaque pixels, or neutral grey if none found.
      */
-    private Bitmap fillTransparentBackground(Bitmap src, int sz) {
-        if (src == null) return null;
-
-        // Sample a 6×6 grid to estimate transparency coverage
+    private int detectFillColour(Bitmap src, int sz) {
         int totalSamples = 0, transparentSamples = 0;
         int step = Math.max(1, sz / 6);
         for (int y = step / 2; y < sz; y += step) {
@@ -907,10 +912,8 @@ public class LauncherActivity extends Activity {
             }
         }
         if (totalSamples == 0 || (float) transparentSamples / totalSamples < 0.60f) {
-            return src; // icon is mostly opaque — no fill needed
+            return 0; // icon is mostly opaque — no background needed
         }
-
-        // Find dominant opaque colour from sampled pixels
         long rSum = 0, gSum = 0, bSum = 0;
         int opaqueSamples = 0;
         for (int sy = step / 2; sy < sz; sy += step) {
@@ -924,58 +927,40 @@ public class LauncherActivity extends Activity {
                 }
             }
         }
-        // Use dominant colour, or neutral grey if icon has no opaque pixels at all
-        int fillColour = (opaqueSamples > 0)
+        return (opaqueSamples > 0)
                 ? Color.argb(255,
                         (int)(rSum / opaqueSamples),
                         (int)(gSum / opaqueSamples),
                         (int)(bSum / opaqueSamples))
                 : 0xFF555555;
-
-        // A3: Draw background circle then icon using saveLayer() so the icon
-        // is composited correctly within the circle boundary — no bleed outside.
-        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(out);
-
-        Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        bgPaint.setColor(fillColour);
-        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, bgPaint);
-
-        // Draw icon on top — transparent areas show the filled background
-        canvas.drawBitmap(src, 0, 0, new Paint(Paint.FILTER_BITMAP_FLAG));
-        return out;
     }
 
     /**
-     * A2: Clips a bitmap to a circle using saveLayer() for correct offscreen
-     * alpha compositing.
-     *
-     * The previous approach drew a black circle then used SRC_IN without
-     * saveLayer(). Without an isolated layer, the XOR blend affects the
-     * window compositor rather than an intermediate buffer, causing icons to
-     * appear faded/washed/offset. saveLayer() ensures all compositing happens
-     * in an isolated offscreen buffer.
+     * Clips src to a circle using saveLayer() for correct offscreen alpha
+     * compositing (A2). The src bitmap is consumed and recycled; a new
+     * circular bitmap of the same size is returned.
      */
-    private Bitmap makeCircular(Bitmap src, int sz) {
+    private Bitmap clipToCircle(Bitmap src, int sz) {
         if (src == null) return null;
 
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
 
-        // Save to isolated layer — all compositing is offscreen
+        // Isolated offscreen layer — prevents XOR bleed to window compositor
         int sc = canvas.saveLayer(0, 0, sz, sz, null);
 
-        // Step 1: Draw white circle to establish destination alpha
+        // Destination: white circle defining the clip region
         Paint maskPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         maskPaint.setColor(Color.WHITE);
         canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, maskPaint);
 
-        // Step 2: Draw source bitmap with SRC_IN — only shows inside the circle
+        // Source: draw icon using SRC_IN — only visible inside the circle
         Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         iconPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
         canvas.drawBitmap(src, 0, 0, iconPaint);
 
         canvas.restoreToCount(sc);
+        src.recycle();
         return out;
     }
 
