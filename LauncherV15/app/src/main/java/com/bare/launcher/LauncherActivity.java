@@ -91,10 +91,10 @@ public class LauncherActivity extends Activity {
 
     // ── Constants ─────────────────────────────────────────────────────────────
     private static final int    ICON_SIZE_DP    = 52;
-    private static final int    CELL_W_DP       = 64;    // tight square, no label
-    private static final int    CELL_H_DP       = 64;    // square cell, no label row
+    private static final int    CELL_W_DP       = 52;    // tight square, no label
+    private static final int    CELL_H_DP       = 52;    // square cell, no label row
     private static final int    RING_STROKE_DP  = 3;
-    private static final int    RING_PADDING_DP = 8;
+    private static final int    RING_PADDING_DP = 3;
     private static final long   CLOCK_MS        = 1_000L;
     private static final String PREFS           = "bare_launcher";
     private static final String KEY_WP_URI      = "wp_uri";
