@@ -14,11 +14,9 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
@@ -96,7 +94,7 @@ public class LauncherActivity extends Activity {
     private static final int    CELL_W_DP       = 64;    // tight square, no label
     private static final int    CELL_H_DP       = 64;    // square cell, no label row
     private static final int    RING_STROKE_DP  = 3;
-    private static final int    RING_PADDING_DP = 3;
+    private static final int    RING_PADDING_DP = 8;
     private static final long   CLOCK_MS        = 1_000L;
     private static final String PREFS           = "bare_launcher";
     private static final String KEY_WP_URI      = "wp_uri";
@@ -292,7 +290,7 @@ public class LauncherActivity extends Activity {
         // Shelf — square cells, no label row (F3)
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp =
-                new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP) + dp(16));
+                new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP) + dp(4));
         shelfLp.gravity = android.view.Gravity.BOTTOM;
         shelfLp.setMargins(0, 0, 0, dp(32));
         shelf.setLayoutParams(shelfLp);
@@ -399,7 +397,7 @@ public class LauncherActivity extends Activity {
             scroller = new OverScroller(ctx);
             cellW    = dp(CELL_W_DP);
             cellH    = dp(CELL_H_DP);
-            cellM    = dp(6);
+            cellM    = dp(14);
             setFocusable(false);
             setClipChildren(false);
         }
@@ -461,14 +459,24 @@ public class LauncherActivity extends Activity {
             fillVisible();
         }
 
-        private int stride()       { return cellW + cellM * 2; }
-        private int cellLeft(int i){ return dp(24) + i * stride() + cellM - scrollX; }
+        private int stride() { return cellW + cellM * 2; }
+
+        private int centreOffset() {
+            int contentW = appList.size() * stride();
+            int w = getWidth();
+            return (w > 0 && contentW < w) ? (w - contentW) / 2 : dp(24);
+        }
+
+        private int cellLeft(int i) {
+            return centreOffset() + i * stride() + cellM - scrollX;
+        }
 
         private void fillVisible() {
             if (getWidth() == 0 || appList.isEmpty()) return;
-            int first = Math.max(0, (scrollX - dp(24)) / stride() - BUFFER);
+            int offset = centreOffset();
+            int first = Math.max(0, (scrollX - offset) / stride() - BUFFER);
             int last  = Math.min(appList.size() - 1,
-                    (scrollX + getWidth() - dp(24)) / stride() + BUFFER);
+                    (scrollX + getWidth() - offset) / stride() + BUFFER);
 
             for (int i = attached.size() - 1; i >= 0; i--) {
                 int idx = attached.keyAt(i);
@@ -523,7 +531,7 @@ public class LauncherActivity extends Activity {
         }
 
         private void ensureVisible(int idx) {
-            int left  = dp(24) + idx * stride() + cellM;
+            int left  = centreOffset() + idx * stride() + cellM;
             int right = left + cellW;
             int pad   = dp(48);
             if (left - pad < scrollX) {
@@ -882,18 +890,28 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * F8: Creates its own Paint per call — no static shared Paint.
-     * Static shared Paint caused data races across iconExecutor threads.
-     * Paint is a cheap stack-local object; the shader allocation is unavoidable.
+     * Clips src to a circle by drawing it directly onto a fresh bitmap.
+     * Uses drawBitmap instead of BitmapShader — BitmapShader with CLAMP repeats
+     * edge pixels into corners, making transparent-edge icons look faded/washed.
+     * Direct drawBitmap respects the icon's own alpha channel correctly.
      */
     private Bitmap makeCircular(Bitmap src) {
-        int sz  = src.getWidth();
+        if (src == null) return null;
+        int sz = src.getWidth();
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        // F8: local Paint — thread-safe, no shared state
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        paint.setShader(new BitmapShader(src, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP));
-        new Canvas(out).drawCircle(sz / 2f, sz / 2f, sz / 2f, paint);
-        // No need to clear shader — paint goes out of scope immediately
+        Canvas canvas = new Canvas(out);
+
+        // Step 1: clip canvas to circle so only circular region is drawn into
+        Paint clipPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        clipPaint.setColor(Color.BLACK);
+        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, clipPaint);
+
+        // Step 2: draw src bitmap using SRC_IN so it only shows inside the circle
+        Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        iconPaint.setXfermode(new android.graphics.PorterDuffXfermode(
+                android.graphics.PorterDuff.Mode.SRC_IN));
+        canvas.drawBitmap(src, 0, 0, iconPaint);
+
         return out;
     }
 
@@ -913,7 +931,7 @@ public class LauncherActivity extends Activity {
             cell.getLocationInWindow(locA);
             rvInner.getLocationInWindow(locB);
             float nx = locA[0] + cell.getWidth()  / 2f - rvInner.getWidth()  / 2f;
-            float ny = locA[1] + dp(ICON_SIZE_DP) / 2f - rvInner.getHeight() / 2f;
+            float ny = locA[1] + cell.getHeight() / 2f - rvInner.getHeight() / 2f;
             rvInner.setX(nx);
             rvInner.setY(ny);
             rvInner.setVisibility(View.VISIBLE);
