@@ -113,7 +113,7 @@ public class LauncherActivity extends Activity {
     private static final int    ICON_SIZE_DP   = 68;
     private static final int    CELL_W_DP      = 84;   // icon 80 + 8dp each side
     private static final int    CELL_H_DP      = 80;   // icon only — no label
-    private static final int    RING_STROKE_DP = 4;    // thick enough for TV distance
+    private static final int    RING_STROKE_DP = 6;    // thick enough for TV distance
     private static final long   CLOCK_MS       = 1_000L;
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
@@ -849,7 +849,7 @@ public class LauncherActivity extends Activity {
         boolean hasTransparency = (fillColour != 0);
 
         // C3: scale — transparent icons get more inset to avoid corner clipping
-        float scale       = hasTransparency ? 0.82f : 0.90f;
+        float scale       = hasTransparency ? 0.82f : 0.75f;
         int   contentSz   = Math.round(sz * scale);
         int   inset       = (sz - contentSz) / 2;
 
@@ -861,7 +861,7 @@ public class LauncherActivity extends Activity {
 
         if (fillColour != 0) {
             // C4: alpha 200 = semi-transparent background (not fully opaque)
-            int fadedColour = (fillColour & 0x00FFFFFF) | (200 << 24);
+            int fadedColour = (fillColour & 0x00FFFFFF) | (150 << 24);
             // Local Paint per call — sCirclePaint was a shared static which caused a
             // thread race when iconExecutor ran multiple threads simultaneously.
             Paint circlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -910,7 +910,7 @@ public class LauncherActivity extends Activity {
                 if (Color.alpha(src.getPixel(x, y)) < 30) transparent++;
                 total++;
             }
-        if (total == 0 || (float) transparent / total < 0.60f) return 0;
+        if (total == 0 || (float) transparent / total < 0.40f) return 0;
 
         long r = 0, g = 0, b = 0; int n = 0;
         for (int y = step / 2; y < sz; y += step)
