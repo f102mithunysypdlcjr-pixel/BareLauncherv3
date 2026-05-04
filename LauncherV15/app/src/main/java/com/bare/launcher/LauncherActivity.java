@@ -113,7 +113,7 @@ public class LauncherActivity extends Activity {
     private static final int    ICON_SIZE_DP   = 68;
     private static final int    CELL_W_DP      = 84;   // icon 80 + 8dp each side
     private static final int    CELL_H_DP      = 80;   // icon only — no label
-    private static final int    RING_STROKE_DP = 6;    // thick enough for TV distance
+    private static final int    RING_STROKE_DP = 5;    // thick enough for TV distance
     private static final long   CLOCK_MS       = 1_000L;
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
@@ -849,7 +849,7 @@ public class LauncherActivity extends Activity {
         boolean hasTransparency = (fillColour != 0);
 
         // C3: scale — transparent icons get more inset to avoid corner clipping
-        float scale       = hasTransparency ? 0.82f : 0.75f;
+        float scale       = hasTransparency ? 0.82f : 1.10f;
         int   contentSz   = Math.round(sz * scale);
         int   inset       = (sz - contentSz) / 2;
 
