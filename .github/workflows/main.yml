@@ -14,30 +14,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up JDK 8 for keystore
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 8
-
-      - name: Generate and export keystore
-        run: |
-          keytool -genkey \
-            -keystore /tmp/release.jks \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -alias launcher \
-            -dname "CN=BareLauncher,O=App,C=US" \
-            -storepass mypassword123 \
-            -keypass mypassword123 \
-            -storetype JKS
-          echo "==START=="
-          base64 -w0 /tmp/release.jks
-          echo ""
-          echo "==END=="
-
-      - name: Set up JDK 17 for building
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -48,6 +25,10 @@ jobs:
         with:
           gradle-version: "8.2"
 
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/release.jks
+
       - name: Build and sign release APK
         working-directory: LauncherV15
         env:
@@ -55,9 +36,9 @@ jobs:
         run: |
           gradle :app:assembleRelease \
             -Pandroid.injected.signing.store.file=/tmp/release.jks \
-            -Pandroid.injected.signing.store.password=mypassword123 \
-            -Pandroid.injected.signing.key.alias=launcher \
-            -Pandroid.injected.signing.key.password=mypassword123 \
+            -Pandroid.injected.signing.store.password=${{ secrets.KEYSTORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }} \
             -Pandroid.injected.signing.store.type=JKS \
             --no-daemon --stacktrace
 
