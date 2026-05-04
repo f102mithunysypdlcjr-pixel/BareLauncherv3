@@ -20,52 +20,30 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Gradle 8.7
+      - name: Set up Gradle 8.2
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: "8.7"
+          gradle-version: "8.2"
 
-      - name: Build UNSIGNED release APK
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/release.jks
+
+      - name: Build and sign release APK
         working-directory: LauncherV15
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
-
-      - name: Generate keystore and sign APK
         run: |
-          # Generate fresh keystore using Java 17 keytool
-          keytool -genkey \
-            -keystore /tmp/release.jks \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -alias launcher \
-            -dname "CN=BareLauncher,O=App,C=US" \
-            -storepass mypassword123 \
-            -keypass mypassword123
-
-          # Find apksigner
-          APKSIGNER=$(find $ANDROID_HOME/build-tools -name "apksigner" | sort -r | head -1)
-          echo "Using apksigner: $APKSIGNER"
-
-          # Find the unsigned APK
-          APK=$(find LauncherV15/app/build/outputs/apk/release -name "*.apk" | head -1)
-          echo "Signing: $APK"
-
-          # Sign with apksigner directly - no AGP involvement
-          $APKSIGNER sign \
-            --ks /tmp/release.jks \
-            --ks-pass pass:mypassword123 \
-            --key-pass pass:mypassword123 \
-            --ks-key-alias launcher \
-            --out LauncherV15/app/build/outputs/apk/release/app-release-signed.apk \
-            "$APK"
-
-          echo "Signed APK ready"
+          gradle :app:assembleRelease \
+            -Pandroid.injected.signing.store.file=/tmp/release.jks \
+            -Pandroid.injected.signing.store.password=${{ secrets.KEYSTORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }} \
+            --no-daemon --stacktrace
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
           name: BareLauncher-release-${{ github.run_number }}
-          path: LauncherV15/app/build/outputs/apk/release/app-release-signed.apk
+          path: LauncherV15/app/build/outputs/apk/release/*.apk
           retention-days: 90
