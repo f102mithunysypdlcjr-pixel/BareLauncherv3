@@ -645,12 +645,8 @@ public class LauncherActivity extends Activity {
 
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
                     // Draw the pre-clipped circular bitmap centred in the cell
-                    android.graphics.RectF dst = new android.graphics.RectF(
-                            cx - r, cy - r, cx + r, cy + r);
-                    canvas.drawBitmap(iconBitmap,
-                            new android.graphics.Rect(0, 0,
-                                    iconBitmap.getWidth(), iconBitmap.getHeight()),
-                            dst, drawPaint);
+                   float half = iconBitmap.getWidth() / 2f;
+    canvas.drawBitmap(iconBitmap, cx - half, cy - half, drawPaint);
                 } else {
                     // Placeholder: semi-transparent circle
                     drawPaint.setColor(0x33FFFFFF);
