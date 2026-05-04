@@ -14,13 +14,13 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up JDK 8 for signing
+      - name: Set up JDK 8 for keystore
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 8
 
-      - name: Generate keystore fresh every build
+      - name: Generate keystore
         run: |
           keytool -genkey \
             -keystore /tmp/release.jks \
@@ -32,8 +32,9 @@ jobs:
             -storepass mypassword123 \
             -keypass mypassword123 \
             -storetype JKS
-          echo "Keystore created"
-          keytool -list -keystore /tmp/release.jks -storepass mypassword123
+          echo "==COPY BASE64 BELOW=="
+          base64 -w0 /tmp/release.jks && echo ""
+          echo "==COPY BASE64 ABOVE=="
 
       - name: Set up JDK 17 for building
         uses: actions/setup-java@v4
