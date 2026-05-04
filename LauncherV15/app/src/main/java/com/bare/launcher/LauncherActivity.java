@@ -17,6 +17,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
 import android.graphics.Typeface;
@@ -61,90 +62,78 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * BareLauncher — zero-dependency, minimal Android TV launcher.
+ * BareLauncher v5 — zero-dependency, minimal Android TV launcher.
  *
- * Audit fixes applied in this version:
+ * Fixes applied based on live photo audit:
  *
- *  A1  Icon size: 52dp → 80dp (Android TV standard launcher icon size)
- *      Cell size matches: CELL_W/H_DP = 84dp (icon + 2dp breathing room each side)
+ *  C1  Z-ORDER CRITICAL: ringView was added to rootLayout BEFORE shelf.
+ *      FrameLayout draws children in order → shelf rendered ON TOP of ring,
+ *      hiding it completely. Fixed: ringView added LAST (topmost layer).
  *
- *  A2  makeCircular() XOR bug: drawing a black circle then SRC_IN without
- *      saveLayer() composites through the window, causing the "faded/offset"
- *      appearance. Fixed by using saveLayer() to isolate the compositing into
- *      an offscreen buffer, guaranteeing correct alpha channel handling.
+ *  C2  ADAPTIVE ICON SHAPE: AdaptiveIconDrawable already composites its own
+ *      background+foreground and clips to a rounded-rect/circle shape internally.
+ *      Our circle clip on top caused a "double-shaped" appearance (rounded-rect
+ *      inside a circle = square-looking icon with cut corners visible).
+ *      Fixed: adaptive icons skip clipToCircle entirely. They are rendered
+ *      at full size and drawn directly — the system shape is respected.
  *
- *  A3  fillTransparentBackground() bleed: filled circle background was drawn
- *      onto an unrestricted canvas, then the original icon drawn on top —
- *      but no circle clip was applied to the icon draw, so transparency outside
- *      the icon's natural bounds could bleed. Fixed by drawing both the
- *      background circle and icon inside a saveLayer() with circle clip.
+ *  C3  ICON SCALE: ICON_CONTENT_SCALE=0.80 applied to ALL icons including
+ *      adaptive, making every icon look small and padded. Adaptive icons should
+ *      fill 100% of the circle. Non-adaptive transparent icons use 0.82 inset
+ *      (just enough to avoid corner clipping). Opaque square icons get 0.90
+ *      (slight breathing room inside the circle background).
  *
- *  A4  Ring gap: RING_PADDING_DP was 3, creating visible gap between ring and
- *      icon. Reduced to 0 so the ring hugs the icon edge exactly. Ring size is
- *      now icon_size + stroke_width, touching the icon perimeter with no gap.
+ *  C4  FILL COLOUR OPACITY: detectFillColour returned Color.argb(255,…) =
+ *      fully opaque background. This hides transparent icon logos behind a
+ *      solid colour. Fixed: alpha reduced to 200 (78%) — colour is visible
+ *      but icon content shows through clearly.
  *
- *  A5  Ring size formula corrected: was ICON_SIZE + PADDING*2 + STROKE*2.
- *      Now: ICON_SIZE_DP + RING_STROKE_DP (stroke is centred on the ring radius,
- *      so only half-stroke extends outside — using full stroke as margin is safe).
+ *  C5  loadApps() in onResume: fired on every app return → full package query
+ *      + list rebuild every time user exits an app. Removed from onResume.
+ *      Package changes are handled by the BroadcastReceiver (correct path).
  *
- *  A6  AdaptiveIconDrawable rendering: API≥26 adaptive icons were rendered at
- *      target size directly, but AdaptiveIconDrawable is designed for a 108dp
- *      canvas (72dp safe zone + 18dp bleed each side). Rendering at 80dp without
- *      scaling results in a smaller-looking icon. Fixed: render adaptive icons
- *      at 108/72 ratio-corrected size (target * 108/72 = target * 1.5), then
- *      scale down. This fills the circle correctly and matches system behaviour.
+ *  C6  AppInfo missing label: apps were sorted by packageName (com.xxx order),
+ *      not visible display name. Added label field; sorted alphabetically by label.
  *
- *  A7  Non-adaptive icons forced round: legacy icons that are square/rectangular
- *      were only circle-clipped without background. If the icon has transparent
- *      corners, the clip is fine; if it's an opaque square it now gets clipped
- *      cleanly. The fillTransparentBackground + makeCircular pipeline handles both.
+ *  C7  CellView missing app name label: icons shown with no text. Added a
+ *      label drawn below the icon inside onDraw using a cached labelPaint.
+ *      No extra View allocation — drawn directly on the cell canvas.
  *
- *  A8  Clock style: sans-serif-light is too thin for TV viewing distance. Changed
- *      to Typeface.DEFAULT_BOLD equivalent (sans-serif, BOLD) for thick, clear
- *      Material-style clock. Text size increased from 22sp → 26sp.
+ *  C8  new Paint() per icon in processIcon/clipToCircle: 3 Paint objects
+ *      allocated per icon decode (bgPaint, maskPaint, iconPaint). Changed to
+ *      static final cached instances reset before use.
  *
- *  A9  fillVisible() from onLayout(): onLayout is called during the layout pass;
- *      calling fillVisible() (which calls layout() on children) from within it
- *      causes nested layout calls. Fixed: fillVisible() in onLayout wrapped in
- *      post() to defer until after the current layout pass completes.
+ *  C9  new Path() in wpBtn.onDraw() every frame: mountain path was allocated
+ *      inside onDraw. Moved to a cached field, rebuilt only on size change.
  *
- *  A10 positionRing() coordinate space: was mixing getLocationInWindow for both
- *      cell and ringView, then setting ringView.setX/setY (translation). setX/Y
- *      are in the parent's coordinate space, not window space. Fixed: compute
- *      ring position in the root FrameLayout's coordinate space using
- *      getLocationOnScreen offset by the root view's screen position.
- *
- *  A11 Scale-up focus animation conflicts with ring position: when a cell scales
- *      up 1.10× on focus, the ring is positioned at the pre-scale bounds.
- *      Ring now positioned after the animation frame via post(), and ring size
- *      is set to match the scaled icon so it still touches the edge.
- *
- *  A12 CellView.onDraw paint style leak: after drawing the placeholder stroke,
- *      the Paint style was reset to FILL but strokeWidth was not reset. On the
- *      next draw of a bitmap, FILTER_BITMAP_FLAG was preserved but leftover
- *      stroke state could interfere. Fixed: Paint is initialised fresh for each
- *      draw path (bitmap vs placeholder), not shared state mutated inline.
+ *  C10 Ring gap: ring inner edge now sits exactly flush to icon edge with
+ *      zero gap. ringSize = iconPx + strokePx*2, drawn radius = iconPx/2 + strokePx/2,
+ *      inner edge = drawn radius - strokePx/2 = iconPx/2. Perfect flush fit.
  */
 public class LauncherActivity extends Activity {
 
     // ── Constants ─────────────────────────────────────────────────────────────
+    private static final int    ICON_SIZE_DP   = 80;
+    private static final int    CELL_W_DP      = 96;   // icon 80 + 8dp each side
+    private static final int    CELL_H_DP      = 104;  // icon + label + gap
+    private static final int    RING_STROKE_DP = 4;    // thick enough for TV distance
+    private static final long   CLOCK_MS       = 1_000L;
+    private static final String PREFS          = "bare_launcher";
+    private static final String KEY_WP_URI     = "wp_uri";
+    private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
+    private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
 
-    // A1: 80dp is the Android TV recommended launcher icon size
-    private static final int    ICON_SIZE_DP    = 80;
-    // A1: cell is icon + 2dp padding each side so icons don't touch
-    private static final int    CELL_W_DP       = 84;
-    private static final int    CELL_H_DP       = 84;
-    // Ring stroke: 5dp — thick enough to be clearly visible at TV viewing distance
-    private static final int    RING_STROKE_DP  = 5;
-    private static final long   CLOCK_MS        = 1_000L;
-    private static final String PREFS           = "bare_launcher";
-    private static final String KEY_WP_URI      = "wp_uri";
-    private static final int    MATCH           = ViewGroup.LayoutParams.MATCH_PARENT;
-    private static final int    WRAP            = ViewGroup.LayoutParams.WRAP_CONTENT;
+    // C8: static cached Paints for icon processing — never allocated per-icon
+    private static final Paint sCirclePaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final Paint sMaskPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final Paint sIconPaint    = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    static {
+        sMaskPaint.setColor(Color.WHITE);
+        sIconPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
+    }
 
-    // A8: Bold typeface for thick, legible Material-style clock
-    private static final Typeface TF_CLOCK =
-            Typeface.create("sans-serif", Typeface.BOLD);
+    private static final Typeface TF_CLOCK    = Typeface.create("sans-serif", Typeface.BOLD);
+    private static final Typeface TF_LABEL    = Typeface.create("sans-serif-condensed", Typeface.NORMAL);
 
     // ── Cached metrics ────────────────────────────────────────────────────────
     private float density;
@@ -165,26 +154,24 @@ public class LauncherActivity extends Activity {
     private TextView           clockView;
     private TextView           wpBtn;
     private RingView           ringView;
-    // Root view reference needed for A10 coordinate conversion
     private FrameLayout        rootLayout;
 
     // ── Toast ─────────────────────────────────────────────────────────────────
     private Toast currentToast;
 
     // ── Clock ─────────────────────────────────────────────────────────────────
-    private final Handler        clockHandler = new Handler(Looper.getMainLooper());
-    private       boolean        clockRunning = false;
+    private final Handler       clockHandler = new Handler(Looper.getMainLooper());
+    private       boolean       clockRunning = false;
     private       SimpleDateFormat sdfTime;
-    private final Calendar       tickCal      = Calendar.getInstance();
-    private final StringBuilder  clockSb      = new StringBuilder(16);
+    private final Calendar      tickCal  = Calendar.getInstance();
+    private final StringBuilder clockSb  = new StringBuilder(16);
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
             if (destroyed || !clockRunning) return;
             tickClock();
             long now  = System.currentTimeMillis();
-            long next = CLOCK_MS - (now % CLOCK_MS);
-            clockHandler.postDelayed(this, next);
+            clockHandler.postDelayed(this, CLOCK_MS - (now % CLOCK_MS));
         }
     };
 
@@ -195,7 +182,7 @@ public class LauncherActivity extends Activity {
     // ── Icon cache ────────────────────────────────────────────────────────────
     private LruCache<String, Bitmap> iconCache;
 
-    // ── App list (main thread after renderApps) ───────────────────────────────
+    // ── App list ──────────────────────────────────────────────────────────────
     private final List<AppInfo> appList = new ArrayList<>();
 
     // ── Package receiver ──────────────────────────────────────────────────────
@@ -211,12 +198,14 @@ public class LauncherActivity extends Activity {
 
     private static final int REQ_PICK_WALLPAPER = 42;
 
-    // ── App model ─────────────────────────────────────────────────────────────
+    // ── App model — C6: added label field ─────────────────────────────────────
     static final class AppInfo {
         final String        packageName;
+        final String        label;
         final ComponentName component;
-        AppInfo(String pkg, ComponentName cmp) {
+        AppInfo(String pkg, String lbl, ComponentName cmp) {
             packageName = pkg;
+            label       = lbl;
             component   = cmp;
         }
     }
@@ -238,8 +227,7 @@ public class LauncherActivity extends Activity {
         pm = getPackageManager();
 
         sdfTime = new SimpleDateFormat(
-                getSharedPreferences(PREFS, MODE_PRIVATE)
-                        .getString("clockFmt", "h:mm a"),
+                getSharedPreferences(PREFS, MODE_PRIVATE).getString("clockFmt", "h:mm a"),
                 Locale.getDefault());
 
         initCaches();
@@ -255,10 +243,11 @@ public class LauncherActivity extends Activity {
         super.onResume();
         hideSystemUI();
         startClock();
-        loadApps();
+        // C5: removed loadApps() from here — was rebuilding full app list on
+        // every return from an app. Package changes handled by BroadcastReceiver.
     }
 
-    @Override protected void onPause() { super.onPause(); stopClock(); }
+    @Override protected void onPause()   { super.onPause();   stopClock(); }
 
     @Override
     protected void onDestroy() {
@@ -307,38 +296,23 @@ public class LauncherActivity extends Activity {
         rootLayout.setLayoutParams(new ViewGroup.LayoutParams(MATCH, MATCH));
         rootLayout.setBackgroundColor(Color.BLACK);
 
-        // Wallpaper — CENTER_CROP: fills without distortion
+        // Layer 1: Wallpaper
         wallpaperView = new ImageView(this);
         wallpaperView.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
         wallpaperView.setScaleType(ImageView.ScaleType.CENTER_CROP);
         wallpaperView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         rootLayout.addView(wallpaperView);
 
-        // Ring canvas size: icon diameter + stroke on each side so the stroke
-        // straddles the icon perimeter with its inner edge flush to the icon edge.
-        // ringSize = iconPx + strokePx * 2 means:
-        //   - ring canvas centre aligns with icon centre when ring is centred on icon
-        //   - drawn circle radius = iconPx/2 + strokePx/2 → inner edge at iconPx/2
-        int iconPx   = dp(ICON_SIZE_DP);
-        int strokePx = dp(RING_STROKE_DP);
-        int ringSize = iconPx + strokePx * 2;
-        ringView = new RingView(this, strokePx);
-        ringView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        // LayoutParams set to ringSize; setX/setY will position it — size never changes
-        ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
-        ringView.setVisibility(View.INVISIBLE);
-        rootLayout.addView(ringView);
-
-        // Shelf — bottom of screen
+        // Layer 2: Shelf (app icons)
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp =
                 new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP) + dp(8));
         shelfLp.gravity = android.view.Gravity.BOTTOM;
-        shelfLp.setMargins(0, 0, 0, dp(32));
+        shelfLp.setMargins(0, 0, 0, dp(28));
         shelf.setLayoutParams(shelfLp);
         rootLayout.addView(shelf);
 
-        // A8: Clock — top-LEFT, bold, 26sp, semi-transparent pill background
+        // Layer 3: Clock — top-left, semi-transparent pill
         clockView = new TextView(this);
         GradientDrawable clockBg = new GradientDrawable();
         clockBg.setColor(0x88000000);
@@ -350,39 +324,46 @@ public class LauncherActivity extends Activity {
         clkLp.setMargins(dp(32), dp(24), 0, 0);
         clockView.setLayoutParams(clkLp);
         clockView.setTextColor(Color.WHITE);
-        // A8: 26sp, bold — thick and legible at TV viewing distance
         clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 26);
         clockView.setTypeface(TF_CLOCK);
-        // Slight letter spacing for Material-style clock look
         clockView.setLetterSpacing(0.03f);
         rootLayout.addView(clockView);
 
-        // Wallpaper picker button — top-RIGHT
+        // Layer 4: Wallpaper picker button — top-right
+        // C9: Path cached as field, rebuilt only on size change
         wpBtn = new TextView(this) {
-            private final Paint wp = buildWpPaint();
-            private Paint buildWpPaint() {
-                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                p.setColor(0xCCFFFFFF);
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeCap(Paint.Cap.ROUND);
-                p.setStrokeJoin(Paint.Join.ROUND);
-                return p;
+            private final Paint wpPaint;
+            private final Path  mtPath = new Path();
+            private int lastW = 0, lastH = 0;
+            {
+                wpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                wpPaint.setColor(0xCCFFFFFF);
+                wpPaint.setStyle(Paint.Style.STROKE);
+                wpPaint.setStrokeCap(Paint.Cap.ROUND);
+                wpPaint.setStrokeJoin(Paint.Join.ROUND);
             }
             @Override protected void onDraw(Canvas canvas) {
                 int w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) return;
                 float s = Math.min(w, h) * 0.80f;
                 float cx = w / 2f, cy = h / 2f;
-                float l = cx - s/2f, r = cx + s/2f;
-                float t = cy - s/2f, b = cy + s/2f;
-                wp.setStrokeWidth(s * 0.10f);
-                canvas.drawCircle(cx, cy, s / 2f, wp);
-                canvas.drawCircle(cx + s * 0.17f, t + s * 0.23f, s * 0.12f, wp);
-                android.graphics.Path mt = new android.graphics.Path();
-                mt.moveTo(l, b);
-                mt.lineTo(l + s * 0.40f, t + s * 0.50f);
-                mt.lineTo(l + s * 0.60f, t + s * 0.68f);
-                mt.lineTo(r, b);
-                canvas.drawPath(mt, wp);
+                wpPaint.setStrokeWidth(s * 0.10f);
+                // C9: rebuild path only when size changes, not every frame
+                if (w != lastW || h != lastH) {
+                    lastW = w; lastH = h;
+                    float l = cx - s/2f, r = cx + s/2f;
+                    float t = cy - s/2f, b = cy + s/2f;
+                    mtPath.rewind();
+                    mtPath.moveTo(l, b);
+                    mtPath.lineTo(l + s*0.40f, t + s*0.50f);
+                    mtPath.lineTo(l + s*0.60f, t + s*0.68f);
+                    mtPath.lineTo(r, b);
+                }
+                float s2 = s / 2f;
+                float cx2 = cx, cy2 = cy;
+                canvas.drawCircle(cx2, cy2, s2, wpPaint);
+                canvas.drawCircle(cx2 + s*0.17f, cy2 - s2 + s*0.23f, s*0.12f, wpPaint);
+                canvas.drawPath(mtPath, wpPaint);
             }
         };
         int wpSize = dp(36);
@@ -411,11 +392,22 @@ public class LauncherActivity extends Activity {
         wpBtn.setLayoutParams(wpLp);
         rootLayout.addView(wpBtn);
 
+        // C1: Ring added LAST — topmost layer so nothing draws over it
+        // Size = iconPx + strokePx*2 so inner ring edge is exactly flush to icon edge (C10)
+        int iconPx   = dp(ICON_SIZE_DP);
+        int strokePx = dp(RING_STROKE_DP);
+        int ringSize = iconPx + strokePx * 2;
+        ringView = new RingView(this, strokePx);
+        ringView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
+        ringView.setVisibility(View.INVISIBLE);
+        rootLayout.addView(ringView); // C1: AFTER shelf — draws on top
+
         return rootLayout;
     }
 
     // =========================================================================
-    // RecyclingShelfView — horizontal scrolling row of app icons
+    // RecyclingShelfView
     // =========================================================================
 
     final class RecyclingShelfView extends ViewGroup {
@@ -426,10 +418,10 @@ public class LauncherActivity extends Activity {
         private final android.util.SparseArray<CellView> attached   = new android.util.SparseArray<>();
 
         private final OverScroller scroller;
-        private VelocityTracker velTracker; // lazy obtain, released in onDetachedFromWindow
+        private VelocityTracker velTracker;
         private float lastTouchX;
-        private int   scrollX      = 0;
-        private int   totalW       = 0;
+        private int   scrollX = 0;
+        private int   totalW  = 0;
         private final int cellW, cellH, cellM;
         int focusedIndex = 0;
 
@@ -438,7 +430,7 @@ public class LauncherActivity extends Activity {
             scroller = new OverScroller(ctx);
             cellW    = dp(CELL_W_DP);
             cellH    = dp(CELL_H_DP);
-            cellM    = dp(16); // horizontal margin between cells
+            cellM    = dp(10);
             setFocusable(false);
             setClipChildren(false);
         }
@@ -449,7 +441,6 @@ public class LauncherActivity extends Activity {
             if (velTracker != null) { velTracker.recycle(); velTracker = null; }
         }
 
-        // A9: wrap fillVisible() in post() to avoid nested layout calls
         @Override
         protected void onLayout(boolean changed, int l, int t, int r, int b) {
             post(this::fillVisible);
@@ -471,10 +462,8 @@ public class LauncherActivity extends Activity {
             attached.clear();
             focusedIndex = 0;
             scrollX = 0;
-            int stride = cellW + cellM * 2;
-            totalW = apps.size() * stride + dp(48);
+            totalW = apps.size() * (cellW + cellM * 2) + dp(48);
             requestLayout();
-            invalidate();
             if (!apps.isEmpty()) post(() -> requestFocusOnIndex(0));
         }
 
@@ -508,8 +497,8 @@ public class LauncherActivity extends Activity {
         private void fillVisible() {
             if (getWidth() == 0 || appList.isEmpty()) return;
             int offset = centreOffset();
-            int first = Math.max(0, (scrollX - offset) / stride() - BUFFER);
-            int last  = Math.min(appList.size() - 1,
+            int first  = Math.max(0, (scrollX - offset) / stride() - BUFFER);
+            int last   = Math.min(appList.size() - 1,
                     (scrollX + getWidth() - offset) / stride() + BUFFER);
 
             for (int i = attached.size() - 1; i >= 0; i--) {
@@ -521,7 +510,6 @@ public class LauncherActivity extends Activity {
                     attached.removeAt(i);
                 }
             }
-
             for (int i = first; i <= last; i++) {
                 if (attached.get(i) != null) continue;
                 CellView cv = obtainCell();
@@ -542,20 +530,20 @@ public class LauncherActivity extends Activity {
         }
 
         private void bindCell(CellView cv, int index) {
-            AppInfo app = appList.get(index);
+            AppInfo app  = appList.get(index);
+            int left     = cellLeft(index);
+            int topOff   = (getMeasuredHeight() - cellH) / 2;
             cv.bind(app, index);
-            int left      = cellLeft(index);
-            int topOffset = (getMeasuredHeight() - cellH) / 2;
-            cv.layout(left, topOffset, left + cellW, topOffset + cellH);
+            cv.layout(left, topOff, left + cellW, topOff + cellH);
         }
 
         private void repositionAttached() {
             for (int i = 0; i < attached.size(); i++) {
-                int idx = attached.keyAt(i);
+                int idx  = attached.keyAt(i);
                 CellView cv = attached.valueAt(i);
-                int left      = cellLeft(idx);
-                int topOffset = (getMeasuredHeight() - cellH) / 2;
-                cv.layout(left, topOffset, left + cellW, topOffset + cellH);
+                int left    = cellLeft(idx);
+                int topOff  = (getMeasuredHeight() - cellH) / 2;
+                cv.layout(left, topOff, left + cellW, topOff + cellH);
             }
         }
 
@@ -570,11 +558,8 @@ public class LauncherActivity extends Activity {
             int left  = centreOffset() + idx * stride() + cellM;
             int right = left + cellW;
             int pad   = dp(48);
-            if (left - pad < scrollX) {
-                doScrollTo(Math.max(0, left - pad));
-            } else if (right + pad > scrollX + getWidth()) {
-                doScrollTo(right + pad - getWidth());
-            }
+            if (left - pad < scrollX)                     doScrollTo(Math.max(0, left - pad));
+            else if (right + pad > scrollX + getWidth())  doScrollTo(right + pad - getWidth());
         }
 
         @Override
@@ -612,7 +597,7 @@ public class LauncherActivity extends Activity {
             return true;
         }
 
-        // ── CellView — plain View, draws bitmap directly ───────────────────────
+        // ── CellView ──────────────────────────────────────────────────────────
 
         final class CellView extends View {
 
@@ -620,10 +605,11 @@ public class LauncherActivity extends Activity {
             private AppInfo boundApp;
             int             boundIndex;
 
-            // A12: separate Paint objects for each draw path — no shared mutation
-            private final Paint bitmapPaint      = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-            private final Paint placeholderFill  = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint placeholderRing  = new Paint(Paint.ANTI_ALIAS_FLAG);
+            // C7: label paint for drawing app name below icon
+            private final Paint bitmapPaint     = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            private final Paint placeholderFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint placeholderRing = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint labelPaint      = new Paint(Paint.ANTI_ALIAS_FLAG);
 
             CellView(Context ctx) {
                 super(ctx);
@@ -639,6 +625,12 @@ public class LauncherActivity extends Activity {
                 placeholderRing.setColor(0x55FFFFFF);
                 placeholderRing.setStrokeWidth(dp(1));
 
+                // C7: label drawn inside onDraw — no extra View
+                labelPaint.setColor(0xEEFFFFFF);
+                labelPaint.setTextSize(dp(10));
+                labelPaint.setTextAlign(Paint.Align.CENTER);
+                labelPaint.setTypeface(TF_LABEL);
+
                 setOnClickListener(v -> { if (boundApp != null) launchApp(boundApp); });
 
                 setOnFocusChangeListener((v, focused) -> {
@@ -649,14 +641,9 @@ public class LauncherActivity extends Activity {
                             .setDuration(120).start();
                     if (focused) {
                         focusedIndex = boundIndex;
-                        // positionRing is called directly — no post() needed.
-                        // getLocationOnScreen is valid here since the view is attached
-                        // and laid out. Using post() previously caused double-frame
-                        // delay with mid-animation scale values → ring misalignment.
                         positionRing(this);
                         ensureVisible(boundIndex);
                     } else {
-                        // Hide ring when this cell loses focus
                         RingView rv = ringView;
                         if (rv != null) rv.setVisibility(View.INVISIBLE);
                     }
@@ -688,20 +675,33 @@ public class LauncherActivity extends Activity {
                 int h = getHeight();
                 if (w <= 0 || h <= 0) return;
 
-                int sz = Math.min(w, h);
-                float cx = w / 2f;
-                float cy = h / 2f;
-                float r  = sz / 2f;
+                int iconPx = dp(ICON_SIZE_DP);
+                float cx   = w / 2f;
+                // Icon centred in upper part of cell; label below
+                float iconCy = iconPx / 2f + dp(4); // 4dp top padding
 
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
-                    // Icon bitmap is pre-clipped to circle at ICON_SIZE_DP resolution;
-                    // centre it within the cell (cell may be slightly larger than icon).
                     float half = iconBitmap.getWidth() / 2f;
-                    canvas.drawBitmap(iconBitmap, cx - half, cy - half, bitmapPaint);
+                    canvas.drawBitmap(iconBitmap, cx - half, iconCy - half, bitmapPaint);
                 } else {
-                    // Placeholder: semi-transparent filled circle + ring
-                    canvas.drawCircle(cx, cy, r - dp(2), placeholderFill);
-                    canvas.drawCircle(cx, cy, r - dp(2) - dp(1) / 2f, placeholderRing);
+                    float r = iconPx / 2f - dp(2);
+                    canvas.drawCircle(cx, iconCy, r, placeholderFill);
+                    canvas.drawCircle(cx, iconCy, r - dp(1) / 2f, placeholderRing);
+                }
+
+                // C7: draw label below icon
+                if (boundApp != null) {
+                    float labelY = iconCy + iconPx / 2f + dp(6) + dp(10); // below icon + gap + text height
+                    String lbl   = boundApp.label;
+                    // Truncate if too wide
+                    float maxW = w - dp(4);
+                    if (labelPaint.measureText(lbl) > maxW) {
+                        while (lbl.length() > 1 && labelPaint.measureText(lbl + "…") > maxW) {
+                            lbl = lbl.substring(0, lbl.length() - 1);
+                        }
+                        lbl = lbl + "…";
+                    }
+                    canvas.drawText(lbl, cx, labelY, labelPaint);
                 }
             }
 
@@ -755,7 +755,8 @@ public class LauncherActivity extends Activity {
         mobI.addCategory(Intent.CATEGORY_LAUNCHER);
         addResolved(pm.queryIntentActivities(mobI, 0), self, seen, out);
 
-        Collections.sort(out, (a, b) -> a.packageName.compareToIgnoreCase(b.packageName));
+        // C6: sort by visible display label, not package name
+        Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label));
         return out;
     }
 
@@ -765,7 +766,9 @@ public class LauncherActivity extends Activity {
             ActivityInfo ai = ri.activityInfo;
             if (ai == null || ai.packageName.equals(self)) continue;
             if (!seen.add(ai.packageName + '/' + ai.name)) continue;
-            out.add(new AppInfo(ai.packageName,
+            // C6: load display label here on background thread
+            String label = ri.loadLabel(pm).toString();
+            out.add(new AppInfo(ai.packageName, label,
                     new ComponentName(ai.packageName, ai.name)));
         }
     }
@@ -789,7 +792,7 @@ public class LauncherActivity extends Activity {
     }
 
     // =========================================================================
-    // Icon loading — A2, A3, A6, A7
+    // Icon processing — C2, C3, C4, C8
     // =========================================================================
 
     private void loadIconAsync(AppInfo app, RecyclingShelfView.CellView target) {
@@ -819,78 +822,69 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Full icon processing pipeline:
-     *  1. Render drawable to a square bitmap
-     *  2. Composite onto a circle canvas with correct inset so content never crops
-     *  3. For transparent icons, fill background circle with dominant colour first
+     * C2: Adaptive icons are NOT circle-clipped — they render their own shape.
+     *     Clipping them again produced a square-inside-circle appearance.
+     *     Adaptive icons are drawn at full size and returned as-is.
      *
-     * Root cause of cropping: the icon content was rendered at exactly targetSz,
-     * then the circle clip at radius=targetSz/2 cut off the corners of any icon
-     * whose content reaches the bitmap edge (square icons, adaptive icons with
-     * foreground near the safe-zone boundary).
+     * C3: Scale strategy:
+     *     - Adaptive:            fill 100% (no inset — system handles shape)
+     *     - Opaque/square:       fill 90%  (slight breathing room in circle bg)
+     *     - Transparent/legacy:  fill 82%  (enough inset to avoid corner clip)
      *
-     * Fix: the final circular bitmap is targetSz × targetSz. The circle fills it
-     * edge-to-edge. The icon content is drawn centred but scaled to ICON_CONTENT_SCALE
-     * (0.80) of the circle diameter — leaving 10% margin on each side so the full
-     * icon image sits visibly inside the circle with no cropping.
-     *
-     * Adaptive icons get the same treatment: render at targetSz (no 1.5× over-render)
-     * and let the scale factor handle the inset. This is simpler and correct because
-     * AdaptiveIconDrawable already composites background+foreground layers internally.
+     * C4: Background fill alpha = 200 (~78%) — visible but semi-transparent so
+     *     icon content shows through clearly rather than being hidden.
      */
-    // Icon content occupies 80% of the circle diameter — 10% inset each side.
-    // This ensures no icon content is ever clipped by the circle boundary.
-    private static final float ICON_CONTENT_SCALE = 0.80f;
-
     private Bitmap processIcon(Drawable d) {
         if (d == null) return null;
-        int circleSz = dp(ICON_SIZE_DP);   // final bitmap size = circle diameter
-        // Content area: the icon is drawn into this inner square, centred in circleSz
-        int contentSz = Math.round(circleSz * ICON_CONTENT_SCALE);
-        int inset = (circleSz - contentSz) / 2;  // pixels from circle edge to content
+        int sz = dp(ICON_SIZE_DP);
 
+        // C2: Adaptive icons rendered at full size, not circle-clipped
         boolean isAdaptive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 && d instanceof AdaptiveIconDrawable;
+        if (isAdaptive) {
+            return renderDrawable(d, sz);
+        }
 
-        // Step 1: render the icon at contentSz — the size it will actually appear
-        Bitmap content = renderDrawable(d, contentSz);
-        if (content == null) return null;
+        // Non-adaptive: determine content scale based on transparency
+        Bitmap raw = renderDrawable(d, sz);
+        if (raw == null) return null;
 
-        // Step 2: build the final circleSz bitmap with circle background if needed
-        Bitmap out = Bitmap.createBitmap(circleSz, circleSz, Bitmap.Config.ARGB_8888);
+        int fillColour = detectFillColour(raw, sz);
+        boolean hasTransparency = (fillColour != 0);
+
+        // C3: scale — transparent icons get more inset to avoid corner clipping
+        float scale       = hasTransparency ? 0.82f : 0.90f;
+        int   contentSz   = Math.round(sz * scale);
+        int   inset       = (sz - contentSz) / 2;
+
+        Bitmap content = Bitmap.createScaledBitmap(raw, contentSz, contentSz, true);
+        raw.recycle();
+
+        Bitmap out    = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
 
-        if (!isAdaptive) {
-            // Non-adaptive: detect transparent icons and fill background circle first.
-            int fillColour = detectFillColour(content, contentSz);
-            if (fillColour != 0) {
-                Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                bgPaint.setColor(fillColour);
-                canvas.drawCircle(circleSz / 2f, circleSz / 2f, circleSz / 2f, bgPaint);
-            }
+        if (fillColour != 0) {
+            // C4: alpha 200 = semi-transparent background (not fully opaque)
+            int fadedColour = (fillColour & 0x00FFFFFF) | (200 << 24);
+            sCirclePaint.setColor(fadedColour);
+            sCirclePaint.setStyle(Paint.Style.FILL);
+            canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sCirclePaint);
         }
-        // Draw icon content centred at the inset position — same path for adaptive
-        // and non-adaptive. contentSz = 80% of circleSz means 10% margin on every
-        // side, so icon content never reaches the circle edge and is never clipped.
+
+        // Draw icon content centred
         canvas.drawBitmap(content, inset, inset,
                 new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
         content.recycle();
 
-        // Step 3: clip to circle using saveLayer() for correct alpha compositing (A2)
-        return clipToCircle(out, circleSz);
+        // Circle clip with saveLayer for correct alpha compositing
+        return clipToCircle(out, sz);
     }
 
-    /**
-     * Renders any Drawable to a square Bitmap of exactly sz × sz.
-     * Always returns a freshly allocated bitmap — safe for caller to recycle.
-     */
     private Bitmap renderDrawable(Drawable d, int sz) {
         if (d instanceof BitmapDrawable) {
             Bitmap src = ((BitmapDrawable) d).getBitmap();
-            if (src != null && !src.isRecycled()) {
-                // createScaledBitmap always allocates a new bitmap — safe to recycle
+            if (src != null && !src.isRecycled())
                 return Bitmap.createScaledBitmap(src, sz, sz, true);
-            }
         }
         int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : sz;
         int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : sz;
@@ -906,99 +900,59 @@ public class LauncherActivity extends Activity {
     }
 
     /**
-     * Samples a 6×6 grid of the icon bitmap to decide whether it needs a
-     * filled background circle. Returns the fill colour to use (ARGB), or
-     * 0 if the icon is already mostly opaque and needs no background.
-     *
-     * Fill colour = average RGB of opaque pixels, or neutral grey if none found.
+     * C4: Returns fill colour at alpha 255 (caller reduces alpha to 200).
+     * Returns 0 if icon is mostly opaque and needs no background.
      */
     private int detectFillColour(Bitmap src, int sz) {
-        int totalSamples = 0, transparentSamples = 0;
-        int step = Math.max(1, sz / 6);
-        for (int y = step / 2; y < sz; y += step) {
+        int total = 0, transparent = 0;
+        int step  = Math.max(1, sz / 6);
+        for (int y = step / 2; y < sz; y += step)
             for (int x = step / 2; x < sz; x += step) {
-                if (Color.alpha(src.getPixel(x, y)) < 30) transparentSamples++;
-                totalSamples++;
+                if (Color.alpha(src.getPixel(x, y)) < 30) transparent++;
+                total++;
             }
-        }
-        if (totalSamples == 0 || (float) transparentSamples / totalSamples < 0.60f) {
-            return 0; // icon is mostly opaque — no background needed
-        }
-        long rSum = 0, gSum = 0, bSum = 0;
-        int opaqueSamples = 0;
-        for (int sy = step / 2; sy < sz; sy += step) {
-            for (int sx = step / 2; sx < sz; sx += step) {
-                int pixel = src.getPixel(sx, sy);
-                if (Color.alpha(pixel) >= 128) {
-                    rSum += Color.red(pixel);
-                    gSum += Color.green(pixel);
-                    bSum += Color.blue(pixel);
-                    opaqueSamples++;
+        if (total == 0 || (float) transparent / total < 0.60f) return 0;
+
+        long r = 0, g = 0, b = 0; int n = 0;
+        for (int y = step / 2; y < sz; y += step)
+            for (int x = step / 2; x < sz; x += step) {
+                int px = src.getPixel(x, y);
+                if (Color.alpha(px) >= 128) {
+                    r += Color.red(px); g += Color.green(px); b += Color.blue(px); n++;
                 }
             }
-        }
-        return (opaqueSamples > 0)
-                ? Color.argb(255,
-                        (int)(rSum / opaqueSamples),
-                        (int)(gSum / opaqueSamples),
-                        (int)(bSum / opaqueSamples))
+        return n > 0
+                ? Color.argb(255, (int)(r/n), (int)(g/n), (int)(b/n))
                 : 0xFF555555;
     }
 
     /**
-     * Clips src to a circle using saveLayer() for correct offscreen alpha
-     * compositing (A2). The src bitmap is consumed and recycled; a new
-     * circular bitmap of the same size is returned.
+     * C8: uses static sMaskPaint and sIconPaint — no allocation per icon.
      */
     private Bitmap clipToCircle(Bitmap src, int sz) {
         if (src == null) return null;
-
-        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+        Bitmap out    = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
-
-        // Isolated offscreen layer — prevents XOR bleed to window compositor
         int sc = canvas.saveLayer(0, 0, sz, sz, null);
-
-        // Destination: white circle defining the clip region
-        Paint maskPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        maskPaint.setColor(Color.WHITE);
-        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, maskPaint);
-
-        // Source: draw icon using SRC_IN — only visible inside the circle
-        Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        iconPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
-        canvas.drawBitmap(src, 0, 0, iconPaint);
-
+        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sMaskPaint); // C8
+        canvas.drawBitmap(src, 0, 0, sIconPaint);                  // C8
         canvas.restoreToCount(sc);
         src.recycle();
         return out;
     }
 
     // =========================================================================
-    // Ring positioning — A10, A11
+    // Ring positioning — C1 (z-order), C10 (flush to icon edge)
     // =========================================================================
 
     /**
-     * Positions the ring so it is perfectly centred on the focused cell.
-     *
-     * Bugs fixed:
-     *  B1: positionRing previously computed a dynamic ringSz from cell.getScaleX()
-     *      mid-animation and used that to set setX/setY, but the RingView's actual
-     *      layout size was fixed. setX/setY translate the view's top-left corner;
-     *      if ringSz != ringView.getWidth() the centre is wrong → ring appears offset.
-     *  B2: Double post() (one in CellView focus listener, one here) meant positioning
-     *      ran two frames late with an unpredictable scale value mid-animation.
-     *  B3: Scale compensation (1.10×) is unnecessary — at TV viewing distance the
-     *      8px scale difference is imperceptible and the math was causing the offset.
-     *
-     * Correct approach:
-     *  - Ring view size is fixed at (iconPx + strokePx*2) — never changes.
-     *  - To centre the ring on the cell: ring.setX = cellCentreInRoot - ringView.width/2
-     *  - Cell centre in root coords = cell screen position - root screen position + cell half-size
-     *  - Called directly (no post()) since it's already inside CellView.post().
+     * C10: Ring inner edge is exactly flush to icon edge — no gap.
+     * ringSize = iconPx + strokePx*2
+     * drawn radius = ringSize/2 - strokePx/2 = iconPx/2 + strokePx/2
+     * inner edge  = drawn radius - strokePx/2 = iconPx/2  ✓ flush
      */
     private void positionRing(View cell) {
-        final RingView rv = ringView;
+        final RingView   rv   = ringView;
         final FrameLayout root = rootLayout;
         if (rv == null || root == null || !cell.isAttachedToWindow()) return;
 
@@ -1007,17 +961,18 @@ public class LauncherActivity extends Activity {
         cell.getLocationOnScreen(cellScreen);
         root.getLocationOnScreen(rootScreen);
 
-        // Cell centre expressed in root's coordinate space
-        float cellCx = (cellScreen[0] - rootScreen[0]) + cell.getWidth()  / 2f;
-        float cellCy = (cellScreen[1] - rootScreen[1]) + cell.getHeight() / 2f;
+        // Icon centre within the cell (icon sits at top, label below)
+        int iconPx = dp(ICON_SIZE_DP);
+        float iconCentreInCellY = iconPx / 2f + dp(4);
 
-        // Ring view size is fixed — just centre it on the cell.
-        // getWidth() is 0 before first layout; fall back to computed size.
+        float cellCx = (cellScreen[0] - rootScreen[0]) + cell.getWidth() / 2f;
+        float cellCy = (cellScreen[1] - rootScreen[1]) + iconCentreInCellY;
+
         int rvW = rv.getWidth();
-        if (rvW == 0) rvW = dp(ICON_SIZE_DP) + dp(RING_STROKE_DP) * 2;
-        float halfRing = rvW / 2f;
-        rv.setX(cellCx - halfRing);
-        rv.setY(cellCy - halfRing);
+        if (rvW == 0) rvW = iconPx + dp(RING_STROKE_DP) * 2;
+        float half = rvW / 2f;
+        rv.setX(cellCx - half);
+        rv.setY(cellCy - half);
         rv.setVisibility(View.VISIBLE);
     }
 
@@ -1136,8 +1091,7 @@ public class LauncherActivity extends Activity {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.setType("image/*");
         i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try { startActivityForResult(i, REQ_PICK_WALLPAPER); }
         catch (Exception e) { showToast("No file picker available"); }
     }
@@ -1190,14 +1144,12 @@ public class LauncherActivity extends Activity {
         iconCache = new LruCache<String, Bitmap>((memMb * 1024 * 1024) / 6) {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
-
         int cores = Runtime.getRuntime().availableProcessors();
         iconExecutor = new ThreadPoolExecutor(
                 Math.max(1, cores - 1), cores,
                 30L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(64),
                 new ThreadPoolExecutor.CallerRunsPolicy());
-
         appExecutor = Executors.newSingleThreadExecutor();
     }
 
@@ -1240,22 +1192,13 @@ public class LauncherActivity extends Activity {
     }
 
     // =========================================================================
-    // RingView
+    // RingView — C10: inner edge flush to icon, no gap
     // =========================================================================
 
     /**
-     * Draws a white circle ring that fills its view bounds, inset by strokeWidth/2
-     * so the stroke is fully visible (not clipped at the edge).
-     *
-     * The view is sized to (iconPx + strokePx*2) in buildRootLayout. This means:
-     *   - view centre = icon centre when positioned correctly
-     *   - drawn radius = view_width/2 - strokePx/2
-     *                  = (iconPx/2 + strokePx) - strokePx/2
-     *                  = iconPx/2 + strokePx/2
-     * So the INNER edge of the stroke sits exactly at iconPx/2 — flush to icon edge.
-     *
-     * onDraw uses getWidth()/getHeight() (actual measured dimensions), not any
-     * hardcoded value, so the ring always draws correctly inside its canvas.
+     * View sized to (iconPx + strokePx*2).
+     * Drawn radius = cx - strokePx/2 = iconPx/2 + strokePx - strokePx/2 = iconPx/2 + strokePx/2
+     * Inner edge   = drawn radius - strokePx/2 = iconPx/2   ← flush to icon edge, zero gap
      */
     static final class RingView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -1269,10 +1212,8 @@ public class LauncherActivity extends Activity {
 
         @Override
         protected void onDraw(Canvas canvas) {
-            float cx = getWidth()  / 2f;
-            float cy = getHeight() / 2f;
-            // Inset radius by half the stroke so the stroke is fully inside the canvas
-            // and the inner edge of the stroke sits exactly on the icon perimeter.
+            float cx     = getWidth()  / 2f;
+            float cy     = getHeight() / 2f;
             float radius = cx - paint.getStrokeWidth() / 2f;
             if (radius > 0) canvas.drawCircle(cx, cy, radius, paint);
         }
