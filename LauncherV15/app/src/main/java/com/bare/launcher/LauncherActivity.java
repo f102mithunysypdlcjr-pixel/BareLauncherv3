@@ -7,7 +7,6 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -95,9 +94,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *  C6  AppInfo missing label: apps were sorted by packageName (com.xxx order),
  *      not visible display name. Added label field; sorted alphabetically by label.
  *
- *  C7  CellView missing app name label: icons shown with no text. Added a
- *      label drawn below the icon inside onDraw using a cached labelPaint.
- *      No extra View allocation — drawn directly on the cell canvas.
+ *  C7  LABELS REMOVED: per user request — icons only, no text below icons.
  *
  *  C8  new Paint() per icon in processIcon/clipToCircle: 3 Paint objects
  *      allocated per icon decode (bgPaint, maskPaint, iconPaint). Changed to
@@ -115,7 +112,7 @@ public class LauncherActivity extends Activity {
     // ── Constants ─────────────────────────────────────────────────────────────
     private static final int    ICON_SIZE_DP   = 80;
     private static final int    CELL_W_DP      = 96;   // icon 80 + 8dp each side
-    private static final int    CELL_H_DP      = 104;  // icon + label + gap
+    private static final int    CELL_H_DP      = 92;   // icon only — no label
     private static final int    RING_STROKE_DP = 4;    // thick enough for TV distance
     private static final long   CLOCK_MS       = 1_000L;
     private static final String PREFS          = "bare_launcher";
@@ -123,8 +120,10 @@ public class LauncherActivity extends Activity {
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
 
-    // C8: static cached Paints for icon processing — never allocated per-icon
-    private static final Paint sCirclePaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    // C8: static cached Paints for icon processing — sMaskPaint and sIconPaint are
+    // READ-ONLY after static init (color/xfermode never changed) → thread-safe.
+    // sCirclePaint was removed: it had setColor/setStyle called per-icon on the
+    // multi-thread iconExecutor → data race. Replaced with a local Paint per call.
     private static final Paint sMaskPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint sIconPaint    = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     static {
@@ -133,7 +132,6 @@ public class LauncherActivity extends Activity {
     }
 
     private static final Typeface TF_CLOCK    = Typeface.create("sans-serif", Typeface.BOLD);
-    private static final Typeface TF_LABEL    = Typeface.create("sans-serif-condensed", Typeface.NORMAL);
 
     // ── Cached metrics ────────────────────────────────────────────────────────
     private float density;
@@ -469,7 +467,9 @@ public class LauncherActivity extends Activity {
 
         void requestFocusOnIndex(int idx) {
             if (appList.isEmpty()) return;
-            idx = Math.max(0, Math.min(idx, appList.size() - 1));
+            int size = appList.size();
+            // Cyclic: left from first → last, right from last → first
+            idx = ((idx % size) + size) % size;
             focusedIndex = idx;
             ensureVisible(idx);
             CellView cv = attached.get(idx);
@@ -605,11 +605,10 @@ public class LauncherActivity extends Activity {
             private AppInfo boundApp;
             int             boundIndex;
 
-            // C7: label paint for drawing app name below icon
+            // C7 removed: user requested icons only — no labels drawn
             private final Paint bitmapPaint     = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
             private final Paint placeholderFill = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Paint placeholderRing = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint labelPaint      = new Paint(Paint.ANTI_ALIAS_FLAG);
 
             CellView(Context ctx) {
                 super(ctx);
@@ -624,12 +623,6 @@ public class LauncherActivity extends Activity {
                 placeholderRing.setStyle(Paint.Style.STROKE);
                 placeholderRing.setColor(0x55FFFFFF);
                 placeholderRing.setStrokeWidth(dp(1));
-
-                // C7: label drawn inside onDraw — no extra View
-                labelPaint.setColor(0xEEFFFFFF);
-                labelPaint.setTextSize(dp(10));
-                labelPaint.setTextAlign(Paint.Align.CENTER);
-                labelPaint.setTypeface(TF_LABEL);
 
                 setOnClickListener(v -> { if (boundApp != null) launchApp(boundApp); });
 
@@ -687,21 +680,6 @@ public class LauncherActivity extends Activity {
                     float r = iconPx / 2f - dp(2);
                     canvas.drawCircle(cx, iconCy, r, placeholderFill);
                     canvas.drawCircle(cx, iconCy, r - dp(1) / 2f, placeholderRing);
-                }
-
-                // C7: draw label below icon
-                if (boundApp != null) {
-                    float labelY = iconCy + iconPx / 2f + dp(6) + dp(10); // below icon + gap + text height
-                    String lbl   = boundApp.label;
-                    // Truncate if too wide
-                    float maxW = w - dp(4);
-                    if (labelPaint.measureText(lbl) > maxW) {
-                        while (lbl.length() > 1 && labelPaint.measureText(lbl + "…") > maxW) {
-                            lbl = lbl.substring(0, lbl.length() - 1);
-                        }
-                        lbl = lbl + "…";
-                    }
-                    canvas.drawText(lbl, cx, labelY, labelPaint);
                 }
             }
 
@@ -866,14 +844,17 @@ public class LauncherActivity extends Activity {
         if (fillColour != 0) {
             // C4: alpha 200 = semi-transparent background (not fully opaque)
             int fadedColour = (fillColour & 0x00FFFFFF) | (200 << 24);
-            sCirclePaint.setColor(fadedColour);
-            sCirclePaint.setStyle(Paint.Style.FILL);
-            canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sCirclePaint);
+            // Local Paint per call — sCirclePaint was a shared static which caused a
+            // thread race when iconExecutor ran multiple threads simultaneously.
+            Paint circlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            circlePaint.setColor(fadedColour);
+            circlePaint.setStyle(Paint.Style.FILL);
+            canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, circlePaint);
         }
 
-        // Draw icon content centred
-        canvas.drawBitmap(content, inset, inset,
-                new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
+        // Draw icon content centred — reuse existing static paint (no xfermode here)
+        Paint drawPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+        canvas.drawBitmap(content, inset, inset, drawPaint);
         content.recycle();
 
         // Circle clip with saveLayer for correct alpha compositing
@@ -1025,7 +1006,7 @@ public class LauncherActivity extends Activity {
             systemWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
                 final ImageView wv = wallpaperView;
-                if (fb != null && wv != null) { wv.setImageBitmap(fb); wv.invalidate(); }
+                if (fb != null && wv != null) { wv.setImageBitmap(fb); }
             });
         });
     }
@@ -1057,7 +1038,6 @@ public class LauncherActivity extends Activity {
                 final ImageView wv = wallpaperView;
                 if (fb != null && wv != null) {
                     wv.setImageBitmap(fb);
-                    wv.invalidate();
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                             .putString(KEY_WP_URI, uri.toString()).apply();
                 } else {
