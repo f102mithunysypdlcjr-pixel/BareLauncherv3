@@ -110,9 +110,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class LauncherActivity extends Activity {
 
     // ── Constants ─────────────────────────────────────────────────────────────
-    private static final int    ICON_SIZE_DP   = 56;
-    private static final int    CELL_W_DP      = 72;   // icon 80 + 8dp each side
-    private static final int    CELL_H_DP      = 68;   // icon only — no label
+    private static final int    ICON_SIZE_DP   = 68;
+    private static final int    CELL_W_DP      = 84;   // icon 80 + 8dp each side
+    private static final int    CELL_H_DP      = 80;   // icon only — no label
     private static final int    RING_STROKE_DP = 4;    // thick enough for TV distance
     private static final long   CLOCK_MS       = 1_000L;
     private static final String PREFS          = "bare_launcher";
