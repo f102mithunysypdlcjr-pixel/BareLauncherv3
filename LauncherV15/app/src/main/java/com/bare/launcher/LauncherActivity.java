@@ -1,6 +1,7 @@
 package com.bare.launcher;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.WallpaperManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -8,9 +9,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -30,14 +31,17 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.DisplayMetrics;
 import android.util.LruCache;
+import android.util.SparseArray;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -51,7 +55,6 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Calendar;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -62,54 +65,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * BareLauncher v6 — world's leanest Android TV 14 launcher.
- * Zero dependencies. Single file. Pure Android SDK.
- *
- * Fix log (v5 -> v6):
- *
- *  B1  drawPaint allocated as new Paint() per icon inside processIcon() on the
- *      thread pool. Now a static final cached instance (sBitmapDrawPaint).
- *
- *  B2  Wallpaper loaded on iconExecutor — large JPEG decode stole threads,
- *      blocking icon loads. Now a dedicated single-thread wpExecutor.
- *
- *  B3  CellView had 3 instance Paint fields. With 50 apps = 150 Paint objects.
- *      Now static finals shared across all cells.
- *
- *  B4  onLayout() called post(fillVisible) on every layout pass including
- *      scroll repositioning. Replaced with changed-only guard.
- *
- *  B5  onResume() did not restore focus to last focused icon. After returning
- *      from an app the TV remote lost its position. Fixed.
- *
- *  P1  Bitmap.createScaledBitmap() allocated an intermediate bitmap per icon.
- *      Now scaled directly onto the output canvas with a Matrix — one fewer
- *      allocation per icon.
- *
- *  P2  detectFillColour() called getPixel() per sample — each call crosses JNI.
- *      Now uses copyPixelsToBuffer() for a single bulk JNI read.
- *
- *  P3  iconExecutor used CallerRunsPolicy — ran icon work on UI thread when
- *      queue was full. Changed to DiscardOldestPolicy.
- *
- *  P4  iconCache sized at memMb/6 — up to 42MB on 256MB devices.
- *      Now min(memMb/8, 16) MB — enough for icons, leaves RAM for apps.
- *
- *  R1  queryIntentActivities(intent, 0) raw-int flag deprecated on API 33+.
- *      Now uses PackageManager.ResolveInfoFlags.of(0) on API 33+.
- *
- *  R2  onBackPressed() deprecated API 33+.
- *      Now registers OnBackInvokedCallback on API 33+ with legacy fallback.
- *
- *  R3  Wallpaper URI saved to prefs before verifying ContentResolver grant.
- *      Now saves URI only after bitmap loaded successfully, and aborts if
- *      takePersistableUriPermission() throws SecurityException.
- */
 public class LauncherActivity extends Activity {
 
-    // -- Constants -------------------------------------------------------------
-    private static final int    ICON_SIZE_DP   = 68;
+    private static final int    ICON_DP        = 68;
     private static final int    CELL_W_DP      = 84;
     private static final int    CELL_H_DP      = 80;
     private static final int    RING_STROKE_DP = 5;
@@ -120,94 +78,87 @@ public class LauncherActivity extends Activity {
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
 
-    // Fix 2: cached Paint for the fill-circle behind transparent icons.
-    // Style and flags never change; only setColor() is called per use.
-    // Not static because setColor() mutates state — but created once here
-    // rather than inside the hot path of processIcon() on the thread pool.
-    private final Paint sFillCirclePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    {
-        sFillCirclePaint.setStyle(Paint.Style.FILL);
-    }
-    // sMaskPaint        : white fill circle for alpha mask
-    // sIconPaint        : SRC_IN xfermode punches bitmap through mask
-    // sBitmapDrawPaint  : plain FILTER_BITMAP for content bitmaps   [B1]
-    // sCellBitmapPaint  : FILTER_BITMAP for icon in CellView.onDraw [B3]
-    // sCellPhFill/Ring  : placeholder circle while icon loads        [B3]
-    private static final Paint sMaskPaint       = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private static final Paint sIconPaint       = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private static final Paint sBitmapDrawPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-    private static final Paint sCellBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private static final Paint sCellPhFill      = new Paint(Paint.ANTI_ALIAS_FLAG);
-    // sCellPhRing is intentionally NOT static: its strokeWidth depends on runtime
-    // density, which is unknown at class-load time. Mutating a static Paint from
-    // initCaches() is a thread-safety violation if two Activity instances exist
-    // simultaneously. Each CellView creates its own instance in its constructor.
+    private static final ThreadLocal<Paint> sFillPaintTL = new ThreadLocal<Paint>() {
+        @Override protected Paint initialValue() {
+            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+            p.setStyle(Paint.Style.FILL);
+            return p;
+        }
+    };
+    private static final ThreadLocal<byte[]> sPixelBufTL = new ThreadLocal<>();
+    private static final ThreadLocal<Matrix> sMatrixTL   = new ThreadLocal<Matrix>() {
+        @Override protected Matrix initialValue() { return new Matrix(); }
+    };
+
+    private static final Paint sMaskPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final Paint sSrcInPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private static final Paint sDrawPaint  = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+    private static final Paint sCellPaint  = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private static final Paint sPhFill     = new Paint(Paint.ANTI_ALIAS_FLAG);
+
     static {
         sMaskPaint.setColor(Color.WHITE);
-        sIconPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
-        sCellPhFill.setStyle(Paint.Style.FILL);
-        sCellPhFill.setColor(0x33FFFFFF);
+        sSrcInPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
+        sPhFill.setStyle(Paint.Style.FILL);
+        sPhFill.setColor(0x33FFFFFF);
     }
 
     private static final Typeface TF_CLOCK = Typeface.create("sans-serif", Typeface.BOLD);
 
-    // -- Cached metrics --------------------------------------------------------
-    private float density;
-    private int   screenW, screenH;
-
-    // -- State -----------------------------------------------------------------
+    private volatile float      density;
+    private          int        screenW, screenH;
     private volatile boolean    destroyed       = false;
     private final AtomicBoolean systemWpLoading = new AtomicBoolean(false);
     private final AtomicBoolean userWpLoading   = new AtomicBoolean(false);
     private final AtomicBoolean appsLoading     = new AtomicBoolean(false);
+    private volatile String     lastAppSig      = "";
 
-    // -- PackageManager --------------------------------------------------------
     private PackageManager pm;
-
-    // -- UI refs ---------------------------------------------------------------
     private RecyclingShelfView shelf;
     private ImageView          wallpaperView;
     private TextView           clockView;
     private TextView           wpBtn;
     private RingView           ringView;
-    private FrameLayout        rootLayout;
+    private FrameLayout        root;
+    private Toast              currentToast;
 
-    // -- Toast -----------------------------------------------------------------
-    private Toast currentToast;
-
-    // -- Clock -----------------------------------------------------------------
-    private final Handler       clockHandler = new Handler(Looper.getMainLooper());
-    private       boolean       clockRunning = false;
+    private final Handler          clockHandler = new Handler(Looper.getMainLooper());
+    private       boolean          clockRunning = false;
     private       SimpleDateFormat sdfTime;
-    private final Calendar      tickCal  = Calendar.getInstance();
-    private final StringBuilder clockSb  = new StringBuilder(16);
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
             if (destroyed || !clockRunning) return;
-            tickClock();
+            TextView cv = clockView;
+            if (cv != null) cv.setText(sdfTime.format(System.currentTimeMillis()));
             long now = System.currentTimeMillis();
             clockHandler.postDelayed(this, CLOCK_MS - (now % CLOCK_MS));
         }
     };
 
-    // -- Executors -------------------------------------------------------------
-    // B2: wpExecutor is dedicated for wallpaper; previously shared iconExecutor
-    //     so a large JPEG decode could starve icon loads.
     private ThreadPoolExecutor iconExecutor;
     private ExecutorService    wpExecutor;
     private ExecutorService    appExecutor;
-
-    // -- Icon cache ------------------------------------------------------------
     private LruCache<String, Bitmap> iconCache;
 
-    // -- App list --------------------------------------------------------------
+    private final ArrayMap<String, List<RecyclingShelfView.CellView>> iconInflight = new ArrayMap<>();
     private final List<AppInfo> appList = new ArrayList<>();
 
-    // -- Package receiver ------------------------------------------------------
+    private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final Runnable pkgReloadRunnable = this::loadApps;
+
     private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
+            String action = intent.getAction();
+            if (Intent.ACTION_PACKAGE_REPLACED.equals(action) || Intent.ACTION_PACKAGE_CHANGED.equals(action)) {
+                Uri data = intent.getData();
+                if (data != null) {
+                    String pkg = data.getSchemeSpecificPart();
+                    if (iconCache != null) iconCache.remove(pkg);
+                    iconInflight.remove(pkg);
+                    lastAppSig = "";
+                }
+            }
             RecyclingShelfView s = shelf;
             if (s == null) return;
             s.removeCallbacks(pkgReloadRunnable);
@@ -215,60 +166,46 @@ public class LauncherActivity extends Activity {
         }
     };
 
-    // -- App model -------------------------------------------------------------
     static final class AppInfo {
         final String        packageName;
-        final String        label;
         final ComponentName component;
-        AppInfo(String pkg, String lbl, ComponentName cmp) {
-            packageName = pkg; label = lbl; component = cmp;
+        final ResolveInfo   ri;
+        AppInfo(String pkg, ComponentName cmp, ResolveInfo r) {
+            packageName = pkg; component = cmp; ri = r;
         }
     }
-
-    // =========================================================================
-    // Lifecycle
-    // =========================================================================
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-
         DisplayMetrics dm = getResources().getDisplayMetrics();
-        density = dm.density;
-        screenW = dm.widthPixels;
-        screenH = dm.heightPixels;
-
+        density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels;
         pm = getPackageManager();
-
         sdfTime = new SimpleDateFormat(
                 getSharedPreferences(PREFS, MODE_PRIVATE).getString("clockFmt", "h:mm a"),
                 Locale.getDefault());
-
         initCaches();
-        setContentView(buildRootLayout());
+        setContentView(buildLayout());
         hideSystemUI();
         loadWallpaper();
         loadApps();
-        registerPackageReceiver();
-        registerBackHandler();
+        registerPkgReceiver();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, () -> {});
+        }
     }
-
-    // Fix 1: held so onPause can remove it before layout fires, preventing
-    // a leak where the listener keeps shelf → Activity alive after destroy.
-    private android.view.ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
 
     @Override
     protected void onResume() {
         super.onResume();
         hideSystemUI();
         startClock();
-        // Restore focus after returning from an app. OnGlobalLayoutListener
-        // guarantees shelf.getWidth() > 0 when the callback fires, so
-        // ensureVisible() scroll math is always correct.
+        loadApps();
         RecyclingShelfView s = shelf;
         if (s != null) {
-            focusRestoreListener = new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+            focusRestoreListener = new ViewTreeObserver.OnGlobalLayoutListener() {
                 @Override public void onGlobalLayout() {
                     s.getViewTreeObserver().removeOnGlobalLayoutListener(this);
                     focusRestoreListener = null;
@@ -283,8 +220,6 @@ public class LauncherActivity extends Activity {
     protected void onPause() {
         super.onPause();
         stopClock();
-        // Fix 1: remove listener if it hasn't fired — prevents a leak when
-        // the Activity is destroyed before the next layout pass completes.
         RecyclingShelfView s = shelf;
         if (s != null && focusRestoreListener != null) {
             s.getViewTreeObserver().removeOnGlobalLayoutListener(focusRestoreListener);
@@ -297,17 +232,15 @@ public class LauncherActivity extends Activity {
         destroyed = true;
         stopClock();
         clockHandler.removeCallbacksAndMessages(null);
-        unregisterPackageReceiver();
-        shutdownExecutor(iconExecutor);
-        shutdownExecutor(wpExecutor);
-        shutdownExecutor(appExecutor);
+        unregisterPkgReceiver();
+        shutdown(iconExecutor); shutdown(wpExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
-        wallpaperView = null; clockView = null;
-        shelf = null; wpBtn = null; ringView = null; rootLayout = null;
+        iconInflight.clear();
+        wallpaperView = null; clockView = null; shelf = null; wpBtn = null; ringView = null; root = null;
         super.onDestroy();
     }
 
-    private void shutdownExecutor(ExecutorService ex) {
+    private void shutdown(ExecutorService ex) {
         if (ex == null) return;
         ex.shutdown();
         try { ex.awaitTermination(400, TimeUnit.MILLISECONDS); }
@@ -319,60 +252,45 @@ public class LauncherActivity extends Activity {
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         if (iconCache == null) return;
-        if      (level >= TRIM_MEMORY_COMPLETE)   iconCache.evictAll();
-        else if (level >= TRIM_MEMORY_MODERATE)   iconCache.trimToSize(iconCache.maxSize() / 2);
-        else if (level >= TRIM_MEMORY_BACKGROUND) iconCache.trimToSize(iconCache.maxSize() * 3 / 4);
+        if      (level >= TRIM_MEMORY_COMPLETE)   { iconCache.evictAll(); iconInflight.clear(); }
+        else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); iconInflight.clear(); }
+        else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); iconInflight.clear(); }
     }
 
-    @Override public void onWindowFocusChanged(boolean h) {
-        super.onWindowFocusChanged(h);
-        if (h) hideSystemUI();
-    }
-
-    // R2: register modern back handler on API 33+; legacy onBackPressed handles older.
-    @SuppressWarnings("deprecation")
-    private void registerBackHandler() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                    () -> { /* launcher: swallow back */ });
-        }
-    }
+    @Override public void onWindowFocusChanged(boolean h) { super.onWindowFocusChanged(h); if (h) hideSystemUI(); }
+    @Override @SuppressWarnings("deprecation") public void onBackPressed() {}
 
     @Override
-    @SuppressWarnings("deprecation")
-    public void onBackPressed() { /* launcher: swallow back — never exit */ }
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        sdfTime = new SimpleDateFormat(
+                getSharedPreferences(PREFS, MODE_PRIVATE).getString("clockFmt", "h:mm a"),
+                Locale.getDefault());
+        TextView cv = clockView;
+        if (cv != null) cv.setText(sdfTime.format(System.currentTimeMillis()));
+    }
 
-    // =========================================================================
-    // Layout
-    // =========================================================================
+    private View buildLayout() {
+        root = new FrameLayout(this);
+        root.setLayoutParams(new ViewGroup.LayoutParams(MATCH, MATCH));
+        root.setBackgroundColor(Color.BLACK);
 
-    private View buildRootLayout() {
-        rootLayout = new FrameLayout(this);
-        rootLayout.setLayoutParams(new ViewGroup.LayoutParams(MATCH, MATCH));
-        rootLayout.setBackgroundColor(Color.BLACK);
-
-        // Layer 1: Wallpaper
         wallpaperView = new ImageView(this);
         wallpaperView.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
         wallpaperView.setScaleType(ImageView.ScaleType.CENTER_CROP);
         wallpaperView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        rootLayout.addView(wallpaperView);
+        root.addView(wallpaperView);
 
-        // Layer 2: Shelf
         shelf = new RecyclingShelfView(this);
-        FrameLayout.LayoutParams shelfLp =
-                new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP) + dp(8));
+        FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
         shelfLp.gravity = android.view.Gravity.BOTTOM;
         shelfLp.setMargins(0, 0, 0, dp(28));
         shelf.setLayoutParams(shelfLp);
-        rootLayout.addView(shelf);
+        root.addView(shelf);
 
-        // Layer 3: Clock pill — top-left
         clockView = new TextView(this);
         GradientDrawable clockBg = new GradientDrawable();
-        clockBg.setColor(0x88000000);
-        clockBg.setCornerRadius(dp(10));
+        clockBg.setColor(0x88000000); clockBg.setCornerRadius(dp(10));
         clockView.setBackground(clockBg);
         clockView.setPadding(dp(16), dp(8), dp(16), dp(8));
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
@@ -383,703 +301,551 @@ public class LauncherActivity extends Activity {
         clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 26);
         clockView.setTypeface(TF_CLOCK);
         clockView.setLetterSpacing(0.03f);
-        rootLayout.addView(clockView);
+        root.addView(clockView);
 
-        // Layer 4: Wallpaper picker button — top-right
         wpBtn = new TextView(this) {
-            private final Paint wpPaint;
-            private final Path  mtPath = new Path();
-            private int lastW = 0, lastH = 0;
-            {
-                wpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                wpPaint.setColor(0xCCFFFFFF);
-                wpPaint.setStyle(Paint.Style.STROKE);
-                wpPaint.setStrokeCap(Paint.Cap.ROUND);
-                wpPaint.setStrokeJoin(Paint.Join.ROUND);
-            }
-            @Override protected void onDraw(Canvas canvas) {
+            private final Paint p;
+            private final Path  mt = new Path();
+            private int lw = 0, lh = 0;
+            { p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              p.setColor(0xCCFFFFFF); p.setStyle(Paint.Style.STROKE);
+              p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND); }
+            @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                float s  = Math.min(w, h) * 0.80f;
-                float cx = w / 2f, cy = h / 2f;
-                wpPaint.setStrokeWidth(s * 0.10f);
-                if (w != lastW || h != lastH) {
-                    lastW = w; lastH = h;
-                    float l = cx - s/2f, r = cx + s/2f;
-                    float t = cy - s/2f, b = cy + s/2f;
-                    mtPath.rewind();
-                    mtPath.moveTo(l, b);
-                    mtPath.lineTo(l + s*0.40f, t + s*0.50f);
-                    mtPath.lineTo(l + s*0.60f, t + s*0.68f);
-                    mtPath.lineTo(r, b);
-                }
-                canvas.drawCircle(cx, cy, s / 2f, wpPaint);
-                canvas.drawCircle(cx + s*0.17f, cy - s/2f + s*0.23f, s*0.12f, wpPaint);
-                canvas.drawPath(mtPath, wpPaint);
+                float s = Math.min(w,h)*0.80f, cx=w/2f, cy=h/2f;
+                p.setStrokeWidth(s*0.10f);
+                if (w != lw || h != lh) { lw=w; lh=h;
+                    float l=cx-s/2f, r=cx+s/2f, t=cy-s/2f, b=cy+s/2f;
+                    mt.rewind(); mt.moveTo(l,b); mt.lineTo(l+s*.40f,t+s*.50f);
+                    mt.lineTo(l+s*.60f,t+s*.68f); mt.lineTo(r,b); }
+                c.drawCircle(cx,cy,s/2f,p);
+                c.drawCircle(cx+s*.17f,cy-s/2f+s*.23f,s*.12f,p);
+                c.drawPath(mt,p);
             }
         };
-        int wpSize = dp(36);
-        wpBtn.setFocusable(true);
-        wpBtn.setFocusableInTouchMode(true);
-        wpBtn.setClickable(true);
+        int wpSz = dp(36);
+        wpBtn.setFocusable(true); wpBtn.setFocusableInTouchMode(true); wpBtn.setClickable(true);
         wpBtn.setAlpha(0.65f);
         wpBtn.setOnClickListener(v -> openStoragePicker());
         wpBtn.setOnFocusChangeListener((v, f) -> v.setAlpha(f ? 1f : 0.65f));
-        wpBtn.setOnKeyListener((v, keyCode, event) -> {
-            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-            RecyclingShelfView s = shelf;
-            if (s == null) return false;
-            switch (keyCode) {
-                case KeyEvent.KEYCODE_DPAD_DOWN:
-                case KeyEvent.KEYCODE_DPAD_RIGHT:
+        wpBtn.setOnKeyListener((v, kc, ev) -> {
+            if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+            RecyclingShelfView s = shelf; if (s == null) return false;
+            switch (kc) {
+                case KeyEvent.KEYCODE_DPAD_DOWN: case KeyEvent.KEYCODE_DPAD_RIGHT:
                     s.requestFocusOnIndex(0); return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
-                    s.requestFocusOnIndex(appList.size() - 1); return true;
+                    if (!appList.isEmpty()) s.requestFocusOnIndex(appList.size()-1); return true;
                 default: return false;
             }
         });
-        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(wpSize, wpSize);
+        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(wpSz, wpSz);
         wpLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
         wpLp.setMargins(0, dp(24), dp(32), 0);
         wpBtn.setLayoutParams(wpLp);
-        rootLayout.addView(wpBtn);
+        root.addView(wpBtn);
 
-        // Layer 5 (topmost): Ring — added LAST so it draws over everything
-        int iconPx   = dp(ICON_SIZE_DP);
-        int strokePx = dp(RING_STROKE_DP);
-        int ringSize = iconPx + strokePx * 2;
+        int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
         ringView = new RingView(this, strokePx);
         ringView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
+        ringView.setLayoutParams(new FrameLayout.LayoutParams(iconPx+strokePx*2, iconPx+strokePx*2));
         ringView.setVisibility(View.INVISIBLE);
-        rootLayout.addView(ringView);
+        root.addView(ringView);
 
-        return rootLayout;
+        return root;
     }
-
-    // =========================================================================
-    // RecyclingShelfView
-    // =========================================================================
 
     final class RecyclingShelfView extends ViewGroup {
 
         private static final int BUFFER = 2;
 
-        private final ArrayList<CellView>                recyclePool = new ArrayList<>(8);
-        private final android.util.SparseArray<CellView> attached    = new android.util.SparseArray<>();
-
+        private final ArrayList<CellView>  pool     = new ArrayList<>(8);
+        private final SparseArray<CellView> attached = new SparseArray<>();
         private final OverScroller scroller;
         private VelocityTracker velTracker;
         private float lastTouchX;
         private int   scrollX = 0;
         private int   totalW  = 0;
-        private final int cellW, cellH, cellM;
-        int focusedIndex = 0; // B5: package-visible; read in onResume
+        private int   centerX = 0;
+        private final int cellW, cellH, stride;
+        int focusedIndex = 0;
 
         RecyclingShelfView(Context ctx) {
             super(ctx);
             scroller = new OverScroller(ctx);
-            cellW    = dp(CELL_W_DP);
-            cellH    = dp(CELL_H_DP);
-            cellM    = dp(10);
+            cellW  = dp(CELL_W_DP);
+            cellH  = dp(CELL_H_DP);
+            stride = cellW + dp(10) * 2;
             setFocusable(false);
             setClipChildren(false);
         }
 
-        @Override
-        protected void onDetachedFromWindow() {
+        @Override protected void onDetachedFromWindow() {
             super.onDetachedFromWindow();
             if (velTracker != null) { velTracker.recycle(); velTracker = null; }
         }
 
-        // B4: only call fillVisible when layout dimensions actually change.
-        //     Previous code called post(fillVisible) unconditionally, including
-        //     during the layout passes triggered by repositionAttached() during
-        //     scrolling, causing redundant icon work mid-scroll.
-        @Override
-        protected void onLayout(boolean changed, int l, int t, int r, int b) {
-            if (changed) post(this::fillVisible);
+        @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            if (changed) fillVisible();
         }
 
-        @Override
-        protected void onMeasure(int wSpec, int hSpec) {
-            setMeasuredDimension(
-                    resolveSize(Math.max(totalW, getSuggestedMinimumWidth()), wSpec),
-                    resolveSize(cellH + dp(8), hSpec));
+        @Override protected void onMeasure(int wSpec, int hSpec) {
+            setMeasuredDimension(resolveSize(Math.max(totalW, getSuggestedMinimumWidth()), wSpec),
+                    resolveSize(cellH, hSpec));
         }
 
         void setApps(List<AppInfo> apps) {
             for (int i = 0; i < attached.size(); i++) {
                 CellView cv = attached.valueAt(i);
-                cv.setVisibility(GONE);
-                recyclePool.add(cv);
+                cv.setVisibility(GONE); pool.add(cv);
             }
             attached.clear();
-            focusedIndex = 0;
-            scrollX = 0;
-            totalW = apps.size() * (cellW + cellM * 2) + dp(48);
+            if (appList.isEmpty()) { focusedIndex = 0; scrollX = 0; }
+            if (!apps.isEmpty()) focusedIndex = Math.min(focusedIndex, apps.size()-1);
+            totalW  = apps.size() * stride;
+            centerX = 0;
             requestLayout();
-            if (!apps.isEmpty()) post(() -> requestFocusOnIndex(0));
+            for (AppInfo app : apps) preWarmIcon(app);
+            if (!apps.isEmpty()) post(() -> requestFocusOnIndex(focusedIndex));
         }
 
         void requestFocusOnIndex(int idx) {
             if (appList.isEmpty()) return;
-            int size = appList.size();
-            idx = ((idx % size) + size) % size;
+            int sz = appList.size();
+            idx = ((idx % sz) + sz) % sz;
             focusedIndex = idx;
             ensureVisible(idx);
             CellView cv = attached.get(idx);
             if (cv != null) cv.requestFocus();
         }
 
-        @Override
-        protected void onSizeChanged(int w, int h, int ow, int oh) {
+        @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
-            post(this::fillVisible);
-        }
-
-        private int stride() { return cellW + cellM * 2; }
-
-        private int centreOffset() {
-            int contentW = appList.size() * stride();
-            int w = getWidth();
-            return (w > 0 && contentW < w) ? (w - contentW) / 2 : dp(24);
-        }
-
-        private int cellLeft(int i) {
-            return centreOffset() + i * stride() + cellM - scrollX;
-        }
-
-        private void fillVisible() {
-            if (getWidth() == 0 || appList.isEmpty()) return;
-            int offset = centreOffset();
-            int stride = stride();
-            int first  = Math.max(0, (scrollX - offset) / stride - BUFFER);
-            int last   = Math.min(appList.size() - 1,
-                    (scrollX + getWidth() - offset) / stride + BUFFER);
-
-            for (int i = attached.size() - 1; i >= 0; i--) {
-                int idx = attached.keyAt(i);
-                if (idx < first || idx > last) {
-                    CellView cv = attached.valueAt(i);
-                    cv.setVisibility(GONE);
-                    recyclePool.add(cv);
-                    attached.removeAt(i);
-                }
-            }
-            for (int i = first; i <= last; i++) {
-                if (attached.get(i) != null) continue;
-                CellView cv = obtainCell();
-                bindCell(cv, i);
-                attached.put(i, cv);
-            }
-        }
-
-        private CellView obtainCell() {
-            if (!recyclePool.isEmpty()) {
-                CellView cv = recyclePool.remove(recyclePool.size() - 1);
-                cv.setVisibility(VISIBLE);
-                return cv;
-            }
-            CellView cv = new CellView(getContext());
-            addView(cv);
-            return cv;
-        }
-
-        private void bindCell(CellView cv, int index) {
-            AppInfo app = appList.get(index);
-            int left    = cellLeft(index);
-            int topOff  = (getMeasuredHeight() - cellH) / 2;
-            cv.bind(app, index);
-            cv.layout(left, topOff, left + cellW, topOff + cellH);
-        }
-
-        private void repositionAttached() {
-            for (int i = 0; i < attached.size(); i++) {
-                int idx     = attached.keyAt(i);
-                CellView cv = attached.valueAt(i);
-                int left    = cellLeft(idx);
-                int topOff  = (getMeasuredHeight() - cellH) / 2;
-                cv.layout(left, topOff, left + cellW, topOff + cellH);
-            }
-        }
-
-        private void doScrollTo(int x) {
-            int maxScroll = Math.max(0, totalW - getWidth());
-            scrollX = Math.max(0, Math.min(x, maxScroll));
+            centerX = (w > 0 && totalW < w) ? (w-totalW)/2 : dp(24);
             repositionAttached();
             fillVisible();
         }
 
-        private void ensureVisible(int idx) {
-            int left  = centreOffset() + idx * stride() + cellM;
-            int right = left + cellW;
-            int pad   = dp(48);
-            if      (left  - pad < scrollX)              doScrollTo(Math.max(0, left - pad));
-            else if (right + pad > scrollX + getWidth()) doScrollTo(right + pad - getWidth());
-        }
+        private int cellLeft(int i) { return centerX + i*stride + dp(10) - scrollX; }
 
-        @Override
-        public void computeScroll() {
-            if (scroller.computeScrollOffset()) {
-                doScrollTo(scroller.getCurrX());
-                postInvalidateOnAnimation();
+        private void fillVisible() {
+            if (getWidth() == 0 || appList.isEmpty()) return;
+            if (centerX == 0) centerX = (totalW < getWidth()) ? (getWidth()-totalW)/2 : dp(24);
+            int first = Math.max(0, (scrollX-centerX)/stride - BUFFER);
+            int last  = Math.min(appList.size()-1, (scrollX+getWidth()-centerX)/stride + BUFFER);
+            for (int i = attached.size()-1; i >= 0; i--) {
+                int idx = attached.keyAt(i);
+                if (idx < first || idx > last) {
+                    CellView cv = attached.valueAt(i);
+                    cv.setVisibility(GONE); pool.add(cv); attached.removeAt(i);
+                }
+            }
+            for (int i = first; i <= last; i++) {
+                if (attached.get(i) != null) continue;
+                CellView cv = obtainCell(); bindCell(cv, i); attached.put(i, cv);
             }
         }
 
-        @Override
-        public boolean onTouchEvent(MotionEvent ev) {
+        private CellView obtainCell() {
+            if (!pool.isEmpty()) { CellView cv = pool.remove(pool.size()-1); cv.setVisibility(VISIBLE); return cv; }
+            CellView cv = new CellView(getContext()); addView(cv); return cv;
+        }
+
+        private void bindCell(CellView cv, int index) {
+            AppInfo app = appList.get(index);
+            int left = cellLeft(index), top = (getMeasuredHeight()-cellH)/2;
+            cv.bind(app, index);
+            cv.layout(left, top, left+cellW, top+cellH);
+        }
+
+        private void repositionAttached() {
+            for (int i = 0; i < attached.size(); i++) {
+                int idx = attached.keyAt(i); CellView cv = attached.valueAt(i);
+                int left = cellLeft(idx), top = (getMeasuredHeight()-cellH)/2;
+                cv.layout(left, top, left+cellW, top+cellH);
+            }
+        }
+
+        private void doScrollTo(int x) {
+            int max = Math.max(0, totalW-getWidth());
+            scrollX = Math.max(0, Math.min(x, max));
+            repositionAttached(); fillVisible();
+        }
+
+        private void ensureVisible(int idx) {
+            int left = centerX + idx*stride + dp(10), right = left+cellW, pad = dp(48);
+            if      (left-pad < scrollX)              doScrollTo(Math.max(0, left-pad));
+            else if (right+pad > scrollX+getWidth())  doScrollTo(right+pad-getWidth());
+        }
+
+        @Override public void computeScroll() {
+            if (scroller.computeScrollOffset()) { doScrollTo(scroller.getCurrX()); postInvalidateOnAnimation(); }
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent ev) {
             if (velTracker == null) velTracker = VelocityTracker.obtain();
             velTracker.addMovement(ev);
             switch (ev.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    scroller.abortAnimation();
-                    lastTouchX = ev.getX();
-                    break;
+                case MotionEvent.ACTION_DOWN: scroller.abortAnimation(); lastTouchX = ev.getX(); break;
                 case MotionEvent.ACTION_MOVE:
-                    float dx = lastTouchX - ev.getX();
-                    lastTouchX = ev.getX();
-                    doScrollTo(scrollX + (int) dx);
-                    break;
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_CANCEL:
+                    float dx = lastTouchX - ev.getX(); lastTouchX = ev.getX(); doScrollTo(scrollX+(int)dx); break;
+                case MotionEvent.ACTION_UP: case MotionEvent.ACTION_CANCEL:
                     velTracker.computeCurrentVelocity(1000);
-                    float vx = -velTracker.getXVelocity();
-                    velTracker.clear();
-                    scroller.fling(scrollX, 0, (int) vx, 0,
-                            0, Math.max(0, totalW - getWidth()), 0, 0);
-                    postInvalidateOnAnimation();
-                    break;
+                    scroller.fling(scrollX, 0, (int)-velTracker.getXVelocity(), 0,
+                            0, Math.max(0, totalW-getWidth()), 0, 0);
+                    velTracker.clear(); postInvalidateOnAnimation(); break;
             }
             return true;
         }
 
-        // -- CellView ----------------------------------------------------------
-
         final class CellView extends View {
 
-            private Bitmap  iconBitmap;
-            private AppInfo boundApp;
-            int             boundIndex;
+            Bitmap  iconBitmap;
+            AppInfo boundApp;
+            int     boundIndex;
 
-            // sCellPhRing is per-instance (not static) because its strokeWidth
-            // is density-dependent and must be set after density is known.
-            private final Paint cellPhRing;
+            private final Paint phRing;
 
             CellView(Context ctx) {
                 super(ctx);
-                cellPhRing = new Paint(Paint.ANTI_ALIAS_FLAG);
-                cellPhRing.setStyle(Paint.Style.STROKE);
-                cellPhRing.setColor(0x55FFFFFF);
-                cellPhRing.setStrokeWidth(dp(1));
-                setFocusable(true);
-                setFocusableInTouchMode(true);
-                setClickable(true);
-                setWillNotDraw(false);
+                phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
+                phRing.setStyle(Paint.Style.STROKE);
+                phRing.setColor(0x55FFFFFF);
+                phRing.setStrokeWidth(dp(1));
+                setFocusable(true); setFocusableInTouchMode(true);
+                setClickable(true); setWillNotDraw(false);
 
                 setOnClickListener(v -> { if (boundApp != null) launchApp(boundApp); });
 
                 setOnFocusChangeListener((v, focused) -> {
                     animate().cancel();
-                    animate()
-                            .scaleX(focused ? 1.10f : 1f)
-                            .scaleY(focused ? 1.10f : 1f)
-                            .setDuration(120).start();
-                    if (focused) {
-                        focusedIndex = boundIndex;
-                        positionRing(this);
-                        ensureVisible(boundIndex);
-                    } else {
-                        RingView rv = ringView;
-                        if (rv != null) rv.setVisibility(View.INVISIBLE);
-                    }
+                    animate().scaleX(focused?1.10f:1f).scaleY(focused?1.10f:1f).setDuration(120).start();
+                    if (focused) { focusedIndex = boundIndex; positionRing(this); ensureVisible(boundIndex); }
+                    else { RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE); }
                 });
 
-                setOnKeyListener((v, keyCode, event) -> {
-                    if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-                    switch (keyCode) {
-                        case KeyEvent.KEYCODE_DPAD_CENTER:
-                        case KeyEvent.KEYCODE_ENTER:
-                        case KeyEvent.KEYCODE_BUTTON_A:
-                            performClick(); return true;
-                        case KeyEvent.KEYCODE_DPAD_LEFT:
-                            requestFocusOnIndex(boundIndex - 1); return true;
-                        case KeyEvent.KEYCODE_DPAD_RIGHT:
-                            requestFocusOnIndex(boundIndex + 1); return true;
-                        case KeyEvent.KEYCODE_DPAD_UP:
-                            TextView b = wpBtn;
-                            if (b != null) b.requestFocus();
-                            return true;
+                setOnKeyListener((v, kc, ev) -> {
+                    if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+                    switch (kc) {
+                        case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
+                        case KeyEvent.KEYCODE_BUTTON_A: performClick(); return true;
+                        case KeyEvent.KEYCODE_DPAD_LEFT:  requestFocusOnIndex(boundIndex-1); return true;
+                        case KeyEvent.KEYCODE_DPAD_RIGHT: requestFocusOnIndex(boundIndex+1); return true;
+                        case KeyEvent.KEYCODE_DPAD_UP: TextView b = wpBtn; if (b!=null) b.requestFocus(); return true;
                         default: return false;
                     }
                 });
             }
 
-            @Override
-            protected void onDraw(Canvas canvas) {
+            @Override protected void onDraw(Canvas canvas) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                int   iconPx = dp(ICON_SIZE_DP);
-                float cx     = w / 2f;
-                float iconCy = iconPx / 2f + dp(4);
+                int iconPx = dp(ICON_DP);
+                float cx = w/2f, cy = h/2f;
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
-                    float half = iconBitmap.getWidth() / 2f;
-                    canvas.drawBitmap(iconBitmap, cx - half, iconCy - half, sCellBitmapPaint);
+                    float half = iconBitmap.getWidth()/2f;
+                    canvas.drawBitmap(iconBitmap, cx-half, cy-half, sCellPaint);
                 } else {
-                    float r = iconPx / 2f - dp(2);
-                    canvas.drawCircle(cx, iconCy, r, sCellPhFill);
-                    canvas.drawCircle(cx, iconCy, r - dp(1) / 2f, cellPhRing);
+                    float r = iconPx/2f - dp(2);
+                    canvas.drawCircle(cx, cy, r, sPhFill);
+                    canvas.drawCircle(cx, cy, r-dp(1)/2f, phRing);
                 }
             }
 
             void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
 
             void bind(AppInfo app, int index) {
-                boundApp   = app;
-                boundIndex = index;
-                iconBitmap = null;
-                invalidate();
-                loadIconAsync(app, this);
+                boundApp = app; boundIndex = index;
+                Bitmap cached = iconCache.get(app.packageName);
+                if (cached != null) { iconBitmap = cached; invalidate(); }
+                else { iconBitmap = null; invalidate(); loadIconAsync(app, this); }
             }
         }
     }
-
-    // =========================================================================
-    // App list
-    // =========================================================================
 
     private void loadApps() {
         if (!appsLoading.compareAndSet(false, true)) return;
-        appExecutor.execute(() -> {
-            List<AppInfo> fresh = queryLaunchableApps();
-            if (!destroyed) {
-                runOnUiThread(() -> {
-                    appsLoading.set(false);
-                    appList.clear();
-                    appList.addAll(fresh);
-                    RecyclingShelfView s = shelf;
-                    if (s != null) s.setApps(appList);
-                });
-            } else {
-                appsLoading.set(false);
-            }
-        });
+        try {
+            appExecutor.execute(() -> {
+                String sig = buildSig();
+                if (sig.equals(lastAppSig) && !appList.isEmpty()) { appsLoading.set(false); return; }
+                List<AppInfo> fresh = queryApps();
+                if (!destroyed) {
+                    runOnUiThread(() -> {
+                        appsLoading.set(false);
+                        lastAppSig = sig;
+                        LruCache<String, Bitmap> cache = iconCache;
+                        if (cache != null) {
+                            ArraySet<String> pkgs = new ArraySet<>(fresh.size());
+                            for (AppInfo a : fresh) pkgs.add(a.packageName);
+                            for (AppInfo old : appList) if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
+                        }
+                        appList.clear(); appList.addAll(fresh);
+                        RecyclingShelfView s = shelf;
+                        if (s != null) s.setApps(appList);
+                    });
+                } else { appsLoading.set(false); }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) { appsLoading.set(false); }
     }
 
-    private List<AppInfo> queryLaunchableApps() {
+    private String buildSig() {
+        try {
+            ArraySet<String> pkgs = new ArraySet<>();
+            Intent tvI  = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+            Intent mobI = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+            List<ResolveInfo> tv, mob;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                PackageManager.ResolveInfoFlags f = PackageManager.ResolveInfoFlags.of(0);
+                tv = pm.queryIntentActivities(tvI, f); mob = pm.queryIntentActivities(mobI, f);
+            } else {
+                //noinspection deprecation
+                tv = pm.queryIntentActivities(tvI, 0);
+                //noinspection deprecation
+                mob = pm.queryIntentActivities(mobI, 0);
+            }
+            for (ResolveInfo r : tv)  if (r.activityInfo != null) pkgs.add(r.activityInfo.packageName);
+            for (ResolveInfo r : mob) if (r.activityInfo != null) pkgs.add(r.activityInfo.packageName);
+            List<String> sorted = new ArrayList<>(pkgs); Collections.sort(sorted);
+            StringBuilder sb = new StringBuilder();
+            for (String p : sorted) sb.append(p).append('|');
+            return sb.toString();
+        } catch (Exception e) { return ""; }
+    }
+
+    private List<AppInfo> queryApps() {
         String self = getPackageName();
         ArraySet<String> seen = new ArraySet<>();
-        List<AppInfo>    out  = new ArrayList<>();
-
-        // R1: use typed ResolveInfoFlags on API 33+ — raw int overload is deprecated
+        List<AppInfo> out = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             PackageManager.ResolveInfoFlags f = PackageManager.ResolveInfoFlags.of(0);
-            addResolved(pm.queryIntentActivities(
-                    new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), f),
-                    self, seen, out);
-            addResolved(pm.queryIntentActivities(
-                    new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), f),
-                    self, seen, out);
+            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), f), self, seen, out);
+            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), f), self, seen, out);
         } else {
             //noinspection deprecation
-            addResolved(pm.queryIntentActivities(
-                    new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0),
-                    self, seen, out);
+            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0), self, seen, out);
             //noinspection deprecation
-            addResolved(pm.queryIntentActivities(
-                    new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0),
-                    self, seen, out);
+            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0), self, seen, out);
         }
-
-        Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label));
+        Collections.sort(out, (a, b) -> a.packageName.compareToIgnoreCase(b.packageName));
         return out;
     }
 
-    private void addResolved(List<ResolveInfo> list, String self,
-                             ArraySet<String> seen, List<AppInfo> out) {
+    private void addApps(List<ResolveInfo> list, String self, ArraySet<String> seen, List<AppInfo> out) {
         for (ResolveInfo ri : list) {
             ActivityInfo ai = ri.activityInfo;
             if (ai == null || ai.packageName.equals(self)) continue;
             if (!seen.add(ai.packageName + '/' + ai.name)) continue;
-            String label = ri.loadLabel(pm).toString();
-            out.add(new AppInfo(ai.packageName, label,
-                    new ComponentName(ai.packageName, ai.name)));
+            out.add(new AppInfo(ai.packageName, new ComponentName(ai.packageName, ai.name), ri));
         }
     }
 
     private void launchApp(AppInfo app) {
         Intent i = pm.getLaunchIntentForPackage(app.packageName);
         if (i != null) {
-            i.setComponent(app.component);
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            try { startActivity(i); return; }
-            catch (Exception ignored) {}
+            i.setComponent(app.component); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try { startActivity(i); return; } catch (Exception ignored) {}
         }
         try {
-            Intent direct = new Intent(Intent.ACTION_MAIN);
-            direct.setComponent(app.component);
-            direct.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(direct);
-        } catch (Exception e) {
-            showToast("App not available");
-        }
+            Intent d = new Intent(Intent.ACTION_MAIN);
+            d.setComponent(app.component); d.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(d);
+        } catch (Exception e) { showToast("App not available"); }
     }
 
-    // =========================================================================
-    // Icon processing
-    // =========================================================================
+    private void preWarmIcon(AppInfo app) {
+        String key = app.packageName;
+        if (iconCache.get(key) != null || iconInflight.containsKey(key)) return;
+        List<RecyclingShelfView.CellView> waiters = new ArrayList<>(0);
+        iconInflight.put(key, waiters);
+        try {
+            iconExecutor.execute(() -> {
+                if (destroyed) return;
+                Bitmap bmp = null;
+                try { bmp = processIcon(app.ri.loadIcon(pm)); if (bmp != null) iconCache.put(key, bmp); }
+                catch (OutOfMemoryError ignored) {}
+                if (destroyed) return;
+                final Bitmap fb = bmp;
+                runOnUiThread(() -> {
+                    if (destroyed) return;
+                    iconInflight.remove(key);
+                    for (RecyclingShelfView.CellView cell : waiters)
+                        if (key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
+                            cell.setIconBitmap(fb);
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
+    }
 
     private void loadIconAsync(AppInfo app, RecyclingShelfView.CellView target) {
         String key = app.packageName;
         Bitmap cached = iconCache.get(key);
         if (cached != null) { target.setIconBitmap(cached); return; }
-
-        iconExecutor.execute(() -> {
-            if (destroyed) return;
-            Bitmap bmp = null;
-            try {
-                ApplicationInfo ai = pm.getApplicationInfo(key, 0);
-                Drawable d = ai.loadIcon(pm);
-                bmp = processIcon(d);
-                if (bmp != null) iconCache.put(key, bmp);
-            } catch (PackageManager.NameNotFoundException | OutOfMemoryError ignored) {}
-
-            // Fix 6: check destroyed again after the slow icon decode.
-            // Between the first check and here, onDestroy() may have run on the
-            // main thread — setting destroyed=true and nulling UI refs.
-            // Re-checking here prevents posting a UI lambda that touches null refs.
-            if (destroyed) return;
-            final Bitmap fb = bmp;
-            runOnUiThread(() -> {
-                // Fix 6: destroyed is volatile; re-check on UI thread because
-                // onDestroy() runs there and nulls shelf between our check above
-                // and this lambda executing.
+        List<RecyclingShelfView.CellView> waiters = iconInflight.get(key);
+        if (waiters != null) { waiters.add(target); return; }
+        waiters = new ArrayList<>(2); waiters.add(target); iconInflight.put(key, waiters);
+        final List<RecyclingShelfView.CellView> fw = waiters;
+        try {
+            iconExecutor.execute(() -> {
                 if (destroyed) return;
-                if (app.packageName.equals(
-                        target.boundApp != null ? target.boundApp.packageName : null)) {
-                    target.setIconBitmap(fb);
-                }
+                Bitmap bmp = null;
+                try { bmp = processIcon(app.ri.loadIcon(pm)); if (bmp != null) iconCache.put(key, bmp); }
+                catch (OutOfMemoryError ignored) {}
+                if (destroyed) return;
+                final Bitmap fb = bmp;
+                runOnUiThread(() -> {
+                    if (destroyed) return;
+                    iconInflight.remove(key);
+                    for (RecyclingShelfView.CellView cell : fw)
+                        if (key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
+                            cell.setIconBitmap(fb);
+                });
             });
-        });
+        } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
     }
 
-    /**
-     * Converts any Drawable to a circle-clipped Bitmap at ICON_SIZE_DP.
-     *
-     * Adaptive icons: draw bg+fg manually, then circle-clip.
-     * Non-adaptive transparent: 82% scale + averaged fill circle behind.
-     * Non-adaptive opaque: 110% scale (slight bleed — clipped to circle).
-     *
-     * P1: scaling uses Matrix drawn onto output canvas, eliminating the
-     *     intermediate Bitmap that createScaledBitmap() produced.
-     */
     private Bitmap processIcon(Drawable d) {
         if (d == null) return null;
-        int sz = dp(ICON_SIZE_DP);
+        int sz = dp(ICON_DP);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                && d instanceof AdaptiveIconDrawable) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && d instanceof AdaptiveIconDrawable) {
             AdaptiveIconDrawable aid = (AdaptiveIconDrawable) d;
-            Bitmap raw = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(raw);
-            if (aid.getBackground() != null) { aid.getBackground().setBounds(0,0,sz,sz); aid.getBackground().draw(c); }
-            if (aid.getForeground() != null) { aid.getForeground().setBounds(0,0,sz,sz); aid.getForeground().draw(c); }
-            return clipToCircle(raw, sz);
+            int bleed = Math.round(sz * 18f / 108f);
+            Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(out);
+            int full = sz + bleed*2;
+            if (aid.getBackground() != null) { aid.getBackground().setBounds(-bleed,-bleed,full-bleed,full-bleed); aid.getBackground().draw(c); }
+            if (aid.getForeground() != null) { aid.getForeground().setBounds(-bleed,-bleed,full-bleed,full-bleed); aid.getForeground().draw(c); }
+            return clipToCircle(out, sz);
         }
 
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
 
-        int     fillColour      = detectFillColour(raw, sz);
-        boolean hasTransparency = (fillColour != 0);
-        float   scale           = hasTransparency ? 0.82f : 1.10f;
-        int     contentSz       = Math.round(sz * scale);
-        int     inset           = (sz - contentSz) / 2;
+        int fillColour = detectFill(raw, sz);
+        float scale = (fillColour != 0) ? 0.82f : 1.10f;
+        int csz = Math.round(sz*scale), inset = (sz-csz)/2;
 
-        Bitmap out    = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
 
         if (fillColour != 0) {
-            int faded = (fillColour & 0x00FFFFFF) | (150 << 24);
-            sFillCirclePaint.setColor(faded); // Fix 2: reuse cached Paint, no allocation
-            canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sFillCirclePaint);
+            Paint fp = sFillPaintTL.get();
+            fp.setColor((fillColour & 0x00FFFFFF) | (150 << 24));
+            canvas.drawCircle(sz/2f, sz/2f, sz/2f, fp);
         }
 
-        // P1: Matrix scale onto canvas — no createScaledBitmap intermediate
-        Matrix mx = new Matrix();
-        float  sf = (float) contentSz / sz;
-        mx.setScale(sf, sf);
+        Matrix mx = sMatrixTL.get();
+        mx.setScale((float)csz/sz, (float)csz/sz);
         mx.postTranslate(inset, inset);
-        canvas.drawBitmap(raw, mx, sBitmapDrawPaint); // B1: static paint
+        canvas.drawBitmap(raw, mx, sDrawPaint);
         raw.recycle();
 
         return clipToCircle(out, sz);
     }
 
-    /** Renders any Drawable to a Bitmap at exactly sz x sz pixels. */
     private Bitmap renderDrawable(Drawable d, int sz) {
         if (d instanceof BitmapDrawable) {
             Bitmap src = ((BitmapDrawable) d).getBitmap();
             if (src != null && !src.isRecycled()) {
-                // P1: Matrix draw instead of createScaledBitmap
                 Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-                Matrix mx  = new Matrix();
-                mx.setScale((float) sz / src.getWidth(), (float) sz / src.getHeight());
-                new Canvas(out).drawBitmap(src, mx, sBitmapDrawPaint);
+                Matrix mx = sMatrixTL.get();
+                mx.setScale((float)sz/src.getWidth(), (float)sz/src.getHeight());
+                new Canvas(out).drawBitmap(src, mx, sDrawPaint);
                 return out;
             }
         }
-        int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : sz;
-        int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : sz;
+        int w = d.getIntrinsicWidth()>0?d.getIntrinsicWidth():sz;
+        int h = d.getIntrinsicHeight()>0?d.getIntrinsicHeight():sz;
         Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        d.setBounds(0, 0, w, h);
-        d.draw(new Canvas(bmp));
+        d.setBounds(0, 0, w, h); d.draw(new Canvas(bmp));
         if (w == sz && h == sz) return bmp;
-        // P1: Matrix scale to final size
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Matrix mx  = new Matrix();
-        mx.setScale((float) sz / w, (float) sz / h);
-        new Canvas(out).drawBitmap(bmp, mx, sBitmapDrawPaint);
-        bmp.recycle();
-        return out;
+        Matrix mx = sMatrixTL.get(); mx.setScale((float)sz/w, (float)sz/h);
+        new Canvas(out).drawBitmap(bmp, mx, sDrawPaint);
+        bmp.recycle(); return out;
     }
 
-    /**
-     * P2: Single bulk JNI read via copyPixelsToBuffer() instead of per-pixel
-     *     getPixel() calls. ARGB_8888 ByteBuffer layout: R,G,B,A per pixel
-     *     in row-major order.
-     *
-     * Returns averaged fill colour (alpha 255) if >40% of sampled pixels are
-     * transparent. Returns 0 if icon is mostly opaque (no fill needed).
-     */
-    private int detectFillColour(Bitmap src, int sz) {
-        // copyPixelsToBuffer writes ARGB_8888 as R,G,B,A bytes on Android (row-major).
-        // We rewind() before reading to guarantee buffer position is at index 0,
-        // regardless of internal ByteBuffer state after the copy.
-        ByteBuffer buf = ByteBuffer.allocate(src.getByteCount());
-        src.copyPixelsToBuffer(buf);
-        buf.rewind(); // Fix 2: guarantee position=0 before array read
-        byte[] px = buf.array();
-
-        int  step = Math.max(1, sz / 6);
-        int  total = 0, transparent = 0, nOpaque = 0;
-        long rSum = 0, gSum = 0, bSum = 0;
-
-        for (int y = step / 2; y < sz; y += step) {
-            for (int x = step / 2; x < sz; x += step) {
-                int base = (y * sz + x) * 4; // ARGB_8888: 4 bytes/pixel, R G B A
-                int r    = px[base    ] & 0xFF;
-                int g    = px[base + 1] & 0xFF;
-                int b    = px[base + 2] & 0xFF;
-                int a    = px[base + 3] & 0xFF;
+    private int detectFill(Bitmap src, int sz) {
+        int needed = src.getByteCount();
+        byte[] px = sPixelBufTL.get();
+        if (px == null || px.length < needed) { px = new byte[needed]; sPixelBufTL.set(px); }
+        ByteBuffer buf = ByteBuffer.wrap(px); buf.rewind(); src.copyPixelsToBuffer(buf);
+        int step=Math.max(1,sz/12), total=0, transparent=0, nOpaque=0;
+        long rSum=0, gSum=0, bSum=0;
+        int q1=sz/4, q3=sz*3/4;
+        for (int y = q1; y < q3; y += step) {
+            for (int x = q1; x < q3; x += step) {
+                int base=(y*sz+x)*4;
+                int r=px[base]&0xFF, g=px[base+1]&0xFF, b=px[base+2]&0xFF, a=px[base+3]&0xFF;
                 if      (a < 30)   transparent++;
-                else if (a >= 128) { rSum += r; gSum += g; bSum += b; nOpaque++; }
+                else if (a >= 128) { rSum+=r; gSum+=g; bSum+=b; nOpaque++; }
                 total++;
             }
         }
-
-        if (total == 0 || (float) transparent / total < 0.40f) return 0;
-        if (nOpaque == 0) return 0xFF555555;
+        if (total==0 || (float)transparent/total < 0.70f) return 0;
+        if (nOpaque==0) return 0xFF555555;
         return Color.argb(255, (int)(rSum/nOpaque), (int)(gSum/nOpaque), (int)(bSum/nOpaque));
     }
 
-    /** Circle-clips src into a new Bitmap. src is recycled. */
     private Bitmap clipToCircle(Bitmap src, int sz) {
         if (src == null) return null;
-        Bitmap out    = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(out);
-        int sc = canvas.saveLayer(0, 0, sz, sz, null);
-        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sMaskPaint);
-        canvas.drawBitmap(src, 0, 0, sIconPaint);
-        canvas.restoreToCount(sc);
-        src.recycle();
-        return out;
+        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out);
+        int sc = c.saveLayer(0, 0, sz, sz, null);
+        c.drawCircle(sz/2f, sz/2f, sz/2f, sMaskPaint);
+        c.drawBitmap(src, 0, 0, sSrcInPaint);
+        c.restoreToCount(sc); src.recycle(); return out;
     }
-
-    // =========================================================================
-    // Ring positioning
-    // =========================================================================
 
     private void positionRing(View cell) {
-        final RingView    rv   = ringView;
-        final FrameLayout root = rootLayout;
-        if (rv == null || root == null || !cell.isAttachedToWindow()) return;
-
-        int[] cellScreen = new int[2];
-        int[] rootScreen = new int[2];
-        cell.getLocationOnScreen(cellScreen);
-        root.getLocationOnScreen(rootScreen);
-
-        int   iconPx           = dp(ICON_SIZE_DP);
-        float iconCentreInCellY = iconPx / 2f + dp(4);
-        float cellCx = (cellScreen[0] - rootScreen[0]) + cell.getWidth() / 2f;
-        float cellCy = (cellScreen[1] - rootScreen[1]) + iconCentreInCellY;
-
-        int rvW = rv.getWidth();
-        if (rvW == 0) rvW = iconPx + dp(RING_STROKE_DP) * 2;
-        float half = rvW / 2f;
-        rv.setX(cellCx - half);
-        rv.setY(cellCy - half);
-        rv.setVisibility(View.VISIBLE);
+        RingView rv = ringView; FrameLayout r = root;
+        if (rv == null || r == null || !cell.isAttachedToWindow()) return;
+        int[] cs = new int[2], rs = new int[2];
+        cell.getLocationOnScreen(cs); r.getLocationOnScreen(rs);
+        float cx = (cs[0]-rs[0]) + cell.getWidth()/2f;
+        float cy = (cs[1]-rs[1]) + cell.getHeight()/2f;
+        int rvW = rv.getWidth(); if (rvW == 0) rvW = dp(ICON_DP) + dp(RING_STROKE_DP)*2;
+        float half = rvW/2f;
+        rv.setX(cx-half); rv.setY(cy-half); rv.setVisibility(View.VISIBLE);
     }
-
-    // =========================================================================
-    // Clock
-    // =========================================================================
 
     private void startClock() {
         if (!clockRunning) {
             clockRunning = true;
-            tickClock();
+            TextView cv = clockView;
+            if (cv != null) cv.setText(sdfTime.format(System.currentTimeMillis()));
             long now = System.currentTimeMillis();
-            clockHandler.postDelayed(clockTick, CLOCK_MS - (now % CLOCK_MS));
+            clockHandler.postDelayed(clockTick, CLOCK_MS-(now%CLOCK_MS));
         }
     }
 
-    private void stopClock() {
-        clockRunning = false;
-        clockHandler.removeCallbacks(clockTick);
-    }
-
-    private void tickClock() {
-        final TextView cv = clockView;
-        if (cv == null) return;
-        tickCal.setTimeInMillis(System.currentTimeMillis());
-        clockSb.setLength(0);
-        clockSb.append(sdfTime.format(tickCal.getTime()));
-        cv.setText(clockSb);
-    }
-
-    // =========================================================================
-    // Wallpaper
-    // =========================================================================
+    private void stopClock() { clockRunning = false; clockHandler.removeCallbacks(clockTick); }
 
     private void loadWallpaper() {
         String uri = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_WP_URI, null);
-        if (uri != null) applyWallpaperFromUri(Uri.parse(uri));
-        else             loadSystemWallpaper();
+        if (uri != null) applyWallpaperFromUri(Uri.parse(uri)); else loadSystemWallpaper();
     }
 
-    // B2: runs on dedicated wpExecutor — no longer competes with icon loads
     private void loadSystemWallpaper() {
         if (!systemWpLoading.compareAndSet(false, true)) return;
         wpExecutor.execute(() -> {
             Bitmap bmp = null;
-            try {
-                Drawable d = WallpaperManager.getInstance(this).getDrawable();
-                if (d != null) bmp = drawableToBitmapFullSize(d);
-            } catch (Exception ignored) {}
-            final Bitmap fb = bmp;
-            systemWpLoading.set(false);
+            try { Drawable d = WallpaperManager.getInstance(this).getDrawable(); if (d != null) bmp = wpDrawable(d); }
+            catch (Exception ignored) {}
+            final Bitmap fb = bmp; systemWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
-                final ImageView wv = wallpaperView;
-                if (fb != null && wv != null) wv.setImageBitmap(fb);
+                ImageView wv = wallpaperView;
+                if (fb != null && wv != null) {
+                    Drawable prev = wv.getDrawable();
+                    if (prev instanceof BitmapDrawable) { Bitmap old = ((BitmapDrawable)prev).getBitmap(); wv.setImageDrawable(null); if (old!=null&&!old.isRecycled()) old.recycle(); }
+                    wv.setImageBitmap(fb);
+                }
             });
         });
     }
 
-    // B2: dedicated wpExecutor
-    // R3: URI persisted only after bitmap successfully loaded
     private void applyWallpaperFromUri(Uri uri) {
         if (!userWpLoading.compareAndSet(false, true)) return;
         wpExecutor.execute(() -> {
@@ -1087,55 +853,37 @@ public class LauncherActivity extends Activity {
             try {
                 BitmapFactory.Options opts = new BitmapFactory.Options();
                 opts.inJustDecodeBounds = true;
-                try (InputStream is = getContentResolver().openInputStream(uri)) {
-                    BitmapFactory.decodeStream(is, null, opts);
-                }
-                if (opts.outWidth <= 0 || opts.outHeight <= 0) {
-                    userWpLoading.set(false); return;
-                }
-                opts.inSampleSize       = calcSampleSize(opts.outWidth, opts.outHeight, screenW, screenH);
-                opts.inJustDecodeBounds = false;
-                opts.inPreferredConfig  = Bitmap.Config.RGB_565;
-                try (InputStream is = getContentResolver().openInputStream(uri)) {
-                    if (is != null) bmp = BitmapFactory.decodeStream(is, null, opts);
-                }
+                try (InputStream is = getContentResolver().openInputStream(uri)) { BitmapFactory.decodeStream(is, null, opts); }
+                if (opts.outWidth <= 0 || opts.outHeight <= 0) { userWpLoading.set(false); return; }
+                opts.inSampleSize = calcSampleSize(opts.outWidth, opts.outHeight);
+                opts.inJustDecodeBounds = false; opts.inPreferredConfig = Bitmap.Config.RGB_565;
+                try (InputStream is = getContentResolver().openInputStream(uri)) { if (is!=null) bmp = BitmapFactory.decodeStream(is, null, opts); }
             } catch (Exception | OutOfMemoryError ignored) { bmp = null; }
-
-            final Bitmap fb = bmp;
-            userWpLoading.set(false);
+            final Bitmap fb = bmp; userWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
-                final ImageView wv = wallpaperView;
+                ImageView wv = wallpaperView;
                 if (fb != null && wv != null) {
+                    Drawable prev = wv.getDrawable();
+                    if (prev instanceof BitmapDrawable) { Bitmap old = ((BitmapDrawable)prev).getBitmap(); wv.setImageDrawable(null); if (old!=null&&!old.isRecycled()) old.recycle(); }
                     wv.setImageBitmap(fb);
-                    // R3: persist URI only after bitmap loaded successfully
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                            .putString(KEY_WP_URI, uri.toString()).apply();
-                } else {
-                    showToast("Could not load wallpaper");
-                    loadSystemWallpaper();
-                }
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_WP_URI, uri.toString()).apply();
+                } else { showToast("Could not load wallpaper"); loadSystemWallpaper(); }
             });
         });
     }
 
-    private Bitmap drawableToBitmapFullSize(Drawable d) {
-        int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : screenW;
-        int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : screenH;
-        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565);
-        d.setBounds(0, 0, w, h);
-        d.draw(new Canvas(bmp));
-        return bmp;
+    private Bitmap wpDrawable(Drawable d) {
+        int w = d.getIntrinsicWidth()>0?d.getIntrinsicWidth():screenW;
+        int h = d.getIntrinsicHeight()>0?d.getIntrinsicHeight():screenH;
+        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        d.setBounds(0, 0, w, h); d.draw(new Canvas(bmp)); return bmp;
     }
 
-    private int calcSampleSize(int srcW, int srcH, int reqW, int reqH) {
+    private int calcSampleSize(int srcW, int srcH) {
         int ss = 1;
-        if (srcH > reqH || srcW > reqW) {
-            int halfH = srcH / 2, halfW = srcW / 2;
-            // Fix 3: use || not && — subsample if EITHER dimension overflows.
-            // With &&, an image exactly matching screen width but taller than
-            // screen height (common for portrait photos) kept ss=1 and decoded
-            // the full bitmap, causing OOM on constrained TV boxes.
-            while ((halfH / ss) > reqH || (halfW / ss) > reqW) ss *= 2;
+        if (srcH > screenH || srcW > screenW) {
+            int hH=srcH/2, hW=srcW/2;
+            while ((hH/ss)>screenH || (hW/ss)>screenW) ss*=2;
         }
         return ss;
     }
@@ -1143,93 +891,49 @@ public class LauncherActivity extends Activity {
     @SuppressWarnings("deprecation")
     private void openStoragePicker() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        i.setType("image/*");
-        i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        try { startActivityForResult(i, REQ_PICK_WP); }
-        catch (Exception e) { showToast("No file picker available"); }
+        i.setType("image/*"); i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try { startActivityForResult(i, REQ_PICK_WP); } catch (Exception e) { showToast("No file picker available"); }
     }
 
-    @Override
-    @SuppressWarnings("deprecation")
+    @Override @SuppressWarnings("deprecation")
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
         if (req == REQ_PICK_WP && res == RESULT_OK && data != null) {
             Uri uri = data.getData();
             if (uri != null) {
-                // R3: take grant first; abort entirely if it fails
-                try {
-                    getContentResolver().takePersistableUriPermission(
-                            uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                } catch (SecurityException e) {
-                    showToast("Could not get permission for this image");
-                    return;
-                }
-                userWpLoading.set(false);
-                applyWallpaperFromUri(uri);
+                try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
+                catch (SecurityException e) { showToast("Could not get permission for this image"); return; }
+                userWpLoading.set(false); applyWallpaperFromUri(uri);
             }
         }
     }
 
-    // =========================================================================
-    // Package receiver
-    // =========================================================================
-
-    private void registerPackageReceiver() {
+    private void registerPkgReceiver() {
         IntentFilter f = new IntentFilter();
-        f.addAction(Intent.ACTION_PACKAGE_ADDED);
-        f.addAction(Intent.ACTION_PACKAGE_REMOVED);
-        f.addAction(Intent.ACTION_PACKAGE_CHANGED);
-        f.addAction(Intent.ACTION_PACKAGE_REPLACED);
+        f.addAction(Intent.ACTION_PACKAGE_ADDED); f.addAction(Intent.ACTION_PACKAGE_REMOVED);
+        f.addAction(Intent.ACTION_PACKAGE_CHANGED); f.addAction(Intent.ACTION_PACKAGE_REPLACED);
         f.addDataScheme("package");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(packageReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(packageReceiver, f);
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerReceiver(packageReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(packageReceiver, f);
     }
 
-    private void unregisterPackageReceiver() {
-        try { unregisterReceiver(packageReceiver); }
-        catch (IllegalArgumentException ignored) {}
+    private void unregisterPkgReceiver() {
+        try { unregisterReceiver(packageReceiver); } catch (IllegalArgumentException ignored) {}
     }
-
-    // =========================================================================
-    // Init
-    // =========================================================================
 
     private void initCaches() {
-        int memMb = ((android.app.ActivityManager)
-                getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
-
-        // P4: cap at min(memMb/8, 16)MB — previous memMb/6 was up to 42MB
-        int cacheMb = Math.min(memMb / 8, 16);
-        iconCache = new LruCache<String, Bitmap>(cacheMb * 1024 * 1024) {
+        int memMb = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
+        int cacheMb = Math.min(memMb/8, 16);
+        iconCache = new LruCache<String, Bitmap>(cacheMb*1024*1024) {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
-
         int cores = Runtime.getRuntime().availableProcessors();
-
-        // Fix 4 (P3): DiscardOldestPolicy drops the head of the queue — which is
-        // the oldest-submitted task, i.e. the FIRST visible icons. That is the
-        // opposite of what we want. We want to discard the NEW incoming task
-        // (for an icon that scrolled into view while the queue is already full)
-        // and let the already-queued visible icons complete.
-        // DiscardPolicy does exactly this: silently drops the new task if full.
-        iconExecutor = new ThreadPoolExecutor(
-                Math.max(1, cores - 1), cores,
-                30L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(64),
-                new ThreadPoolExecutor.DiscardPolicy());
-
-        wpExecutor  = Executors.newSingleThreadExecutor(); // B2
+        iconExecutor = new ThreadPoolExecutor(Math.max(1,cores-1), cores, 30L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardPolicy());
+        wpExecutor  = Executors.newSingleThreadExecutor();
         appExecutor = Executors.newSingleThreadExecutor();
     }
-
-    // =========================================================================
-    // System UI
-    // =========================================================================
 
     @SuppressWarnings("deprecation")
     private void hideSystemUI() {
@@ -1237,27 +941,13 @@ public class LauncherActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             w.setDecorFitsSystemWindows(false);
             WindowInsetsController c = w.getInsetsController();
-            if (c != null) {
-                c.hide(WindowInsets.Type.systemBars());
-                c.setSystemBarsBehavior(
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-            }
+            if (c != null) { c.hide(WindowInsets.Type.systemBars()); c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE); }
         } else {
-            w.getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+            w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         }
     }
 
-    // =========================================================================
-    // Util
-    // =========================================================================
-
-    private int dp(int val) { return Math.round(val * density); }
+    private int dp(int v) { return Math.round(v * density); }
 
     private void showToast(String msg) {
         if (currentToast != null) currentToast.cancel();
@@ -1265,26 +955,18 @@ public class LauncherActivity extends Activity {
         currentToast.show();
     }
 
-    // =========================================================================
-    // RingView
-    // =========================================================================
-
     static final class RingView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
         RingView(Context ctx, int strokePx) {
             super(ctx);
             paint.setStyle(Paint.Style.STROKE);
             paint.setColor(Color.WHITE);
             paint.setStrokeWidth(strokePx);
         }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            float cx     = getWidth()  / 2f;
-            float cy     = getHeight() / 2f;
-            float radius = cx - paint.getStrokeWidth() / 2f;
-            if (radius > 0) canvas.drawCircle(cx, cy, radius, paint);
+        @Override protected void onDraw(Canvas canvas) {
+            float cx = getWidth()/2f, cy = getHeight()/2f;
+            float r = cx - paint.getStrokeWidth()/2f;
+            if (r > 0) canvas.drawCircle(cx, cy, r, paint);
         }
     }
 }
