@@ -81,7 +81,7 @@ public class LauncherActivity extends Activity {
     private static final int    ICON_DP        = 68;
     private static final int    CELL_W_DP      = 84;
     private static final int    CELL_H_DP      = 80;
-    private static final int    RING_STROKE_DP = 5;
+    private static final int    RING_STROKE_DP = 4;
     private static final long   CLOCK_MS       = 1_000L;
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
@@ -112,8 +112,6 @@ public class LauncherActivity extends Activity {
         sWhiteFill.setStyle(Paint.Style.FILL);
         sWhiteFill.setColor(Color.WHITE);
     }
-
-    private static final Typeface TF_CLOCK = Typeface.create("sans-serif", Typeface.BOLD);
 
     // ── Instance state ─────────────────────────────────────────────────────────
     private volatile float      density;
@@ -362,79 +360,92 @@ public class LauncherActivity extends Activity {
 
         clockView = new TextView(this);
         GradientDrawable clockBg = new GradientDrawable();
-        clockBg.setColor(0xF5FFFFFF);           // near-opaque white pill
-        clockBg.setCornerRadius(dp(100));        // fully-rounded pill ends
+        clockBg.setColor(0xBB000000);            // semi-transparent dark — wallpaper shows through
+        clockBg.setCornerRadius(dp(100));         // fully-rounded pill
         clockView.setBackground(clockBg);
-        clockView.setPadding(dp(20), dp(10), dp(20), dp(10));
+        clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
         clockView.setIncludeFontPadding(false);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
         clkLp.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
         clkLp.setMargins(dp(32), dp(24), 0, 0);
         clockView.setLayoutParams(clkLp);
-        clockView.setTextColor(0xFF1A1A2E);      // deep charcoal — crisp on white
-        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 30);
-        clockView.setTypeface(TF_CLOCK);
-        clockView.setLetterSpacing(0.02f);
+        clockView.setTextColor(Color.WHITE);
+        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 42);
+        // BLACK weight — heaviest available without a custom font, very readable on TV
+        clockView.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
+        clockView.setLetterSpacing(0.01f);
         root.addView(clockView);
 
-        int btnSz         = dp(36);
-        int btnMarginTop  = dp(24);
+        int btnSz          = dp(40);
+        int btnMarginTop   = dp(24);
         int btnMarginRight = dp(32);
-        int btnGap        = dp(8);
-        int pillPad       = dp(10);
-        int pillH         = btnSz + pillPad * 2;
-        int pillW         = btnSz * 2 + btnGap + pillPad * 2;
+        int btnGap         = dp(4);   // tight gap between the two buttons inside the pill
+        int pillPadH       = dp(8);   // horizontal padding inside pill
+        int pillPadV       = dp(8);   // vertical padding inside pill
+        int pillH          = btnSz + pillPadV * 2;
+        int pillW          = btnSz * 2 + btnGap + pillPadH * 2;
 
-        // Shared frosted-white pill that holds both icon buttons
+        // Semi-transparent dark pill — matches clock aesthetic, wallpaper visible through both
         FrameLayout btnPill = new FrameLayout(this);
         GradientDrawable pillBg = new GradientDrawable();
-        pillBg.setColor(0xF5FFFFFF);
+        pillBg.setColor(0xBB000000);
         pillBg.setCornerRadius(dp(100));
         btnPill.setBackground(pillBg);
+        btnPill.setFocusable(false);   // pill itself is NOT focusable — children handle focus
         FrameLayout.LayoutParams pillLp = new FrameLayout.LayoutParams(pillW, pillH);
         pillLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
         pillLp.setMargins(0, btnMarginTop, btnMarginRight, 0);
         btnPill.setLayoutParams(pillLp);
 
-        // Dark icon colour for contrast on white pill
-        final int ICON_COLOR = 0xFF1A1A2E;
+        // Icon colour: white on dark pill
+        final int ICON_COL = 0xFFFFFFFF;
+        final int ICON_DIM = 0x66FFFFFF;  // dimmed arcs when wifi disconnected
 
+        // Focus-highlight helper: each button draws a semi-white rounded-rect
+        // behind itself when focused, giving clear individual selection feedback
+        // without affecting the other button.
+        final int FOCUS_HL = 0x33FFFFFF;  // subtle white tint on focused button
+        final int FOCUS_RADIUS = dp(20);
+
+        // ── WiFi button — modern signal-bars icon ─────────────────────────────
+        // Three rounded bars of increasing height, like a modern cellular/wifi indicator.
+        // Connected: all bars fully lit. Disconnected: only first bar lit, others dim.
         wifiBtn = new View(this) {
-            private final Paint arcPaint = buildStrokePaint();
-            private final Paint dotPaint = buildFillPaint();
-            private final RectF oval = new RectF();
-            private Paint buildStrokePaint() {
-                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.ROUND); return p;
-            }
-            private Paint buildFillPaint() {
-                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                p.setStyle(Paint.Style.FILL); return p;
-            }
+            private final Paint barPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint xPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint hlPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final RectF rect      = new RectF();
+            { barPaint.setStyle(Paint.Style.FILL);
+              xPaint.setStyle(Paint.Style.STROKE); xPaint.setStrokeCap(Paint.Cap.ROUND); xPaint.setColor(0xFFFF4444);
+              hlPaint.setStyle(Paint.Style.FILL); hlPaint.setColor(FOCUS_HL); }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                boolean connected = wifiConnected;
-                int bright = ICON_COLOR;
-                int dim    = (ICON_COLOR & 0x00FFFFFF) | (0x44 << 24);
-                float s = Math.min(w, h) * 0.80f;
-                float cx = w / 2f, by = h * 0.78f;
-                float sw = s * 0.10f;
-                arcPaint.setStrokeWidth(sw);
-                dotPaint.setColor(bright);
-                c.drawCircle(cx, by, sw * 0.7f, dotPaint);
-                float r1 = s * 0.22f;
-                oval.set(cx-r1, by-r1, cx+r1, by+r1);
-                arcPaint.setColor(connected ? bright : dim);
-                c.drawArc(oval, 210, 120, false, arcPaint);
-                float r2 = s * 0.42f;
-                oval.set(cx-r2, by-r2, cx+r2, by+r2);
-                arcPaint.setColor(connected ? bright : dim);
-                c.drawArc(oval, 210, 120, false, arcPaint);
-                float r3 = s * 0.62f;
-                oval.set(cx-r3, by-r3, cx+r3, by+r3);
-                arcPaint.setColor(bright);
-                c.drawArc(oval, 210, 120, false, arcPaint);
+                if (isFocused()) c.drawRoundRect(0, 0, w, h, FOCUS_RADIUS, FOCUS_RADIUS, hlPaint);
+                boolean conn = wifiConnected;
+                float pad  = w * 0.15f;
+                float bw   = (w - pad * 2 - dp(3) * 2) / 3f;
+                float maxH = h * 0.62f;
+                float bot  = h * 0.78f;
+                float r    = bw * 0.35f;
+                float h1 = maxH * 0.35f, x1 = pad;
+                rect.set(x1, bot - h1, x1 + bw, bot);
+                barPaint.setColor(ICON_COL);
+                c.drawRoundRect(rect, r, r, barPaint);
+                float h2 = maxH * 0.65f, x2 = x1 + bw + dp(3);
+                rect.set(x2, bot - h2, x2 + bw, bot);
+                barPaint.setColor(conn ? ICON_COL : ICON_DIM);
+                c.drawRoundRect(rect, r, r, barPaint);
+                float h3 = maxH, x3 = x2 + bw + dp(3);
+                rect.set(x3, bot - h3, x3 + bw, bot);
+                barPaint.setColor(conn ? ICON_COL : ICON_DIM);
+                c.drawRoundRect(rect, r, r, barPaint);
+                if (!conn) {
+                    xPaint.setStrokeWidth(dp(2));
+                    float xc = x3 + bw / 2f, yc = bot - h3 - dp(6), d2 = dp(4);
+                    c.drawLine(xc - d2, yc - d2, xc + d2, yc + d2, xPaint);
+                    c.drawLine(xc + d2, yc - d2, xc - d2, yc + d2, xPaint);
+                }
             }
         };
         wifiBtn.setFocusable(true); wifiBtn.setFocusableInTouchMode(true); wifiBtn.setClickable(true);
@@ -442,14 +453,18 @@ public class LauncherActivity extends Activity {
             try { startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
             catch (Exception e) { showToast("Cannot open WiFi settings"); }
         });
-        wifiBtn.setOnFocusChangeListener((v, f) -> btnPill.setAlpha(f ? 1f : 0.75f));
+        wifiBtn.setOnFocusChangeListener((v, f) -> v.invalidate());  // redraw own highlight only
         wifiBtn.setOnKeyListener((v, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                 case KeyEvent.KEYCODE_BUTTON_A: v.performClick(); return true;
-                case KeyEvent.KEYCODE_DPAD_DOWN: case KeyEvent.KEYCODE_DPAD_LEFT:
-                    RecyclingShelfView s = shelf; if (s != null) s.requestFocusOnIndex(0); return true;
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                    RecyclingShelfView sd = shelf; if (sd != null) sd.requestFocusOnIndex(0); return true;
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                    RecyclingShelfView sl = shelf;
+                    if (sl != null) sl.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
+                    return true;
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
                     TextView wb = wpBtn; if (wb != null) wb.requestFocus(); return true;
                 default: return false;
@@ -457,27 +472,32 @@ public class LauncherActivity extends Activity {
         });
         FrameLayout.LayoutParams wifiLp = new FrameLayout.LayoutParams(btnSz, btnSz);
         wifiLp.gravity = android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START;
-        wifiLp.setMargins(pillPad, 0, 0, 0);
+        wifiLp.setMargins(pillPadH, 0, 0, 0);
         wifiBtn.setLayoutParams(wifiLp);
         btnPill.addView(wifiBtn);
 
+        // ── Wallpaper button ─────────────────────────────────────────────────
         wpBtn = new TextView(this) {
             private final Paint p;
+            private final Paint hlPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Path  mt = new Path();
             private int lw = 0, lh = 0;
             { p = new Paint(Paint.ANTI_ALIAS_FLAG);
-              p.setColor(ICON_COLOR); p.setStyle(Paint.Style.STROKE);
-              p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND); }
+              p.setColor(ICON_COL); p.setStyle(Paint.Style.STROKE);
+              p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND);
+              hlPaint.setStyle(Paint.Style.FILL); hlPaint.setColor(FOCUS_HL); }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                float s = Math.min(w, h) * 0.80f, cx = w / 2f, cy = h / 2f;
+                // Focus highlight
+                if (isFocused()) c.drawRoundRect(0, 0, w, h, FOCUS_RADIUS, FOCUS_RADIUS, hlPaint);
+                float s = Math.min(w, h) * 0.72f, cx = w / 2f, cy = h / 2f;
                 p.setStrokeWidth(s * 0.10f);
                 if (w != lw || h != lh) {
                     lw = w; lh = h;
                     float l = cx-s/2f, r = cx+s/2f, t = cy-s/2f, b = cy+s/2f;
-                    mt.rewind(); mt.moveTo(l, b); mt.lineTo(l+s*.40f, t+s*.50f);
-                    mt.lineTo(l+s*.60f, t+s*.68f); mt.lineTo(r, b);
+                    mt.rewind(); mt.moveTo(l, b); mt.lineTo(l+s*.38f, t+s*.48f);
+                    mt.lineTo(l+s*.62f, t+s*.66f); mt.lineTo(r, b);
                 }
                 c.drawCircle(cx, cy, s/2f, p);
                 c.drawCircle(cx+s*.17f, cy-s/2f+s*.23f, s*.12f, p);
@@ -486,10 +506,12 @@ public class LauncherActivity extends Activity {
         };
         wpBtn.setFocusable(true); wpBtn.setFocusableInTouchMode(true); wpBtn.setClickable(true);
         wpBtn.setOnClickListener(v -> openStoragePicker());
-        wpBtn.setOnFocusChangeListener((v, f) -> btnPill.setAlpha(f ? 1f : 0.75f));
+        wpBtn.setOnFocusChangeListener((v, f) -> v.invalidate());  // redraw own highlight only
         wpBtn.setOnKeyListener((v, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
+                case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_BUTTON_A: v.performClick(); return true;
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView s = shelf;
                     if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
@@ -504,11 +526,10 @@ public class LauncherActivity extends Activity {
         });
         FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(btnSz, btnSz);
         wpLp.gravity = android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.END;
-        wpLp.setMargins(0, 0, pillPad, 0);
+        wpLp.setMargins(0, 0, pillPadH, 0);
         wpBtn.setLayoutParams(wpLp);
         btnPill.addView(wpBtn);
 
-        btnPill.setAlpha(0.75f);
         root.addView(btnPill);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
@@ -994,7 +1015,7 @@ public class LauncherActivity extends Activity {
             }
         }
         if (total == 0) return 0;
-        boolean hasTransparentEdge = (float) transparent / total >= 0.60f;
+        boolean hasTransparentEdge = (float) transparent / total >= 0.40f;
         if (!hasTransparentEdge) return 0;
         // Only add white fill if the visible content is actually dark
         float avgLum = lumCount > 0 ? lumSum / lumCount : 0f;
@@ -1309,7 +1330,7 @@ public class LauncherActivity extends Activity {
             // Vivid cyan-blue — visible on both white icon fills and dark icons.
             // Pure white (#FFFFFF) blends on white-fill icons (SmartTube issue).
             // This colour has enough saturation to contrast against any icon bg.
-            paint.setColor(0xFF00B4FF);
+           paint.setColor(0x88AAAAAA);
             paint.setStrokeWidth(strokePx);
         }
         @Override protected void onDraw(Canvas canvas) {
