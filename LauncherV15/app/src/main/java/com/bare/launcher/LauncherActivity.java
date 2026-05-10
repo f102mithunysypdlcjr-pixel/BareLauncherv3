@@ -56,6 +56,9 @@ import android.widget.OverScroller;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.RelativeSizeSpan;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
@@ -142,11 +145,25 @@ public class LauncherActivity extends Activity {
         @Override public void run() {
             if (destroyed || !clockRunning) return;
             TextView cv = clockView;
-            if (cv != null) cv.setText(sdfTime.format(System.currentTimeMillis()));
+            if (cv != null) cv.setText(formatClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
             long now = System.currentTimeMillis();
             clockHandler.postDelayed(this, CLOCK_MS - (now % CLOCK_MS));
         }
     };
+
+    // Returns a SpannableString where the AM/PM suffix (if present) is rendered
+    // at 55% of the main text size — smaller but still legible.
+    private SpannableString formatClock(long ms) {
+        String full = sdfTime.format(ms);
+        SpannableString ss = new SpannableString(full);
+        // Find AM/PM marker — locale-safe: look for a space followed by 2 uppercase-ish chars at end
+        int spaceIdx = full.lastIndexOf(' ');
+        if (spaceIdx >= 0 && spaceIdx < full.length() - 1) {
+            ss.setSpan(new RelativeSizeSpan(0.55f), spaceIdx, full.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return ss;
+    }
 
     private ThreadPoolExecutor iconExecutor;
     private ExecutorService    wpExecutor;
@@ -318,7 +335,7 @@ public class LauncherActivity extends Activity {
                 getSharedPreferences(PREFS, MODE_PRIVATE).getString("clockFmt", "h:mm a"),
                 Locale.getDefault());
         TextView cv = clockView;
-        if (cv != null) cv.setText(sdfTime.format(System.currentTimeMillis()));
+        if (cv != null) cv.setText(formatClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
     }
 
     // =========================================================================
@@ -345,23 +362,42 @@ public class LauncherActivity extends Activity {
 
         clockView = new TextView(this);
         GradientDrawable clockBg = new GradientDrawable();
-        clockBg.setColor(0x88000000); clockBg.setCornerRadius(dp(10));
+        clockBg.setColor(0xF5FFFFFF);           // near-opaque white pill
+        clockBg.setCornerRadius(dp(100));        // fully-rounded pill ends
         clockView.setBackground(clockBg);
-        clockView.setPadding(dp(16), dp(8), dp(16), dp(8));
+        clockView.setPadding(dp(20), dp(10), dp(20), dp(10));
+        clockView.setIncludeFontPadding(false);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
         clkLp.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
         clkLp.setMargins(dp(32), dp(24), 0, 0);
         clockView.setLayoutParams(clkLp);
-        clockView.setTextColor(Color.WHITE);
-        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 26);
+        clockView.setTextColor(0xFF1A1A2E);      // deep charcoal — crisp on white
+        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 30);
         clockView.setTypeface(TF_CLOCK);
-        clockView.setLetterSpacing(0.03f);
+        clockView.setLetterSpacing(0.02f);
         root.addView(clockView);
 
         int btnSz         = dp(36);
         int btnMarginTop  = dp(24);
         int btnMarginRight = dp(32);
-        int btnGap        = dp(12);
+        int btnGap        = dp(8);
+        int pillPad       = dp(10);
+        int pillH         = btnSz + pillPad * 2;
+        int pillW         = btnSz * 2 + btnGap + pillPad * 2;
+
+        // Shared frosted-white pill that holds both icon buttons
+        FrameLayout btnPill = new FrameLayout(this);
+        GradientDrawable pillBg = new GradientDrawable();
+        pillBg.setColor(0xF5FFFFFF);
+        pillBg.setCornerRadius(dp(100));
+        btnPill.setBackground(pillBg);
+        FrameLayout.LayoutParams pillLp = new FrameLayout.LayoutParams(pillW, pillH);
+        pillLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
+        pillLp.setMargins(0, btnMarginTop, btnMarginRight, 0);
+        btnPill.setLayoutParams(pillLp);
+
+        // Dark icon colour for contrast on white pill
+        final int ICON_COLOR = 0xFF1A1A2E;
 
         wifiBtn = new View(this) {
             private final Paint arcPaint = buildStrokePaint();
@@ -379,8 +415,8 @@ public class LauncherActivity extends Activity {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
                 boolean connected = wifiConnected;
-                int bright = connected ? 0xCCFFFFFF : 0x55FFFFFF;
-                int dim    = 0x33FFFFFF;
+                int bright = ICON_COLOR;
+                int dim    = (ICON_COLOR & 0x00FFFFFF) | (0x44 << 24);
                 float s = Math.min(w, h) * 0.80f;
                 float cx = w / 2f, by = h * 0.78f;
                 float sw = s * 0.10f;
@@ -402,12 +438,11 @@ public class LauncherActivity extends Activity {
             }
         };
         wifiBtn.setFocusable(true); wifiBtn.setFocusableInTouchMode(true); wifiBtn.setClickable(true);
-        wifiBtn.setAlpha(0.65f);
         wifiBtn.setOnClickListener(v -> {
             try { startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
             catch (Exception e) { showToast("Cannot open WiFi settings"); }
         });
-        wifiBtn.setOnFocusChangeListener((v, f) -> v.setAlpha(f ? 1f : 0.65f));
+        wifiBtn.setOnFocusChangeListener((v, f) -> btnPill.setAlpha(f ? 1f : 0.75f));
         wifiBtn.setOnKeyListener((v, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
@@ -421,17 +456,17 @@ public class LauncherActivity extends Activity {
             }
         });
         FrameLayout.LayoutParams wifiLp = new FrameLayout.LayoutParams(btnSz, btnSz);
-        wifiLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
-        wifiLp.setMargins(0, btnMarginTop, btnMarginRight + btnSz + btnGap, 0);
+        wifiLp.gravity = android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START;
+        wifiLp.setMargins(pillPad, 0, 0, 0);
         wifiBtn.setLayoutParams(wifiLp);
-        root.addView(wifiBtn);
+        btnPill.addView(wifiBtn);
 
         wpBtn = new TextView(this) {
             private final Paint p;
             private final Path  mt = new Path();
             private int lw = 0, lh = 0;
             { p = new Paint(Paint.ANTI_ALIAS_FLAG);
-              p.setColor(0xCCFFFFFF); p.setStyle(Paint.Style.STROKE);
+              p.setColor(ICON_COLOR); p.setStyle(Paint.Style.STROKE);
               p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND); }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
@@ -450,9 +485,8 @@ public class LauncherActivity extends Activity {
             }
         };
         wpBtn.setFocusable(true); wpBtn.setFocusableInTouchMode(true); wpBtn.setClickable(true);
-        wpBtn.setAlpha(0.65f);
         wpBtn.setOnClickListener(v -> openStoragePicker());
-        wpBtn.setOnFocusChangeListener((v, f) -> v.setAlpha(f ? 1f : 0.65f));
+        wpBtn.setOnFocusChangeListener((v, f) -> btnPill.setAlpha(f ? 1f : 0.75f));
         wpBtn.setOnKeyListener((v, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
@@ -469,10 +503,13 @@ public class LauncherActivity extends Activity {
             }
         });
         FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(btnSz, btnSz);
-        wpLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
-        wpLp.setMargins(0, btnMarginTop, btnMarginRight, 0);
+        wpLp.gravity = android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.END;
+        wpLp.setMargins(0, 0, pillPad, 0);
         wpBtn.setLayoutParams(wpLp);
-        root.addView(wpBtn);
+        btnPill.addView(wpBtn);
+
+        btnPill.setAlpha(0.75f);
+        root.addView(btnPill);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
         ringView = new RingView(this, strokePx);
@@ -901,7 +938,8 @@ public class LauncherActivity extends Activity {
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
 
-        boolean needsFill = isTransparentIcon(raw, sz);
+        int   fill    = iconFillColour(raw, sz);
+        boolean needsFill = fill != 0;
         float   scale     = needsFill ? 0.82f : 1.10f;
         int     csz       = Math.round(sz * scale);
         int     inset     = (sz - csz) / 2;
@@ -909,7 +947,10 @@ public class LauncherActivity extends Activity {
         Bitmap out    = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
 
-        if (needsFill) canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
+        if (needsFill) {
+            sWhiteFill.setColor(fill);
+            canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
+        }
 
         Matrix mx = sMatrixTL.get();
         mx.setScale((float) csz / sz, (float) csz / sz);
@@ -920,7 +961,13 @@ public class LauncherActivity extends Activity {
         return clipToCircle(out, sz);
     }
 
-    private boolean isTransparentIcon(Bitmap src, int sz) {
+    // Returns the fill colour to paint behind a transparent icon, or 0 if no fill needed.
+    // Two conditions must both be true to use a white fill:
+    //   1. The icon has significant edge transparency (≥60% of sampled pixels transparent)
+    //   2. The non-transparent content pixels are dark (avg luminance < 0.55)
+    //      — skips white fill for apps like SmartTube whose logo is already light/white,
+    //        where adding a white circle behind it makes the icon invisible.
+    private int iconFillColour(Bitmap src, int sz) {
         int needed = src.getByteCount();
         byte[] px = sPixelBuf.get();
         if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
@@ -929,12 +976,29 @@ public class LauncherActivity extends Activity {
         src.copyPixelsToBuffer(buf);
         int step = Math.max(1, sz / 10);
         int total = 0, transparent = 0;
-        for (int y = step / 2; y < sz; y += step)
+        float lumSum = 0f; int lumCount = 0;
+        for (int y = step / 2; y < sz; y += step) {
             for (int x = step / 2; x < sz; x += step) {
-                if ((px[(y * sz + x) * 4 + 3] & 0xFF) < 30) transparent++;
+                int base = (y * sz + x) * 4;
+                int a = px[base + 3] & 0xFF;
+                if (a < 30) { transparent++; }
+                else {
+                    // sRGB -> relative luminance (fast approximation)
+                    float r = (px[base]     & 0xFF) / 255f;
+                    float g = (px[base + 1] & 0xFF) / 255f;
+                    float b = (px[base + 2] & 0xFF) / 255f;
+                    lumSum += 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    lumCount++;
+                }
                 total++;
             }
-        return total > 0 && (float) transparent / total >= 0.60f;
+        }
+        if (total == 0) return 0;
+        boolean hasTransparentEdge = (float) transparent / total >= 0.60f;
+        if (!hasTransparentEdge) return 0;
+        // Only add white fill if the visible content is actually dark
+        float avgLum = lumCount > 0 ? lumSum / lumCount : 0f;
+        return avgLum < 0.55f ? Color.WHITE : 0;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -995,7 +1059,7 @@ public class LauncherActivity extends Activity {
         if (!clockRunning) {
             clockRunning = true;
             TextView cv = clockView;
-            if (cv != null) cv.setText(sdfTime.format(System.currentTimeMillis()));
+            if (cv != null) cv.setText(formatClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
             long now = System.currentTimeMillis();
             clockHandler.postDelayed(clockTick, CLOCK_MS - (now % CLOCK_MS));
         }
@@ -1242,7 +1306,10 @@ public class LauncherActivity extends Activity {
         RingView(Context ctx, int strokePx) {
             super(ctx);
             paint.setStyle(Paint.Style.STROKE);
-            paint.setColor(Color.WHITE);
+            // Vivid cyan-blue — visible on both white icon fills and dark icons.
+            // Pure white (#FFFFFF) blends on white-fill icons (SmartTube issue).
+            // This colour has enough saturation to contrast against any icon bg.
+            paint.setColor(0xFF00B4FF);
             paint.setStrokeWidth(strokePx);
         }
         @Override protected void onDraw(Canvas canvas) {
