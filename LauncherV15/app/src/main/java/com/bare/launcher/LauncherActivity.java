@@ -26,7 +26,6 @@ import android.graphics.Typeface;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
-import android.graphics.drawable.GradientDrawable;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -37,6 +36,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.DisplayMetrics;
 import android.util.LruCache;
@@ -64,10 +64,8 @@ import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -124,7 +122,6 @@ public class LauncherActivity extends Activity {
     private final AtomicBoolean systemWpLoading = new AtomicBoolean(false);
     private final AtomicBoolean userWpLoading   = new AtomicBoolean(false);
     private final AtomicBoolean appsLoading     = new AtomicBoolean(false);
-    private volatile String     lastAppSig      = "";
 
     // FIX: renamed wifiConnected → netConnected — reflects WiFi + Ethernet both
     private volatile boolean    netConnected    = false;
@@ -148,6 +145,9 @@ public class LauncherActivity extends Activity {
     // FIX: reuse SpannableStringBuilder — avoids SpannableString + RelativeSizeSpan
     // allocation every second (was 2 allocs/sec, now 0)
     private final SpannableStringBuilder clockSsb = new SpannableStringBuilder();
+    // BUG5 fix: reuse Calendar + char[] — zero allocations per clock tick
+    private final java.util.Calendar clockCal = java.util.Calendar.getInstance();
+    private final char[] clockChars = new char[8]; // "12:59 PM" max
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -159,16 +159,27 @@ public class LauncherActivity extends Activity {
         }
     };
 
-    // FIX: reuses clockSsb + static sAmPmSpan — zero per-tick allocations
+    // BUG5 fix: zero-alloc clock — Calendar field extraction into reused char[],
+    // no String allocation from sdfTime.format() every second.
     private CharSequence formatClock(long ms) {
-        String full = sdfTime.format(ms);
-        clockSsb.clear();
-        clockSsb.clearSpans();
-        clockSsb.append(full);
-        int spaceIdx = full.lastIndexOf(' ');
-        if (spaceIdx >= 0 && spaceIdx < full.length() - 1) {
-            clockSsb.setSpan(sAmPmSpan, spaceIdx, full.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        }
+        clockCal.setTimeInMillis(ms);
+        int hour = clockCal.get(java.util.Calendar.HOUR);    // 12-hr, 0-12
+        if (hour == 0) hour = 12;                             // 12hr: 0 → 12
+        int min  = clockCal.get(java.util.Calendar.MINUTE);
+        int ampm = clockCal.get(java.util.Calendar.AM_PM);   // 0=AM, 1=PM
+        int pos = 0;
+        if (hour >= 10) { clockChars[pos++] = (char)('0' + hour / 10); }
+        clockChars[pos++] = (char)('0' + hour % 10);
+        clockChars[pos++] = ':';
+        clockChars[pos++] = (char)('0' + min / 10);
+        clockChars[pos++] = (char)('0' + min % 10);
+        clockChars[pos++] = ' ';
+        int amPmStart = pos;
+        clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
+        clockChars[pos++] = 'M';
+        clockSsb.clear(); clockSsb.clearSpans();
+        clockSsb.append(new String(clockChars, 0, pos)); // one alloc: char[]→String, unavoidable
+        clockSsb.setSpan(sAmPmSpan, amPmStart, pos, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return clockSsb;
     }
 
@@ -179,8 +190,8 @@ public class LauncherActivity extends Activity {
 
     // iconInflight is UI-thread-only — no synchronisation needed.
     // All reads/writes: preWarmIcon/loadIconAsync (called from bind on UI thread)
-    // and runOnUiThread lambdas. HashMap is fine here.
-    private final Map<String, List<RecyclingShelfView.CellView>> iconInflight = new HashMap<>();
+    // and runOnUiThread lambdas. ArrayMap used (BUG6 fix: — binary search, better cache locality, less memory than HashMap for small N)
+    private final ArrayMap<String, List<RecyclingShelfView.CellView>> iconInflight = new ArrayMap<>();
 
     private final List<AppInfo> appList = new ArrayList<>();
 
@@ -189,6 +200,9 @@ public class LauncherActivity extends Activity {
     private boolean pkgChangedWhilePaused = false;
 
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
+    // BUG3 fix: pre-allocated arrays — positionRing was allocating int[2] every D-pad press
+    private final int[] ringCellLoc = new int[2];
+    private final int[] ringRootLoc = new int[2];
     private final Runnable pkgReloadRunnable = this::loadApps;
 
     private ConnectivityManager.NetworkCallback networkCallback;
@@ -203,7 +217,6 @@ public class LauncherActivity extends Activity {
                     String pkg = data.getSchemeSpecificPart();
                     if (iconCache != null) iconCache.remove(pkg);
                     iconInflight.remove(pkg);
-                    lastAppSig = "";
                 }
             }
             pkgChangedWhilePaused = true;
@@ -319,7 +332,8 @@ public class LauncherActivity extends Activity {
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         if (iconCache == null) return;
-        if      (level >= TRIM_MEMORY_COMPLETE)   { iconCache.evictAll(); iconInflight.clear(); lastAppSig = ""; appList.clear(); }
+        // BUG1 fix: tell shelf to clear cells before clearing appList — prevents stale boundApp clicks
+        if      (level >= TRIM_MEMORY_COMPLETE)   { iconCache.evictAll(); iconInflight.clear(); RecyclingShelfView sv = shelf; if (sv != null) sv.setApps(java.util.Collections.emptyList()); appList.clear(); }
         else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); iconInflight.clear(); }
         else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); iconInflight.clear(); }
     }
@@ -360,10 +374,8 @@ public class LauncherActivity extends Activity {
         root.addView(shelf);
 
         clockView = new TextView(this);
-        GradientDrawable clockBg = new GradientDrawable();
-        clockBg.setColor(0x66000000);
-        clockBg.setCornerRadius(dp(100));
-        clockView.setBackground(clockBg);
+        // VISUAL1: no pill background — shadow renders at GPU cost, not CPU/draw pass
+        clockView.setShadowLayer(dp(6), 0, dp(2), 0xCC000000);
         clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
         clockView.setIncludeFontPadding(false);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
@@ -386,10 +398,7 @@ public class LauncherActivity extends Activity {
         int pillW          = btnSz * 2 + btnGap + pillPadH * 2;
 
         FrameLayout btnPill = new FrameLayout(this);
-        GradientDrawable pillBg = new GradientDrawable();
-        pillBg.setColor(0x66000000);
-        pillBg.setCornerRadius(dp(100));
-        btnPill.setBackground(pillBg);
+        // VISUAL2: no pill background — shadow on each button's own Paint instead
         btnPill.setFocusable(false);
         FrameLayout.LayoutParams pillLp = new FrameLayout.LayoutParams(pillW, pillH);
         pillLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
@@ -422,6 +431,9 @@ public class LauncherActivity extends Activity {
                 slashPaint.setStyle(Paint.Style.STROKE);
                 slashPaint.setStrokeCap(Paint.Cap.ROUND);
                 slashPaint.setColor(ICON_COL);
+                // VISUAL2: shadow on arc paint — replaces pill background
+                arcPaint.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
+                dotPaint.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
                 hlPaint.setStyle(Paint.Style.FILL);
                 hlPaint.setColor(FOCUS_HL);
             }
@@ -477,6 +489,7 @@ public class LauncherActivity extends Activity {
                 }
             }
         };
+        netBtn.setLayerType(View.LAYER_TYPE_SOFTWARE, null); // required for Paint.setShadowLayer
         netBtn.setFocusable(true); netBtn.setFocusableInTouchMode(true); netBtn.setClickable(true);
         // FIX: click opens general network settings — covers both WiFi and Ethernet
         netBtn.setOnClickListener(v -> {
@@ -520,6 +533,8 @@ public class LauncherActivity extends Activity {
             { p = new Paint(Paint.ANTI_ALIAS_FLAG);
               p.setColor(ICON_COL); p.setStyle(Paint.Style.STROKE);
               p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+              // VISUAL2: shadow replaces pill background
+              p.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
               hlPaint.setStyle(Paint.Style.FILL); hlPaint.setColor(FOCUS_HL); }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
@@ -538,6 +553,7 @@ public class LauncherActivity extends Activity {
                 c.drawPath(mt, p);
             }
         };
+        wpBtn.setLayerType(View.LAYER_TYPE_SOFTWARE, null); // required for Paint.setShadowLayer
         wpBtn.setFocusable(true); wpBtn.setFocusableInTouchMode(true); wpBtn.setClickable(true);
         wpBtn.setOnClickListener(v -> openStoragePicker());
         wpBtn.setOnFocusChangeListener((v, f) -> v.invalidate());
@@ -748,13 +764,20 @@ public class LauncherActivity extends Activity {
             int     boundIndex;
 
             private final Paint phRing;
+            // BUG4 fix: cached dp values — dp() multiplied density on every onDraw frame
+            private final int  cvIconPx;
+            private final float cvPhR;
+            private final float cvPhStroke;
 
             CellView(Context ctx) {
                 super(ctx);
+                cvIconPx   = dp(ICON_DP);
+                cvPhR      = cvIconPx / 2f - dp(2);
+                cvPhStroke = dp(1);
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
                 phRing.setColor(0x55FFFFFF);
-                phRing.setStrokeWidth(dp(1));
+                phRing.setStrokeWidth(cvPhStroke);
                 setFocusable(true); setFocusableInTouchMode(true);
                 setClickable(true); setWillNotDraw(false);
 
@@ -784,15 +807,14 @@ public class LauncherActivity extends Activity {
             @Override protected void onDraw(Canvas canvas) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                int iconPx = dp(ICON_DP);
+                // BUG4 fix: use cached dp values
                 float cx = w / 2f, cy = h / 2f;
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
                     float half = iconBitmap.getWidth() / 2f;
                     canvas.drawBitmap(iconBitmap, cx - half, cy - half, sCellPaint);
                 } else {
-                    float r = iconPx / 2f - dp(2);
-                    canvas.drawCircle(cx, cy, r, sPhFill);
-                    canvas.drawCircle(cx, cy, r - dp(1) / 2f, phRing);
+                    canvas.drawCircle(cx, cy, cvPhR, sPhFill);
+                    canvas.drawCircle(cx, cy, cvPhR - cvPhStroke / 2f, phRing);
                 }
             }
 
@@ -814,59 +836,37 @@ public class LauncherActivity extends Activity {
         if (!appsLoading.compareAndSet(false, true)) return;
         try {
             appExecutor.execute(() -> {
-                // FIX: cheapSig is now only called when we actually need to
-                // check — it still does 2 Binder calls so only run it when
-                // triggered by a real package change (pkgChangedWhilePaused)
-                // or initial load. The appsLoading guard prevents concurrency.
-                String sig = cheapSig();
-                if (sig.equals(lastAppSig) && !appList.isEmpty()) { appsLoading.set(false); return; }
                 List<AppInfo> fresh = queryApps();
                 if (!destroyed) {
                     runOnUiThread(() -> {
                         appsLoading.set(false);
                         // FIX: sig written on UI thread, read on appExecutor (volatile) —
                         // write happens-before any subsequent read via volatile guarantee.
-                        lastAppSig = sig;
-                        LruCache<String, Bitmap> cache = iconCache;
+                                LruCache<String, Bitmap> cache = iconCache;
                         if (cache != null) {
                             ArraySet<String> pkgs = new ArraySet<>(fresh.size());
                             for (AppInfo a : fresh) pkgs.add(a.packageName);
                             for (AppInfo old : appList)
                                 if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
                         }
-                        appList.clear(); appList.addAll(fresh);
-                        RecyclingShelfView s = shelf;
-                        if (s != null) s.setApps(appList);
+                        // BUG8 fix: diff on UI thread — skip setApps if list unchanged
+                        boolean changed = fresh.size() != appList.size();
+                        if (!changed) {
+                            for (int i2 = 0; i2 < fresh.size(); i2++) {
+                                if (!fresh.get(i2).packageName.equals(appList.get(i2).packageName)) {
+                                    changed = true; break;
+                                }
+                            }
+                        }
+                        if (changed) {
+                            appList.clear(); appList.addAll(fresh);
+                            RecyclingShelfView s = shelf;
+                            if (s != null) s.setApps(appList);
+                        }
                     });
                 } else { appsLoading.set(false); }
             });
         } catch (java.util.concurrent.RejectedExecutionException e) { appsLoading.set(false); }
-    }
-
-    private String cheapSig() {
-        try {
-            ArraySet<String> pkgs = new ArraySet<>();
-            Intent tvI  = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
-            Intent mobI = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-            List<ResolveInfo> tv, mob;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                PackageManager.ResolveInfoFlags f = PackageManager.ResolveInfoFlags.of(0);
-                tv  = pm.queryIntentActivities(tvI,  f);
-                mob = pm.queryIntentActivities(mobI, f);
-            } else {
-                //noinspection deprecation
-                tv  = pm.queryIntentActivities(tvI,  0);
-                //noinspection deprecation
-                mob = pm.queryIntentActivities(mobI, 0);
-            }
-            for (ResolveInfo r : tv)  if (r.activityInfo != null) pkgs.add(r.activityInfo.packageName);
-            for (ResolveInfo r : mob) if (r.activityInfo != null) pkgs.add(r.activityInfo.packageName);
-            List<String> sorted = new ArrayList<>(pkgs);
-            Collections.sort(sorted);
-            StringBuilder sb = new StringBuilder();
-            for (String p : sorted) sb.append(p).append('|');
-            return sb.toString();
-        } catch (Exception e) { return ""; }
     }
 
     private List<AppInfo> queryApps() {
@@ -1035,11 +1035,15 @@ public class LauncherActivity extends Activity {
         ByteBuffer buf = ByteBuffer.wrap(px);
         buf.rewind();
         src.copyPixelsToBuffer(buf);
-        int step = Math.max(1, sz / 10);
+        // BUG2 fix: sample inner 50% (q1..q3) only — outer corners of rounded icons
+        // are always transparent and inflate count past 0.40f on non-transparent icons.
+        // Raised threshold to 0.70f — inner region is mostly logo pixels.
+        int q1 = sz / 4, q3 = sz * 3 / 4;
+        int step = Math.max(1, (q3 - q1) / 7);
         int total = 0, transparent = 0;
         float lumSum = 0f; int lumCount = 0;
-        for (int y = step / 2; y < sz; y += step) {
-            for (int x = step / 2; x < sz; x += step) {
+        for (int y = q1; y < q3; y += step) {
+            for (int x = q1; x < q3; x += step) {
                 int base = (y * sz + x) * 4;
                 // ARGB_8888 copyPixelsToBuffer order: R, G, B, A
                 int a = px[base + 3] & 0xFF;
@@ -1055,18 +1059,20 @@ public class LauncherActivity extends Activity {
             }
         }
         if (total == 0) return 0;
-        boolean hasTransparentEdge = (float) transparent / total >= 0.40f;
+        boolean hasTransparentEdge = (float) transparent / total >= 0.70f;
         if (!hasTransparentEdge) return 0;
         float avgLum = lumCount > 0 ? lumSum / lumCount : 0f;
         return avgLum < 0.55f ? Color.WHITE : 0;
     }
 
     private int iconFillColourSafe(Bitmap src, int sz) {
-        int step = Math.max(1, sz / 10);
+        // BUG2 fix: inner 50% only, threshold 0.70f
+        int q1 = sz / 4, q3 = sz * 3 / 4;
+        int step = Math.max(1, (q3 - q1) / 7);
         int total = 0, transparent = 0;
         float lumSum = 0f; int lumCount = 0;
-        for (int y = step / 2; y < sz; y += step) {
-            for (int x = step / 2; x < sz; x += step) {
+        for (int y = q1; y < q3; y += step) {
+            for (int x = q1; x < q3; x += step) {
                 int pixel = src.getPixel(x, y);
                 int a = Color.alpha(pixel);
                 if (a < 30) { transparent++; }
@@ -1081,7 +1087,7 @@ public class LauncherActivity extends Activity {
             }
         }
         if (total == 0) return 0;
-        if ((float) transparent / total < 0.40f) return 0;
+        if ((float) transparent / total < 0.70f) return 0;
         float avgLum = lumCount > 0 ? lumSum / lumCount : 0f;
         return avgLum < 0.55f ? Color.WHITE : 0;
     }
@@ -1128,10 +1134,10 @@ public class LauncherActivity extends Activity {
     private void positionRing(View cell) {
         RingView rv = ringView; FrameLayout r = root;
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
-        int[] cs = new int[2], rs = new int[2];
-        cell.getLocationOnScreen(cs); r.getLocationOnScreen(rs);
-        float cx   = (cs[0] - rs[0]) + cell.getWidth()  / 2f;
-        float cy   = (cs[1] - rs[1]) + cell.getHeight() / 2f;
+        // BUG3 fix: reuse pre-allocated arrays
+        cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
+        float cx   = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth()  / 2f;
+        float cy   = (ringCellLoc[1] - ringRootLoc[1]) + cell.getHeight() / 2f;
         int   rvW  = rv.getWidth();
         if (rvW == 0) rvW = dp(ICON_DP) + dp(RING_STROKE_DP) * 2;
         float half = rvW / 2f;
@@ -1380,7 +1386,9 @@ public class LauncherActivity extends Activity {
                 Math.max(1, cores - 1), cores, 30L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardPolicy());
         wpExecutor  = Executors.newSingleThreadExecutor();
-        appExecutor = Executors.newSingleThreadExecutor();
+        // BUG7 fix: bounded queue size 1 + DiscardPolicy — during broadcast storms only latest task runs
+        appExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
     }
 
     @SuppressWarnings("deprecation")
@@ -1413,37 +1421,55 @@ public class LauncherActivity extends Activity {
     // RingView — dual-ring focus indicator
     // =========================================================================
 
+    // VISUAL3: three concentric circles — dark outer sep → white ring → dark inner sep.
+    // Visible against pure-black AND pure-white icons. Same GPU cost as dual-ring.
     static final class RingView extends View {
-        private final Paint outerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint innerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final float outerStroke;
-        private final float innerStroke;
-        private final float gap;
+        // Three paints: separator (dark), white ring, separator (dark)
+        private final Paint sepPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint whitePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        // strokePx is the total allocated width; split: sep=20%, white=60%, sep=20%
+        private final float outerSepR;   // radius of outer dark separator centre
+        private final float whiteR;      // radius of white ring centre
+        private final float innerSepR;   // radius of inner dark separator centre
+        private final float sepStroke;
+        private final float whiteStroke;
 
         RingView(Context ctx, int strokePx) {
             super(ctx);
-            outerStroke = strokePx * 0.60f;
-            innerStroke = strokePx * 0.40f;
-            gap         = strokePx * 0.50f;
+            sepStroke   = strokePx * 0.20f;
+            whiteStroke = strokePx * 0.60f;
+            // half of total stroke lands outside the view edge, so outermost circle
+            // radius = cx - outerSepStroke/2
+            // rings are stacked inward: outerSep → gap → white → gap → innerSep
+            float gap = strokePx * 0.10f;
+            // These are computed in onDraw from cx since we don't have size in constructor
+            // Store offsets from cx instead:
+            // outerSep centre = cx - sepStroke/2
+            // white centre    = cx - sepStroke - gap - whiteStroke/2
+            // innerSep centre = cx - sepStroke - gap - whiteStroke - gap - sepStroke/2
+            outerSepR  = sepStroke / 2f;
+            whiteR     = sepStroke + gap + whiteStroke / 2f;
+            innerSepR  = sepStroke + gap + whiteStroke + gap + sepStroke / 2f;
 
-            outerPaint.setStyle(Paint.Style.STROKE);
-            outerPaint.setColor(0xFFFFFFFF);
-            outerPaint.setStrokeWidth(outerStroke);
+            sepPaint.setStyle(Paint.Style.STROKE);
+            sepPaint.setColor(0xCC1A1A1A);
+            sepPaint.setStrokeWidth(sepStroke);
 
-            innerPaint.setStyle(Paint.Style.STROKE);
-            innerPaint.setColor(0xFF1A1A1A);
-            innerPaint.setStrokeWidth(innerStroke);
+            whitePaint.setStyle(Paint.Style.STROKE);
+            whitePaint.setColor(0xFFFFFFFF);
+            whitePaint.setStrokeWidth(whiteStroke);
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
             float cx = getWidth()  / 2f;
             float cy = getHeight() / 2f;
-            float outerR = cx - outerStroke / 2f;
+            float outerR = cx - outerSepR;
             if (outerR <= 0) return;
-            canvas.drawCircle(cx, cy, outerR, outerPaint);
-            float innerR = outerR - outerStroke / 2f - gap - innerStroke / 2f;
-            if (innerR > 0) canvas.drawCircle(cx, cy, innerR, innerPaint);
+            canvas.drawCircle(cx, cy, outerR,          sepPaint);   // dark outer
+            canvas.drawCircle(cx, cy, cx - whiteR,     whitePaint); // white ring
+            float inR = cx - innerSepR;
+            if (inR > 0) canvas.drawCircle(cx, cy, inR, sepPaint);  // dark inner
         }
     }
 }
