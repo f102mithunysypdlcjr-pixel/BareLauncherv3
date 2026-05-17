@@ -1000,7 +1000,7 @@ public class LauncherActivity extends Activity {
 
         int     fill      = iconFillColour(raw, sz);
         boolean needsFill = fill != 0;
-        float   scale     = needsFill ? 0.82f : 1.10f;
+        float   scale     = needsFill ? 0.92f : 1.10f;
         int     csz       = Math.round(sz * scale);
         int     inset     = (sz - csz) / 2;
 
