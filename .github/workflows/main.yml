@@ -18,7 +18,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -28,6 +28,9 @@ jobs:
       - name: Decode keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/release.jks
+
+      - name: Make gradlew executable
+        run: chmod +x LauncherV15/gradlew
 
       - name: Build and sign release APK
         working-directory: LauncherV15
