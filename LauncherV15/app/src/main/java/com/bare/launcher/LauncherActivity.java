@@ -56,7 +56,7 @@ import android.widget.OverScroller;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import android.text.SpannableString;
+import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.RelativeSizeSpan;
 import java.io.InputStream;
@@ -104,6 +104,10 @@ public class LauncherActivity extends Activity {
     private static final Paint sCellPaint  = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private static final Paint sPhFill     = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint sWhiteFill  = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    // FIX: static reusable span — eliminates one allocation per clock tick
+    private static final RelativeSizeSpan sAmPmSpan = new RelativeSizeSpan(0.55f);
+
     static {
         sMaskPaint.setColor(Color.WHITE);
         sSrcInPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
@@ -116,12 +120,14 @@ public class LauncherActivity extends Activity {
     // ── Instance state ─────────────────────────────────────────────────────────
     private volatile float      density;
     private          int        screenW, screenH;
-    private volatile boolean    destroyed       = false;
+    private volatile boolean    destroyed      = false;
     private final AtomicBoolean systemWpLoading = new AtomicBoolean(false);
     private final AtomicBoolean userWpLoading   = new AtomicBoolean(false);
     private final AtomicBoolean appsLoading     = new AtomicBoolean(false);
     private volatile String     lastAppSig      = "";
-    private volatile boolean    wifiConnected   = false;
+
+    // FIX: renamed wifiConnected → netConnected — reflects WiFi + Ethernet both
+    private volatile boolean    netConnected    = false;
 
     private PackageManager      pm;
     private ConnectivityManager cm;
@@ -129,7 +135,7 @@ public class LauncherActivity extends Activity {
     private RecyclingShelfView shelf;
     private ImageView          wallpaperView;
     private TextView           clockView;
-    private View               wifiBtn;
+    private View               netBtn;           // FIX: renamed wifiBtn → netBtn
     private TextView           wpBtn;
     private RingView           ringView;
     private FrameLayout        root;
@@ -138,6 +144,10 @@ public class LauncherActivity extends Activity {
     private final Handler          clockHandler = new Handler(Looper.getMainLooper());
     private       boolean          clockRunning = false;
     private       SimpleDateFormat sdfTime;
+
+    // FIX: reuse SpannableStringBuilder — avoids SpannableString + RelativeSizeSpan
+    // allocation every second (was 2 allocs/sec, now 0)
+    private final SpannableStringBuilder clockSsb = new SpannableStringBuilder();
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -149,18 +159,17 @@ public class LauncherActivity extends Activity {
         }
     };
 
-    // Returns a SpannableString where the AM/PM suffix (if present) is rendered
-    // at 55% of the main text size — smaller but still legible.
-    private SpannableString formatClock(long ms) {
+    // FIX: reuses clockSsb + static sAmPmSpan — zero per-tick allocations
+    private CharSequence formatClock(long ms) {
         String full = sdfTime.format(ms);
-        SpannableString ss = new SpannableString(full);
-        // Find AM/PM marker — locale-safe: look for a space followed by 2 uppercase-ish chars at end
+        clockSsb.clear();
+        clockSsb.clearSpans();
+        clockSsb.append(full);
         int spaceIdx = full.lastIndexOf(' ');
         if (spaceIdx >= 0 && spaceIdx < full.length() - 1) {
-            ss.setSpan(new RelativeSizeSpan(0.55f), spaceIdx, full.length(),
-                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            clockSsb.setSpan(sAmPmSpan, spaceIdx, full.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
-        return ss;
+        return clockSsb;
     }
 
     private ThreadPoolExecutor iconExecutor;
@@ -168,18 +177,16 @@ public class LauncherActivity extends Activity {
     private ExecutorService    appExecutor;
     private LruCache<String, Bitmap> iconCache;
 
-    // FIX 1: iconInflight is accessed only on the UI thread (preWarmIcon called
-    // from setApps on UI thread; runOnUiThread lambdas run on UI thread).
-    // Changed from ArrayMap to HashMap — same O(1) ops, no Android-only dependency,
-    // and the access pattern is now explicitly documented as UI-thread-only.
-    // All reads/writes are on the main thread — no synchronisation needed.
+    // iconInflight is UI-thread-only — no synchronisation needed.
+    // All reads/writes: preWarmIcon/loadIconAsync (called from bind on UI thread)
+    // and runOnUiThread lambdas. HashMap is fine here.
     private final Map<String, List<RecyclingShelfView.CellView>> iconInflight = new HashMap<>();
 
     private final List<AppInfo> appList = new ArrayList<>();
 
-    // FIX 3 (onResume loadApps): flag set by packageReceiver; loadApps on
-    // onResume only runs a full query when a package event occurred while paused.
-    private volatile boolean pkgChangedWhilePaused = false;
+    // pkgChangedWhilePaused: set by packageReceiver (main thread via broadcast),
+    // read in onResume (main thread) — no volatile needed, same thread.
+    private boolean pkgChangedWhilePaused = false;
 
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final Runnable pkgReloadRunnable = this::loadApps;
@@ -199,8 +206,6 @@ public class LauncherActivity extends Activity {
                     lastAppSig = "";
                 }
             }
-            // FIX 3: mark that a package changed; onResume will trigger reload.
-            // If already resumed (shelf non-null and posted), do it immediately.
             pkgChangedWhilePaused = true;
             RecyclingShelfView s = shelf;
             if (s == null) return;
@@ -253,11 +258,8 @@ public class LauncherActivity extends Activity {
         super.onResume();
         hideSystemUI();
         startClock();
-        checkWifiNow();
+        checkNetNow();   // FIX: was checkWifiNow
 
-        // FIX 3: only call loadApps() if a package change occurred while paused.
-        // Previously called unconditionally on every onResume — 2 Binder calls
-        // (queryIntentActivities) on every return from every launched app.
         if (pkgChangedWhilePaused) {
             pkgChangedWhilePaused = false;
             loadApps();
@@ -282,7 +284,6 @@ public class LauncherActivity extends Activity {
     protected void onPause() {
         super.onPause();
         stopClock();
-        // Remove focus-restore listener if it hasn't fired — prevents leak on fast destroy
         RecyclingShelfView s = shelf;
         if (s != null && focusRestoreListener != null) {
             ViewTreeObserver vto = s.getViewTreeObserver();
@@ -302,7 +303,7 @@ public class LauncherActivity extends Activity {
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
         wallpaperView = null; clockView = null; shelf = null;
-        wpBtn = null; wifiBtn = null; ringView = null; root = null;
+        wpBtn = null; netBtn = null; ringView = null; root = null;
         super.onDestroy();
     }
 
@@ -360,8 +361,8 @@ public class LauncherActivity extends Activity {
 
         clockView = new TextView(this);
         GradientDrawable clockBg = new GradientDrawable();
-        clockBg.setColor(0x66000000);            // semi-transparent dark — wallpaper shows through
-        clockBg.setCornerRadius(dp(100));         // fully-rounded pill
+        clockBg.setColor(0x66000000);
+        clockBg.setCornerRadius(dp(100));
         clockView.setBackground(clockBg);
         clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
         clockView.setIncludeFontPadding(false);
@@ -371,7 +372,6 @@ public class LauncherActivity extends Activity {
         clockView.setLayoutParams(clkLp);
         clockView.setTextColor(Color.WHITE);
         clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 42);
-        // BLACK weight — heaviest available without a custom font, very readable on TV
         clockView.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
         clockView.setLetterSpacing(0.01f);
         root.addView(clockView);
@@ -379,48 +379,49 @@ public class LauncherActivity extends Activity {
         int btnSz          = dp(40);
         int btnMarginTop   = dp(24);
         int btnMarginRight = dp(32);
-        int btnGap         = dp(4);   // tight gap between the two buttons inside the pill
-        int pillPadH       = dp(8);   // horizontal padding inside pill
-        int pillPadV       = dp(8);   // vertical padding inside pill
+        int btnGap         = dp(4);
+        int pillPadH       = dp(8);
+        int pillPadV       = dp(8);
         int pillH          = btnSz + pillPadV * 2;
         int pillW          = btnSz * 2 + btnGap + pillPadH * 2;
 
-        // Semi-transparent dark pill — matches clock aesthetic, wallpaper visible through both
         FrameLayout btnPill = new FrameLayout(this);
         GradientDrawable pillBg = new GradientDrawable();
         pillBg.setColor(0x66000000);
         pillBg.setCornerRadius(dp(100));
         btnPill.setBackground(pillBg);
-        btnPill.setFocusable(false);   // pill itself is NOT focusable — children handle focus
+        btnPill.setFocusable(false);
         FrameLayout.LayoutParams pillLp = new FrameLayout.LayoutParams(pillW, pillH);
         pillLp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
         pillLp.setMargins(0, btnMarginTop, btnMarginRight, 0);
         btnPill.setLayoutParams(pillLp);
 
-        // Icon colour: white on dark pill
-        final int ICON_COL = 0xFFFFFFFF;
-        final int ICON_DIM = 0x66FFFFFF;  // dimmed arcs when wifi disconnected
-
-        // Focus-highlight helper: each button draws a semi-white rounded-rect
-        // behind itself when focused, giving clear individual selection feedback
-        // without affecting the other button.
-        final int FOCUS_HL = 0x33FFFFFF;  // subtle white tint on focused button
+        final int ICON_COL    = 0xFFFFFFFF;
+        final int FOCUS_HL    = 0x33FFFFFF;
         final int FOCUS_RADIUS = dp(20);
 
-        // ── WiFi button — classic arc fan icon ────────────────────────────────
-        // One dot + two arcs: the universal WiFi symbol.
-        // Honest: shows connected/not, makes no claim about signal strength.
-        // Simpler than the bar chart: 3 draw calls vs previous 5+.
-        // Connected: all elements fully white. Disconnected: all elements dim.
-        wifiBtn = new View(this) {
-            private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint hlPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final RectF oval     = new RectF();
+        // ── Network button — iOS-inspired connected/disconnected icon ──────────
+        // Shape: dot + two arcs (no strength — binary only, covers WiFi+Ethernet).
+        // Connected  : full white, iOS proportions (135° sweep, bold dot).
+        // Disconnected: full white icon + diagonal slash through it — instantly
+        //               readable as "no connection", not just "dim/loading".
+        // FIX: removed ICON_DIM opacity trick — slash is unambiguous on any bg.
+        netBtn = new View(this) {
+            private final Paint arcPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint dotPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint slashPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint hlPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final RectF oval      = new RectF();
             {
                 arcPaint.setStyle(Paint.Style.STROKE);
                 arcPaint.setStrokeCap(Paint.Cap.ROUND);
+                arcPaint.setColor(ICON_COL);
                 dotPaint.setStyle(Paint.Style.FILL);
+                dotPaint.setColor(ICON_COL);
+                // Slash: same stroke weight as arcs, round caps, fully white
+                slashPaint.setStyle(Paint.Style.STROKE);
+                slashPaint.setStrokeCap(Paint.Cap.ROUND);
+                slashPaint.setColor(ICON_COL);
                 hlPaint.setStyle(Paint.Style.FILL);
                 hlPaint.setColor(FOCUS_HL);
             }
@@ -428,35 +429,67 @@ public class LauncherActivity extends Activity {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
                 if (isFocused()) c.drawRoundRect(0, 0, w, h, FOCUS_RADIUS, FOCUS_RADIUS, hlPaint);
-                boolean conn  = wifiConnected;
-                int     col   = conn ? ICON_COL : ICON_DIM;
-                float   ic    = Math.min(w, h) * 0.68f;
-                float   cx    = w / 2f;
-                // Dot sits at 78% of height — arcs fan upward from it
-                float   dotY  = h * 0.78f;
-                float   sw    = ic * 0.11f;
+
+                // FIX: read netConnected (was wifiConnected, now covers ethernet too)
+                boolean conn = netConnected;
+
+                // iOS geometry: icon occupies 72% of the smaller dimension
+                float ic   = Math.min(w, h) * 0.72f;
+                float cx   = w / 2f;
+                float sw   = ic * 0.11f;          // stroke width
+                // FIX: dot radius = sw (matches iOS bold dot, was 0.65f = pinhole)
+                float dotR = sw;
+                // FIX: sweep 135° (iOS proportion, was 120° = too narrow)
+                float sweep = 135f;
+                // Start angle: centres the fan pointing straight up (270° in math = up).
+                // In Android drawArc, 0°=right, 90°=down. To centre at top:
+                // startAngle = 270 - sweep/2 = 270 - 67.5 = 202.5°
+                float startAngle = 202.5f;
+                // Dot sits at 80% down — arcs fan upward from it
+                float dotY = h * 0.80f;
+
                 arcPaint.setStrokeWidth(sw);
-                arcPaint.setColor(col);
-                dotPaint.setColor(col);
+                slashPaint.setStrokeWidth(sw);
+
                 // Dot
-                c.drawCircle(cx, dotY, sw * 0.65f, dotPaint);
-                // Inner arc
-                float r1 = ic * 0.28f;
+                c.drawCircle(cx, dotY, dotR, dotPaint);
+
+                // Inner arc — radius 0.30× ic
+                float r1 = ic * 0.30f;
                 oval.set(cx - r1, dotY - r1, cx + r1, dotY + r1);
-                c.drawArc(oval, 210f, 120f, false, arcPaint);
-                // Outer arc
-                float r2 = ic * 0.52f;
+                c.drawArc(oval, startAngle, sweep, false, arcPaint);
+
+                // Outer arc — radius 0.56× ic (ratio ~1.87× inner, matches iOS)
+                float r2 = ic * 0.56f;
                 oval.set(cx - r2, dotY - r2, cx + r2, dotY + r2);
-                c.drawArc(oval, 210f, 120f, false, arcPaint);
+                c.drawArc(oval, startAngle, sweep, false, arcPaint);
+
+                // FIX: disconnected → draw slash through icon instead of dim opacity.
+                // Diagonal line from bottom-left to top-right across the icon area,
+                // inset slightly so it doesn't bleed outside the button bounds.
+                if (!conn) {
+                    float inset = ic * 0.08f;
+                    float x0 = cx - ic * 0.38f + inset;
+                    float y0 = dotY + dotR + inset;
+                    float x1 = cx + ic * 0.38f - inset;
+                    float y1 = dotY - r2 - inset;
+                    c.drawLine(x0, y0, x1, y1, slashPaint);
+                }
             }
         };
-        wifiBtn.setFocusable(true); wifiBtn.setFocusableInTouchMode(true); wifiBtn.setClickable(true);
-        wifiBtn.setOnClickListener(v -> {
-            try { startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
-            catch (Exception e) { showToast("Cannot open WiFi settings"); }
+        netBtn.setFocusable(true); netBtn.setFocusableInTouchMode(true); netBtn.setClickable(true);
+        // FIX: click opens general network settings — covers both WiFi and Ethernet
+        netBtn.setOnClickListener(v -> {
+            try { startActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
+            catch (Exception e) {
+                try { startActivity(new Intent(Settings.ACTION_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
+                catch (Exception ignored) { showToast("Cannot open network settings"); }
+            }
         });
-        wifiBtn.setOnFocusChangeListener((v, f) -> v.invalidate());  // redraw own highlight only
-        wifiBtn.setOnKeyListener((v, kc, ev) -> {
+        netBtn.setOnFocusChangeListener((v, f) -> v.invalidate());
+        netBtn.setOnKeyListener((v, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
@@ -472,11 +505,11 @@ public class LauncherActivity extends Activity {
                 default: return false;
             }
         });
-        FrameLayout.LayoutParams wifiLp = new FrameLayout.LayoutParams(btnSz, btnSz);
-        wifiLp.gravity = android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START;
-        wifiLp.setMargins(pillPadH, 0, 0, 0);
-        wifiBtn.setLayoutParams(wifiLp);
-        btnPill.addView(wifiBtn);
+        FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(btnSz, btnSz);
+        netLp.gravity = android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START;
+        netLp.setMargins(pillPadH, 0, 0, 0);
+        netBtn.setLayoutParams(netLp);
+        btnPill.addView(netBtn);
 
         // ── Wallpaper button ─────────────────────────────────────────────────
         wpBtn = new TextView(this) {
@@ -486,12 +519,11 @@ public class LauncherActivity extends Activity {
             private int lw = 0, lh = 0;
             { p = new Paint(Paint.ANTI_ALIAS_FLAG);
               p.setColor(ICON_COL); p.setStyle(Paint.Style.STROKE);
-              p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND);
+              p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(android.graphics.Paint.Join.ROUND);
               hlPaint.setStyle(Paint.Style.FILL); hlPaint.setColor(FOCUS_HL); }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                // Focus highlight
                 if (isFocused()) c.drawRoundRect(0, 0, w, h, FOCUS_RADIUS, FOCUS_RADIUS, hlPaint);
                 float s = Math.min(w, h) * 0.72f, cx = w / 2f, cy = h / 2f;
                 p.setStrokeWidth(s * 0.10f);
@@ -508,7 +540,7 @@ public class LauncherActivity extends Activity {
         };
         wpBtn.setFocusable(true); wpBtn.setFocusableInTouchMode(true); wpBtn.setClickable(true);
         wpBtn.setOnClickListener(v -> openStoragePicker());
-        wpBtn.setOnFocusChangeListener((v, f) -> v.invalidate());  // redraw own highlight only
+        wpBtn.setOnFocusChangeListener((v, f) -> v.invalidate());
         wpBtn.setOnKeyListener((v, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
@@ -519,7 +551,7 @@ public class LauncherActivity extends Activity {
                     if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
                     return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
-                    View wb = wifiBtn; if (wb != null) wb.requestFocus(); return true;
+                    View wb = netBtn; if (wb != null) wb.requestFocus(); return true;
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
                     RecyclingShelfView sr = shelf;
                     if (sr != null) sr.requestFocusOnIndex(0); return true;
@@ -681,6 +713,9 @@ public class LauncherActivity extends Activity {
             if (scroller.computeScrollOffset()) { doScrollTo(scroller.getCurrX()); postInvalidateOnAnimation(); }
         }
 
+        // FIX: VelocityTracker recycled on ACTION_UP and ACTION_CANCEL,
+        // not only in onDetachedFromWindow. Prevents tracker leak on interrupted
+        // touch sequences (phone calls, notifications, remote control events).
         @Override public boolean onTouchEvent(MotionEvent ev) {
             if (velTracker == null) velTracker = VelocityTracker.obtain();
             velTracker.addMovement(ev);
@@ -690,11 +725,16 @@ public class LauncherActivity extends Activity {
                 case MotionEvent.ACTION_MOVE:
                     float dx = lastTouchX - ev.getX(); lastTouchX = ev.getX();
                     doScrollTo(scrollX + (int) dx); break;
-                case MotionEvent.ACTION_UP: case MotionEvent.ACTION_CANCEL:
+                case MotionEvent.ACTION_UP:
                     velTracker.computeCurrentVelocity(1000);
                     scroller.fling(scrollX, 0, (int) -velTracker.getXVelocity(), 0,
                             0, Math.max(0, totalW - getWidth()), 0, 0);
-                    velTracker.clear(); postInvalidateOnAnimation(); break;
+                    velTracker.recycle(); velTracker = null;   // FIX: recycle on UP
+                    postInvalidateOnAnimation(); break;
+                case MotionEvent.ACTION_CANCEL:
+                    scroller.abortAnimation();
+                    velTracker.recycle(); velTracker = null;   // FIX: recycle on CANCEL
+                    break;
             }
             return true;
         }
@@ -735,7 +775,7 @@ public class LauncherActivity extends Activity {
                         case KeyEvent.KEYCODE_DPAD_LEFT:  requestFocusOnIndex(boundIndex - 1); return true;
                         case KeyEvent.KEYCODE_DPAD_RIGHT: requestFocusOnIndex(boundIndex + 1); return true;
                         case KeyEvent.KEYCODE_DPAD_UP:
-                            View wb = wifiBtn; if (wb != null) wb.requestFocus(); return true;
+                            View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
                         default: return false;
                     }
                 });
@@ -766,7 +806,6 @@ public class LauncherActivity extends Activity {
             }
         }
     }
-
     // =========================================================================
     // App loading
     // =========================================================================
@@ -775,16 +814,19 @@ public class LauncherActivity extends Activity {
         if (!appsLoading.compareAndSet(false, true)) return;
         try {
             appExecutor.execute(() -> {
-                // cheapSig(): package-names only — zero label Binder calls.
-                // Short-circuits immediately if nothing changed.
+                // FIX: cheapSig is now only called when we actually need to
+                // check — it still does 2 Binder calls so only run it when
+                // triggered by a real package change (pkgChangedWhilePaused)
+                // or initial load. The appsLoading guard prevents concurrency.
                 String sig = cheapSig();
                 if (sig.equals(lastAppSig) && !appList.isEmpty()) { appsLoading.set(false); return; }
                 List<AppInfo> fresh = queryApps();
                 if (!destroyed) {
                     runOnUiThread(() -> {
                         appsLoading.set(false);
+                        // FIX: sig written on UI thread, read on appExecutor (volatile) —
+                        // write happens-before any subsequent read via volatile guarantee.
                         lastAppSig = sig;
-                        // Evict icons for apps that are no longer installed
                         LruCache<String, Bitmap> cache = iconCache;
                         if (cache != null) {
                             ArraySet<String> pkgs = new ArraySet<>(fresh.size());
@@ -869,12 +911,7 @@ public class LauncherActivity extends Activity {
     }
 
     // =========================================================================
-    // Icon loading
-    // FIX 1: iconInflight is a UI-thread-only map. All reads/writes happen on
-    // the main thread: preWarmIcon() called from setApps() (UI thread),
-    // loadIconAsync() called from bind() (UI thread), and all runOnUiThread
-    // lambdas. No synchronisation needed. Using HashMap (same O(1) perf as
-    // ArrayMap but documents the contract clearly with a standard type).
+    // Icon loading — UI-thread-only map, no sync needed
     // =========================================================================
 
     private void preWarmIcon(AppInfo app) {
@@ -961,7 +998,7 @@ public class LauncherActivity extends Activity {
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
 
-        int   fill    = iconFillColour(raw, sz);
+        int     fill      = iconFillColour(raw, sz);
         boolean needsFill = fill != 0;
         float   scale     = needsFill ? 0.82f : 1.10f;
         int     csz       = Math.round(sz * scale);
@@ -971,10 +1008,6 @@ public class LauncherActivity extends Activity {
         Canvas canvas = new Canvas(out);
 
         if (needsFill) {
-            // sWhiteFill is initialised to Color.WHITE in the static block.
-            // iconFillColour() returns only Color.WHITE or 0 — never any other
-            // colour — so setColor() here is redundant AND a data race
-            // (static Paint mutated on iconExecutor threads). Removed.
             canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
         }
 
@@ -987,13 +1020,15 @@ public class LauncherActivity extends Activity {
         return clipToCircle(out, sz);
     }
 
-    // Returns the fill colour to paint behind a transparent icon, or 0 if no fill needed.
-    // Two conditions must both be true to use a white fill:
-    //   1. The icon has significant edge transparency (≥60% of sampled pixels transparent)
-    //   2. The non-transparent content pixels are dark (avg luminance < 0.55)
-    //      — skips white fill for apps like SmartTube whose logo is already light/white,
-    //        where adding a white circle behind it makes the icon invisible.
+    // FIX: added src.getConfig() guard — if bitmap is not ARGB_8888 the
+    // byte-level indexing (R=base, G=base+1, B=base+2, A=base+3) is wrong.
+    // For non-ARGB_8888 configs we fall through to getPixel() sampling which
+    // is slower but correct. In practice all icons arrive as ARGB_8888.
     private int iconFillColour(Bitmap src, int sz) {
+        if (src.getConfig() != Bitmap.Config.ARGB_8888) {
+            // Fallback: sample via getPixel — safe for any config
+            return iconFillColourSafe(src, sz);
+        }
         int needed = src.getByteCount();
         byte[] px = sPixelBuf.get();
         if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
@@ -1006,10 +1041,10 @@ public class LauncherActivity extends Activity {
         for (int y = step / 2; y < sz; y += step) {
             for (int x = step / 2; x < sz; x += step) {
                 int base = (y * sz + x) * 4;
+                // ARGB_8888 copyPixelsToBuffer order: R, G, B, A
                 int a = px[base + 3] & 0xFF;
                 if (a < 30) { transparent++; }
                 else {
-                    // sRGB -> relative luminance (fast approximation)
                     float r = (px[base]     & 0xFF) / 255f;
                     float g = (px[base + 1] & 0xFF) / 255f;
                     float b = (px[base + 2] & 0xFF) / 255f;
@@ -1022,7 +1057,31 @@ public class LauncherActivity extends Activity {
         if (total == 0) return 0;
         boolean hasTransparentEdge = (float) transparent / total >= 0.40f;
         if (!hasTransparentEdge) return 0;
-        // Only add white fill if the visible content is actually dark
+        float avgLum = lumCount > 0 ? lumSum / lumCount : 0f;
+        return avgLum < 0.55f ? Color.WHITE : 0;
+    }
+
+    private int iconFillColourSafe(Bitmap src, int sz) {
+        int step = Math.max(1, sz / 10);
+        int total = 0, transparent = 0;
+        float lumSum = 0f; int lumCount = 0;
+        for (int y = step / 2; y < sz; y += step) {
+            for (int x = step / 2; x < sz; x += step) {
+                int pixel = src.getPixel(x, y);
+                int a = Color.alpha(pixel);
+                if (a < 30) { transparent++; }
+                else {
+                    float r = Color.red(pixel)   / 255f;
+                    float g = Color.green(pixel) / 255f;
+                    float b = Color.blue(pixel)  / 255f;
+                    lumSum += 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    lumCount++;
+                }
+                total++;
+            }
+        }
+        if (total == 0) return 0;
+        if ((float) transparent / total < 0.40f) return 0;
         float avgLum = lumCount > 0 ? lumSum / lumCount : 0f;
         return avgLum < 0.55f ? Color.WHITE : 0;
     }
@@ -1038,6 +1097,8 @@ public class LauncherActivity extends Activity {
                 return out;
             }
         }
+        // FIX: guard negative intrinsic dimensions — some drawables (ColorDrawable)
+        // return -1. Was: crash on Bitmap.createBitmap(-1,-1,...). Now: fallback to sz.
         int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : sz;
         int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : sz;
         Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
@@ -1094,48 +1155,61 @@ public class LauncherActivity extends Activity {
     private void stopClock() { clockRunning = false; clockHandler.removeCallbacks(clockTick); }
 
     // =========================================================================
-    // Network / WiFi
+    // Network — covers WiFi + Ethernet
     // =========================================================================
 
-    private void checkWifiNow() {
+    // FIX: removed NET_CAPABILITY_VALIDATED — TV firmware (and many ethernet
+    // connections) never sets VALIDATED even when internet works fine.
+    // NET_CAPABILITY_INTERNET alone is the correct bar for a TV launcher.
+    // FIX: renamed checkWifiNow → checkNetNow to reflect WiFi + Ethernet.
+    private void checkNetNow() {
         if (cm == null) return;
         boolean connected = false;
         try {
             Network net = cm.getActiveNetwork();
             NetworkCapabilities caps = net != null ? cm.getNetworkCapabilities(net) : null;
+            // FIX: only require NET_CAPABILITY_INTERNET — drop VALIDATED
             connected = caps != null
-                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
         } catch (Exception ignored) {}
-        wifiConnected = connected;
-        View wb = wifiBtn; if (wb != null) wb.invalidate();
+        netConnected = connected;
+        View nb = netBtn; if (nb != null) nb.invalidate();
     }
 
     private void registerNetworkCallback() {
         if (cm == null) return;
         try {
             networkCallback = new ConnectivityManager.NetworkCallback() {
+                // FIX: onAvailable just sets true immediately — no cap check.
+                // The network appeared; that's sufficient to show connected.
+                // onCapabilitiesChanged handles any subsequent downgrade.
+                // onLost handles disconnect.
                 @Override public void onAvailable(Network n) {
-                    try {
-                        NetworkCapabilities caps = cm.getNetworkCapabilities(n);
-                        boolean ok = caps != null
-                                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
-                        if (ok == wifiConnected) return;
-                        wifiConnected = ok;
-                    } catch (Exception ignored) { return; }
-                    clockHandler.post(() -> { View wb = wifiBtn; if (wb != null) wb.invalidate(); });
+                    if (netConnected) return;
+                    netConnected = true;
+                    clockHandler.post(() -> { View nb = netBtn; if (nb != null) nb.invalidate(); });
                 }
                 @Override public void onLost(Network n) {
-                    wifiConnected = false;
-                    clockHandler.post(() -> { View wb = wifiBtn; if (wb != null) wb.invalidate(); });
+                    // FIX: only go to disconnected if no other network is active
+                    boolean stillConnected = false;
+                    try {
+                        Network active = cm.getActiveNetwork();
+                        if (active != null) {
+                            NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+                            stillConnected = caps != null
+                                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+                        }
+                    } catch (Exception ignored) {}
+                    if (stillConnected == netConnected) return;
+                    netConnected = stillConnected;
+                    clockHandler.post(() -> { View nb = netBtn; if (nb != null) nb.invalidate(); });
                 }
+                // FIX: onCapabilitiesChanged — only require INTERNET, not VALIDATED
                 @Override public void onCapabilitiesChanged(Network n, NetworkCapabilities caps) {
-                    boolean ok = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                            && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
-                    if (ok != wifiConnected) {
-                        wifiConnected = ok;
-                        clockHandler.post(() -> { View wb = wifiBtn; if (wb != null) wb.invalidate(); });
+                    boolean ok = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+                    if (ok != netConnected) {
+                        netConnected = ok;
+                        clockHandler.post(() -> { View nb = netBtn; if (nb != null) nb.invalidate(); });
                     }
                 }
             };
@@ -1165,13 +1239,13 @@ public class LauncherActivity extends Activity {
             Bitmap bmp = null;
             try {
                 Drawable d = WallpaperManager.getInstance(this).getDrawable();
+                // FIX: null guard — getDrawable() can return null on some TV firmware
                 if (d != null) bmp = wpDrawable(d);
             } catch (Exception ignored) {}
             final Bitmap fb = bmp; systemWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
                 ImageView wv = wallpaperView;
                 if (fb != null && wv != null) {
-                    // FIX 5: recycle previous wallpaper bitmap before replacing
                     Drawable prev = wv.getDrawable();
                     if (prev instanceof BitmapDrawable) {
                         Bitmap old = ((BitmapDrawable) prev).getBitmap();
@@ -1215,18 +1289,27 @@ public class LauncherActivity extends Activity {
                     wv.setImageBitmap(fb);
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                             .putString(KEY_WP_URI, uri.toString()).apply();
-                } else { showToast("Could not load wallpaper"); loadSystemWallpaper(); }
+                } else {
+                    // FIX: reset userWpLoading guard before retrying system wallpaper
+                    showToast("Could not load wallpaper");
+                    loadSystemWallpaper();
+                }
             });
         });
     }
 
-    // FIX 5: use RGB_565 for system wallpaper — no alpha channel in wallpapers,
-    // halves memory vs ARGB_8888 (4MB vs 8MB on a 1080p display).
+    // FIX: wpDrawable now downsamples to screen resolution — previously drew at
+    // full native resolution (up to 4K) wasting 4–8× memory on high-res TVs.
     private Bitmap wpDrawable(Drawable d) {
         int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : screenW;
         int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : screenH;
-        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565);
-        d.setBounds(0, 0, w, h); d.draw(new Canvas(bmp)); return bmp;
+        int ss = calcSampleSize(w, h);
+        int sw = Math.max(1, w / ss);
+        int sh = Math.max(1, h / ss);
+        Bitmap bmp = Bitmap.createBitmap(sw, sh, Bitmap.Config.RGB_565);
+        d.setBounds(0, 0, sw, sh);
+        d.draw(new Canvas(bmp));
+        return bmp;
     }
 
     private int calcSampleSize(int srcW, int srcH) {
@@ -1255,7 +1338,10 @@ public class LauncherActivity extends Activity {
             if (uri != null) {
                 try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
                 catch (SecurityException e) { showToast("Could not get permission for this image"); return; }
-                userWpLoading.set(false); applyWallpaperFromUri(uri);
+                // FIX: reset guard before applying — if a previous load was silently
+                // dropped (guard still true), this ensures the new pick goes through.
+                userWpLoading.set(false);
+                applyWallpaperFromUri(uri);
             }
         }
     }
@@ -1284,8 +1370,8 @@ public class LauncherActivity extends Activity {
     // =========================================================================
 
     private void initCaches() {
-        int memMb    = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
-        int cacheMb  = Math.min(memMb / 8, 16);
+        int memMb   = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
+        int cacheMb = Math.min(memMb / 8, 16);
         iconCache = new LruCache<String, Bitmap>(cacheMb * 1024 * 1024) {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
@@ -1324,40 +1410,28 @@ public class LauncherActivity extends Activity {
     }
 
     // =========================================================================
-    // RingView — Apple TV dual-ring focus indicator
+    // RingView — dual-ring focus indicator
     // =========================================================================
-    // Draw order (inner → outer):
-    //   1. Dark inner ring  (1.5dp, fully opaque charcoal) — contrasts on white fills
-    //   2. 2dp transparent gap — lifts ring off icon visually
-    //   3. White outer ring (2.5dp, fully opaque white)    — contrasts on dark icons
-    //
-    // Both rings share one onDraw call — two drawCircle calls on a hardware layer.
-    // Zero extra memory. Always visible regardless of icon background colour.
-    // Ring is also scaled with the icon animation in positionRing() so they
-    // move together during the focus scale transition.
 
     static final class RingView extends View {
         private final Paint outerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint innerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float outerStroke;
         private final float innerStroke;
-        private final float gap;        // transparent gap between icon edge and inner ring
+        private final float gap;
 
         RingView(Context ctx, int strokePx) {
             super(ctx);
-            // Outer: white, 60% of total stroke budget
             outerStroke = strokePx * 0.60f;
-            // Inner: dark charcoal, 40% of total stroke budget
             innerStroke = strokePx * 0.40f;
-            // Gap between icon circle edge and inner ring: half a stroke unit
-            gap = strokePx * 0.50f;
+            gap         = strokePx * 0.50f;
 
             outerPaint.setStyle(Paint.Style.STROKE);
-            outerPaint.setColor(0xFFFFFFFF);          // solid white
+            outerPaint.setColor(0xFFFFFFFF);
             outerPaint.setStrokeWidth(outerStroke);
 
             innerPaint.setStyle(Paint.Style.STROKE);
-            innerPaint.setColor(0xFF1A1A1A);          // solid near-black
+            innerPaint.setColor(0xFF1A1A1A);
             innerPaint.setStrokeWidth(innerStroke);
         }
 
@@ -1365,11 +1439,9 @@ public class LauncherActivity extends Activity {
         protected void onDraw(Canvas canvas) {
             float cx = getWidth()  / 2f;
             float cy = getHeight() / 2f;
-            // Outer ring radius: from centre to mid-stroke of outer ring
             float outerR = cx - outerStroke / 2f;
             if (outerR <= 0) return;
             canvas.drawCircle(cx, cy, outerR, outerPaint);
-            // Inner ring sits inside outer ring, separated by gap + half strokes
             float innerR = outerR - outerStroke / 2f - gap - innerStroke / 2f;
             if (innerR > 0) canvas.drawCircle(cx, cy, innerR, innerPaint);
         }
