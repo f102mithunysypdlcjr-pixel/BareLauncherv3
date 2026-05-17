@@ -44,6 +44,10 @@ android {
                 "**.properties"
             )
         }
+        // Launcher has zero native libs — disable legacy extraction
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 
     dependenciesInfo {
@@ -57,9 +61,9 @@ android {
     }
 
     lint {
-    abortOnError = false
-    checkReleaseBuilds = false
-}
+        abortOnError       = false
+        checkReleaseBuilds = false
+    }
 }
 
 // Block Kotlin from entering via any transitive dep
