@@ -34,7 +34,7 @@ jobs:
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
         run: |
-          gradle :app:assembleRelease \
+          ./gradlew :app:assembleRelease \
             -Pandroid.injected.signing.store.file=/tmp/release.jks \
             -Pandroid.injected.signing.store.password=${{ secrets.KEYSTORE_PASSWORD }} \
             -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS }} \
