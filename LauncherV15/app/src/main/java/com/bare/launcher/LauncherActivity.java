@@ -969,7 +969,10 @@ public class LauncherActivity extends Activity {
         Canvas canvas = new Canvas(out);
 
         if (needsFill) {
-            sWhiteFill.setColor(fill);
+            // sWhiteFill is initialised to Color.WHITE in the static block.
+            // iconFillColour() returns only Color.WHITE or 0 — never any other
+            // colour — so setColor() here is redundant AND a data race
+            // (static Paint mutated on iconExecutor threads). Removed.
             canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
         }
 
@@ -1319,24 +1322,54 @@ public class LauncherActivity extends Activity {
     }
 
     // =========================================================================
-    // RingView
+    // RingView — Apple TV dual-ring focus indicator
     // =========================================================================
+    // Draw order (inner → outer):
+    //   1. Dark inner ring  (1.5dp, fully opaque charcoal) — contrasts on white fills
+    //   2. 2dp transparent gap — lifts ring off icon visually
+    //   3. White outer ring (2.5dp, fully opaque white)    — contrasts on dark icons
+    //
+    // Both rings share one onDraw call — two drawCircle calls on a hardware layer.
+    // Zero extra memory. Always visible regardless of icon background colour.
+    // Ring is also scaled with the icon animation in positionRing() so they
+    // move together during the focus scale transition.
 
     static final class RingView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint outerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint innerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float outerStroke;
+        private final float innerStroke;
+        private final float gap;        // transparent gap between icon edge and inner ring
+
         RingView(Context ctx, int strokePx) {
             super(ctx);
-            paint.setStyle(Paint.Style.STROKE);
-            // Vivid cyan-blue — visible on both white icon fills and dark icons.
-            // Pure white (#FFFFFF) blends on white-fill icons (SmartTube issue).
-            // This colour has enough saturation to contrast against any icon bg.
-           paint.setColor(0x88AAAAAA);
-            paint.setStrokeWidth(strokePx);
+            // Outer: white, 60% of total stroke budget
+            outerStroke = strokePx * 0.60f;
+            // Inner: dark charcoal, 40% of total stroke budget
+            innerStroke = strokePx * 0.40f;
+            // Gap between icon circle edge and inner ring: half a stroke unit
+            gap = strokePx * 0.50f;
+
+            outerPaint.setStyle(Paint.Style.STROKE);
+            outerPaint.setColor(0xFFFFFFFF);          // solid white
+            outerPaint.setStrokeWidth(outerStroke);
+
+            innerPaint.setStyle(Paint.Style.STROKE);
+            innerPaint.setColor(0xFF1A1A1A);          // solid near-black
+            innerPaint.setStrokeWidth(innerStroke);
         }
-        @Override protected void onDraw(Canvas canvas) {
-            float cx = getWidth() / 2f, cy = getHeight() / 2f;
-            float r  = cx - paint.getStrokeWidth() / 2f;
-            if (r > 0) canvas.drawCircle(cx, cy, r, paint);
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float cx = getWidth()  / 2f;
+            float cy = getHeight() / 2f;
+            // Outer ring radius: from centre to mid-stroke of outer ring
+            float outerR = cx - outerStroke / 2f;
+            if (outerR <= 0) return;
+            canvas.drawCircle(cx, cy, outerR, outerPaint);
+            // Inner ring sits inside outer ring, separated by gap + half strokes
+            float innerR = outerR - outerStroke / 2f - gap - innerStroke / 2f;
+            if (innerR > 0) canvas.drawCircle(cx, cy, innerR, innerPaint);
         }
     }
 }
