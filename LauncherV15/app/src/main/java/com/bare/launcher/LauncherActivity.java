@@ -360,7 +360,7 @@ public class LauncherActivity extends Activity {
 
         clockView = new TextView(this);
         GradientDrawable clockBg = new GradientDrawable();
-        clockBg.setColor(0xBB000000);            // semi-transparent dark — wallpaper shows through
+        clockBg.setColor(0x66000000);            // semi-transparent dark — wallpaper shows through
         clockBg.setCornerRadius(dp(100));         // fully-rounded pill
         clockView.setBackground(clockBg);
         clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
@@ -388,7 +388,7 @@ public class LauncherActivity extends Activity {
         // Semi-transparent dark pill — matches clock aesthetic, wallpaper visible through both
         FrameLayout btnPill = new FrameLayout(this);
         GradientDrawable pillBg = new GradientDrawable();
-        pillBg.setColor(0xBB000000);
+        pillBg.setColor(0x66000000);
         pillBg.setCornerRadius(dp(100));
         btnPill.setBackground(pillBg);
         btnPill.setFocusable(false);   // pill itself is NOT focusable — children handle focus
@@ -407,45 +407,47 @@ public class LauncherActivity extends Activity {
         final int FOCUS_HL = 0x33FFFFFF;  // subtle white tint on focused button
         final int FOCUS_RADIUS = dp(20);
 
-        // ── WiFi button — modern signal-bars icon ─────────────────────────────
-        // Three rounded bars of increasing height, like a modern cellular/wifi indicator.
-        // Connected: all bars fully lit. Disconnected: only first bar lit, others dim.
+        // ── WiFi button — classic arc fan icon ────────────────────────────────
+        // One dot + two arcs: the universal WiFi symbol.
+        // Honest: shows connected/not, makes no claim about signal strength.
+        // Simpler than the bar chart: 3 draw calls vs previous 5+.
+        // Connected: all elements fully white. Disconnected: all elements dim.
         wifiBtn = new View(this) {
-            private final Paint barPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint xPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint hlPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final RectF rect      = new RectF();
-            { barPaint.setStyle(Paint.Style.FILL);
-              xPaint.setStyle(Paint.Style.STROKE); xPaint.setStrokeCap(Paint.Cap.ROUND); xPaint.setColor(0xFFFF4444);
-              hlPaint.setStyle(Paint.Style.FILL); hlPaint.setColor(FOCUS_HL); }
+            private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint hlPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final RectF oval     = new RectF();
+            {
+                arcPaint.setStyle(Paint.Style.STROKE);
+                arcPaint.setStrokeCap(Paint.Cap.ROUND);
+                dotPaint.setStyle(Paint.Style.FILL);
+                hlPaint.setStyle(Paint.Style.FILL);
+                hlPaint.setColor(FOCUS_HL);
+            }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
                 if (isFocused()) c.drawRoundRect(0, 0, w, h, FOCUS_RADIUS, FOCUS_RADIUS, hlPaint);
-                boolean conn = wifiConnected;
-                float pad  = w * 0.15f;
-                float bw   = (w - pad * 2 - dp(3) * 2) / 3f;
-                float maxH = h * 0.62f;
-                float bot  = h * 0.78f;
-                float r    = bw * 0.35f;
-                float h1 = maxH * 0.35f, x1 = pad;
-                rect.set(x1, bot - h1, x1 + bw, bot);
-                barPaint.setColor(ICON_COL);
-                c.drawRoundRect(rect, r, r, barPaint);
-                float h2 = maxH * 0.65f, x2 = x1 + bw + dp(3);
-                rect.set(x2, bot - h2, x2 + bw, bot);
-                barPaint.setColor(conn ? ICON_COL : ICON_DIM);
-                c.drawRoundRect(rect, r, r, barPaint);
-                float h3 = maxH, x3 = x2 + bw + dp(3);
-                rect.set(x3, bot - h3, x3 + bw, bot);
-                barPaint.setColor(conn ? ICON_COL : ICON_DIM);
-                c.drawRoundRect(rect, r, r, barPaint);
-                if (!conn) {
-                    xPaint.setStrokeWidth(dp(2));
-                    float xc = x3 + bw / 2f, yc = bot - h3 - dp(6), d2 = dp(4);
-                    c.drawLine(xc - d2, yc - d2, xc + d2, yc + d2, xPaint);
-                    c.drawLine(xc + d2, yc - d2, xc - d2, yc + d2, xPaint);
-                }
+                boolean conn  = wifiConnected;
+                int     col   = conn ? ICON_COL : ICON_DIM;
+                float   ic    = Math.min(w, h) * 0.68f;
+                float   cx    = w / 2f;
+                // Dot sits at 78% of height — arcs fan upward from it
+                float   dotY  = h * 0.78f;
+                float   sw    = ic * 0.11f;
+                arcPaint.setStrokeWidth(sw);
+                arcPaint.setColor(col);
+                dotPaint.setColor(col);
+                // Dot
+                c.drawCircle(cx, dotY, sw * 0.65f, dotPaint);
+                // Inner arc
+                float r1 = ic * 0.28f;
+                oval.set(cx - r1, dotY - r1, cx + r1, dotY + r1);
+                c.drawArc(oval, 210f, 120f, false, arcPaint);
+                // Outer arc
+                float r2 = ic * 0.52f;
+                oval.set(cx - r2, dotY - r2, cx + r2, dotY + r2);
+                c.drawArc(oval, 210f, 120f, false, arcPaint);
             }
         };
         wifiBtn.setFocusable(true); wifiBtn.setFocusableInTouchMode(true); wifiBtn.setClickable(true);
