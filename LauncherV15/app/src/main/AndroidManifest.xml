@@ -1,21 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.bare.launcher"
-    android:versionCode="2"
-    android:versionName="2.0.0">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ═══════════════════════════════════════════════════════════════════════
-         SDK TARGETS
-         minSdk 21 = Android 5 (covers all real-world Android TV hardware)
-         targetSdk 34 = Android 14 (required for Play Store 2024+)
-    ════════════════════════════════════════════════════════════════════════ -->
-    <uses-sdk
-        android:minSdkVersion="21"
-        android:targetSdkVersion="34" />
-
-    <!-- ═══════════════════════════════════════════════════════════════════════
-         PERMISSIONS
-    ════════════════════════════════════════════════════════════════════════ -->
+    <!-- PERMISSIONS -->
 
     <!-- Wallpaper reading (Android 12 and below) -->
     <uses-permission
@@ -31,11 +17,9 @@
     <!-- Required to enumerate installed apps for the launcher grid -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
-    <!-- ═══════════════════════════════════════════════════════════════════════
-         HARDWARE FEATURES
+    <!-- HARDWARE FEATURES
          Both declared as NOT required so the APK installs on phones too
-         (useful for sideloading / testing)
-    ════════════════════════════════════════════════════════════════════════ -->
+         (useful for sideloading / testing) -->
     <uses-feature
         android:name="android.software.leanback"
         android:required="false" />
@@ -43,27 +27,20 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
-    <!-- ═══════════════════════════════════════════════════════════════════════
-         PACKAGE VISIBILITY (Android 11+)
+    <!-- PACKAGE VISIBILITY (Android 11+)
          Required so queryIntentActivities returns results on API 30+
-         Without this the app grid is empty on modern Android TV firmware.
-    ════════════════════════════════════════════════════════════════════════ -->
+         Without this the app grid is empty on modern Android TV firmware. -->
     <queries>
-        <!-- TV launcher intents -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
         </intent>
-        <!-- Phone/tablet launcher intents (for mixed-use devices) -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
     </queries>
 
-    <!-- ═══════════════════════════════════════════════════════════════════════
-         APPLICATION
-    ════════════════════════════════════════════════════════════════════════ -->
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -72,16 +49,8 @@
         android:allowBackup="false"
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
-        android:extractNativeLibs="true"
         android:largeHeap="false">
 
-        <!-- ───────────────────────────────────────────────────────────────────
-             MAIN LAUNCHER ACTIVITY
-             Both HOME and LEANBACK_LAUNCHER so it works as default on:
-               • Android TV / Google TV
-               • Fire TV
-               • Regular Android (phones, tablets, boxes without Leanback)
-        ─────────────────────────────────────────────────────────────────── -->
         <activity
             android:name=".LauncherActivity"
             android:exported="true"
@@ -90,17 +59,17 @@
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:resizeableActivity="false"
-            android:configChanges="keyboard|keyboardHidden|navigation|screenSize|uiMode"
+            android:configChanges="keyboard|keyboardHidden|navigation|screenSize|uiMode|locale|layoutDirection"
             android:windowSoftInputMode="stateUnspecified|adjustPan">
 
-            <!-- Intent filter 1: Standard Android HOME launcher -->
+            <!-- Standard Android HOME launcher -->
             <intent-filter android:priority="1">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
 
-            <!-- Intent filter 2: Android TV / Leanback launcher -->
+            <!-- Android TV / Leanback launcher -->
             <intent-filter android:priority="1">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
