@@ -29,8 +29,11 @@ jobs:
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/release.jks
 
-      - name: Make gradlew executable
-        run: chmod +x LauncherV15/gradlew
+      - name: Generate Gradle wrapper
+        working-directory: LauncherV15
+        run: |
+          gradle wrapper --gradle-version 8.14.1
+          chmod +x gradlew
 
       - name: Build and sign release APK
         working-directory: LauncherV15
