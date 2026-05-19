@@ -18,7 +18,6 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
@@ -38,6 +37,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
+import android.text.TextPaint;
 import android.text.style.RelativeSizeSpan;
 import android.util.ArrayMap;
 import android.util.ArraySet;
@@ -62,7 +62,6 @@ import android.widget.Toast;
 
 import java.io.InputStream;
 import java.nio.ByteBuffer;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -78,12 +77,13 @@ public class LauncherActivity extends Activity {
 
     private static final int    ICON_DP        = 68;
     private static final int    CELL_W_DP      = 90;
-    private static final int    CELL_H_DP      = 96;
+    private static final int    CELL_H_DP      = 100;
     private static final int    RING_STROKE_DP = 4;
     private static final long   CLOCK_MS       = 1_000L;
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
+    private static final String KEY_APP_ORDER  = "app_order";
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
@@ -125,33 +125,31 @@ public class LauncherActivity extends Activity {
     private RecyclingShelfView shelf;
     private ImageView          wallpaperView;
     private TextView           clockView;
-    private TextView           loadingView;
     private View               netBtn;
     private View               wpBtnView;
     private RingView           ringView;
     private FrameLayout        root;
     private Toast              currentToast;
 
-    private final Handler          uiHandler    = new Handler(Looper.getMainLooper());
-    private final Handler          clockHandler = new Handler(Looper.getMainLooper());
-    private       boolean          clockRunning = false;
-    private       SimpleDateFormat sdfTime;
+    private final Handler uiHandler    = new Handler(Looper.getMainLooper());
+    private final Handler clockHandler = new Handler(Looper.getMainLooper());
+    private       boolean clockRunning = false;
 
-    private final SpannableStringBuilder clockSsb  = new SpannableStringBuilder();
-    private final java.util.Calendar     clockCal  = java.util.Calendar.getInstance();
+    private final SpannableStringBuilder clockSsb   = new SpannableStringBuilder();
+    private final java.util.Calendar     clockCal   = java.util.Calendar.getInstance();
     private final char[]                 clockChars = new char[8];
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
             if (destroyed || !clockRunning) return;
             TextView cv = clockView;
-            if (cv != null) cv.setText(formatClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
+            if (cv != null) cv.setText(buildClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
             long now = System.currentTimeMillis();
             clockHandler.postDelayed(this, CLOCK_MS - (now % CLOCK_MS));
         }
     };
 
-    private CharSequence formatClock(long ms) {
+    private CharSequence buildClock(long ms) {
         clockCal.setTimeInMillis(ms);
         int hour = clockCal.get(java.util.Calendar.HOUR);
         if (hour == 0) hour = 12;
@@ -164,12 +162,12 @@ public class LauncherActivity extends Activity {
         clockChars[pos++] = (char)('0' + min / 10);
         clockChars[pos++] = (char)('0' + min % 10);
         clockChars[pos++] = ' ';
-        int amPmStart = pos;
+        int amStart = pos;
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
         clockSsb.clear(); clockSsb.clearSpans();
         clockSsb.append(new String(clockChars, 0, pos));
-        clockSsb.setSpan(sAmPmSpan, amPmStart, pos, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        clockSsb.setSpan(sAmPmSpan, amStart, pos, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return clockSsb;
     }
 
@@ -192,8 +190,7 @@ public class LauncherActivity extends Activity {
     private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
             String action = intent.getAction();
-            if (Intent.ACTION_PACKAGE_REPLACED.equals(action)
-                    || Intent.ACTION_PACKAGE_CHANGED.equals(action)) {
+            if (Intent.ACTION_PACKAGE_REPLACED.equals(action) || Intent.ACTION_PACKAGE_CHANGED.equals(action)) {
                 Uri data = intent.getData();
                 if (data != null) {
                     String pkg = data.getSchemeSpecificPart();
@@ -219,6 +216,32 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    private void applyStoredOrder(List<AppInfo> apps) {
+        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_APP_ORDER, null);
+        if (raw == null || raw.isEmpty()) return;
+        String[] order = raw.split(",", -1);
+        ArrayMap<String, Integer> rank = new ArrayMap<>(order.length);
+        for (int i = 0; i < order.length; i++) rank.put(order[i], i);
+        Collections.sort(apps, (a, b) -> {
+            Integer ra = rank.get(a.packageName);
+            Integer rb = rank.get(b.packageName);
+            if (ra != null && rb != null) return ra - rb;
+            if (ra != null) return -1;
+            if (rb != null) return 1;
+            return a.label.compareToIgnoreCase(b.label);
+        });
+    }
+
+    private void saveOrder() {
+        if (appList.isEmpty()) return;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < appList.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(appList.get(i).packageName);
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_APP_ORDER, sb.toString()).apply();
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -227,9 +250,6 @@ public class LauncherActivity extends Activity {
         density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels;
         pm = getPackageManager();
         cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-        sdfTime = new SimpleDateFormat(
-                getSharedPreferences(PREFS, MODE_PRIVATE).getString("clockFmt", "h:mm a"),
-                Locale.getDefault());
         initCaches();
         setContentView(buildLayout());
         hideSystemUI();
@@ -239,7 +259,10 @@ public class LauncherActivity extends Activity {
         registerNetworkCallback();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, () -> {});
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, () -> {
+                        RecyclingShelfView s = shelf;
+                        if (s != null && s.reorderMode) s.exitReorderMode(false);
+                    });
         }
     }
 
@@ -249,16 +272,11 @@ public class LauncherActivity extends Activity {
         hideSystemUI();
         startClock();
         checkNetNow();
-        if (pkgChangedWhilePaused) {
-            pkgChangedWhilePaused = false;
-            loadApps();
-        }
+        if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         RecyclingShelfView s = shelf;
         if (s != null) {
-            int savedIdx = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_SCROLL_IDX, 0);
-            if (savedIdx != s.focusedIndex && !appList.isEmpty()) {
-                s.focusedIndex = Math.min(savedIdx, appList.size() - 1);
-            }
+            int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_SCROLL_IDX, 0);
+            if (!appList.isEmpty()) s.focusedIndex = Math.min(saved, appList.size() - 1);
             focusRestoreListener = new ViewTreeObserver.OnGlobalLayoutListener() {
                 @Override public void onGlobalLayout() {
                     ViewTreeObserver vto = s.getViewTreeObserver();
@@ -278,8 +296,8 @@ public class LauncherActivity extends Activity {
         stopClock();
         RecyclingShelfView s = shelf;
         if (s != null) {
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putInt(KEY_SCROLL_IDX, s.focusedIndex).apply();
+            if (s.reorderMode) s.exitReorderMode(false);
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_SCROLL_IDX, s.focusedIndex).apply();
             if (focusRestoreListener != null) {
                 ViewTreeObserver vto = s.getViewTreeObserver();
                 if (vto.isAlive()) vto.removeOnGlobalLayoutListener(focusRestoreListener);
@@ -299,7 +317,7 @@ public class LauncherActivity extends Activity {
         shutdown(iconExecutor); shutdown(wpExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
-        wallpaperView = null; clockView = null; loadingView = null; shelf = null;
+        wallpaperView = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
         super.onDestroy();
     }
@@ -307,7 +325,7 @@ public class LauncherActivity extends Activity {
     private void shutdown(ExecutorService ex) {
         if (ex == null) return;
         ex.shutdown();
-        try { ex.awaitTermination(400, TimeUnit.MILLISECONDS); }
+        try { ex.awaitTermination(300, TimeUnit.MILLISECONDS); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         finally { ex.shutdownNow(); }
     }
@@ -322,16 +340,18 @@ public class LauncherActivity extends Activity {
     }
 
     @Override public void onWindowFocusChanged(boolean h) { super.onWindowFocusChanged(h); if (h) hideSystemUI(); }
-    @Override @SuppressWarnings("deprecation") public void onBackPressed() {}
+
+    @Override @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        RecyclingShelfView s = shelf;
+        if (s != null && s.reorderMode) { s.exitReorderMode(false); return; }
+    }
 
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        sdfTime = new SimpleDateFormat(
-                getSharedPreferences(PREFS, MODE_PRIVATE).getString("clockFmt", "h:mm a"),
-                Locale.getDefault());
         TextView cv = clockView;
-        if (cv != null) cv.setText(formatClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
+        if (cv != null) cv.setText(buildClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
     }
 
     private View buildLayout() {
@@ -352,20 +372,8 @@ public class LauncherActivity extends Activity {
         shelf.setLayoutParams(shelfLp);
         root.addView(shelf);
 
-        loadingView = new TextView(this);
-        loadingView.setText("Loading apps…");
-        loadingView.setTextColor(0xCCFFFFFF);
-        loadingView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
-        loadingView.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
-        FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(WRAP, WRAP);
-        llp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        llp.setMargins(0, 0, 0, dp(28) + dp(CELL_H_DP) / 2 - dp(10));
-        loadingView.setLayoutParams(llp);
-        loadingView.setVisibility(View.VISIBLE);
-        root.addView(loadingView);
-
         clockView = new TextView(this);
-        clockView.setShadowLayer(dp(6), 0, dp(2), 0xCC000000);
+        clockView.setShadowLayer(dp(8), 0, dp(3), 0xDD000000);
         clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
         clockView.setIncludeFontPadding(false);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
@@ -378,71 +386,76 @@ public class LauncherActivity extends Activity {
         clockView.setLetterSpacing(0.01f);
         root.addView(clockView);
 
-        final int BTN_SZ     = dp(40);
-        final int BTN_GAP    = dp(10);
-        final int ICON_COL   = 0xFFFFFFFF;
-        final int FOCUS_HL   = 0x33FFFFFF;
-        final int FOCUS_RAD  = dp(20);
-        final int MARGIN_TOP = dp(24);
-        final int MARGIN_END = dp(32);
+        final int BTN_SZ  = dp(44);
+        final int BTN_GAP = dp(12);
+        final int MARG_T  = dp(24);
+        final int MARG_E  = dp(32);
 
-        netBtn = new View(this) {
-            private final Paint arcPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint dotPaint   = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint slashPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint hlPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final RectF oval       = new RectF();
-            {
-                arcPaint.setStyle(Paint.Style.STROKE);
-                arcPaint.setStrokeCap(Paint.Cap.ROUND);
-                arcPaint.setColor(ICON_COL);
-                arcPaint.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
-                dotPaint.setStyle(Paint.Style.FILL);
-                dotPaint.setColor(ICON_COL);
-                dotPaint.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
-                slashPaint.setStyle(Paint.Style.STROKE);
-                slashPaint.setStrokeCap(Paint.Cap.ROUND);
-                slashPaint.setColor(ICON_COL);
-                slashPaint.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
-                hlPaint.setStyle(Paint.Style.FILL);
-                hlPaint.setColor(FOCUS_HL);
-            }
+        netBtn = buildNetBtn(BTN_SZ);
+        FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
+        netLp.gravity = Gravity.TOP | Gravity.END;
+        netLp.setMargins(0, MARG_T, MARG_E + BTN_SZ + BTN_GAP, 0);
+        netBtn.setLayoutParams(netLp);
+        root.addView(netBtn);
+
+        View wpLocal = buildWpBtn(BTN_SZ);
+        wpBtnView = wpLocal;
+        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
+        wpLp.gravity = Gravity.TOP | Gravity.END;
+        wpLp.setMargins(0, MARG_T, MARG_E, 0);
+        wpLocal.setLayoutParams(wpLp);
+        root.addView(wpLocal);
+
+        int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
+        ringView = new RingView(this, strokePx);
+        ringView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        ringView.setLayoutParams(new FrameLayout.LayoutParams(iconPx + strokePx * 2, iconPx + strokePx * 2));
+        ringView.setVisibility(View.INVISIBLE);
+        root.addView(ringView);
+
+        return root;
+    }
+
+    private View buildNetBtn(int sz) {
+        View v = new View(this) {
+            private final Paint arcP   = makeBtnPaint(false);
+            private final Paint dotP   = makeBtnPaint(true);
+            private final Paint slashP = makeBtnPaint(false);
+            private final Paint hlP    = makeHlPaint();
+            private final Paint bgP    = makeBgCirclePaint();
+            private final RectF oval   = new RectF();
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                if (isFocused()) c.drawRoundRect(0, 0, w, h, FOCUS_RAD, FOCUS_RAD, hlPaint);
-                boolean conn    = netConnected;
-                float ic        = Math.min(w, h) * 0.72f;
-                float cx        = w / 2f;
-                float sw        = ic * 0.11f;
-                float dotR      = sw;
-                float dotY      = h * 0.76f;
+                float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
+                c.drawCircle(cx, cy, r, bgP);
+                if (isFocused()) c.drawCircle(cx, cy, r, hlP);
+                boolean conn = netConnected;
+                float ic = r * 1.30f, sw = ic * 0.11f, dotR = sw, dotY = cy + ic * 0.22f;
                 float startAngle = 202.5f, sweep = 135f;
-                arcPaint.setStrokeWidth(sw);
-                slashPaint.setStrokeWidth(sw);
-                c.drawCircle(cx, dotY, dotR, dotPaint);
+                arcP.setStrokeWidth(sw); slashP.setStrokeWidth(sw); dotP.setStrokeWidth(sw);
+                c.drawCircle(cx, dotY, dotR, dotP);
                 float r1 = ic * 0.30f;
                 oval.set(cx - r1, dotY - r1, cx + r1, dotY + r1);
-                c.drawArc(oval, startAngle, sweep, false, arcPaint);
+                c.drawArc(oval, startAngle, sweep, false, arcP);
                 float r2 = ic * 0.56f;
                 oval.set(cx - r2, dotY - r2, cx + r2, dotY + r2);
-                c.drawArc(oval, startAngle, sweep, false, arcPaint);
+                c.drawArc(oval, startAngle, sweep, false, arcP);
                 if (!conn) {
                     float inset = ic * 0.06f;
-                    c.drawLine(cx - ic * 0.36f + inset, dotY + dotR * 1.5f,
-                               cx + ic * 0.36f - inset, dotY - r2 + inset, slashPaint);
+                    c.drawLine(cx - ic*0.38f + inset, dotY + dotR*1.5f, cx + ic*0.38f - inset, dotY - r2 - inset, slashP);
                 }
             }
         };
-        netBtn.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-        netBtn.setFocusable(true); netBtn.setFocusableInTouchMode(true); netBtn.setClickable(true);
-        netBtn.setOnClickListener(v -> openNetSettings());
-        netBtn.setOnFocusChangeListener((v, f) -> v.invalidate());
-        netBtn.setOnKeyListener((v, kc, ev) -> {
+        v.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
+        v.setOnClickListener(view -> openNetSettings());
+        v.setOnFocusChangeListener((view, f) -> view.invalidate());
+        v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A: v.performClick(); return true;
+                case KeyEvent.KEYCODE_BUTTON_A: view.performClick(); return true;
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView sd = shelf; if (sd != null) sd.requestFocusOnIndex(0); return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -454,50 +467,45 @@ public class LauncherActivity extends Activity {
                 default: return false;
             }
         });
+        return v;
+    }
 
-        View wpBtnLocal = new View(this) {
-            private final Paint p       = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint hlPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Path  mt      = new Path();
+    private View buildWpBtn(int sz) {
+        View v = new View(this) {
+            private final Paint p   = makeBtnStrokePaint();
+            private final Paint hlP = makeHlPaint();
+            private final Paint bgP = makeBgCirclePaint();
+            private final android.graphics.Path mt = new android.graphics.Path();
             private int lw = 0, lh = 0;
-            {
-                p.setColor(ICON_COL);
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeCap(Paint.Cap.ROUND);
-                p.setStrokeJoin(Paint.Join.ROUND);
-                p.setShadowLayer(dp(4), 0, dp(1), 0xAA000000);
-                hlPaint.setStyle(Paint.Style.FILL);
-                hlPaint.setColor(FOCUS_HL);
-            }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                if (isFocused()) c.drawRoundRect(0, 0, w, h, FOCUS_RAD, FOCUS_RAD, hlPaint);
-                float s = Math.min(w, h) * 0.72f, cx = w / 2f, cy = h / 2f;
+                float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
+                c.drawCircle(cx, cy, r, bgP);
+                if (isFocused()) c.drawCircle(cx, cy, r, hlP);
+                float s = r * 1.30f;
                 p.setStrokeWidth(s * 0.10f);
                 if (w != lw || h != lh) {
                     lw = w; lh = h;
-                    float l = cx - s/2f, r = cx + s/2f, t = cy - s/2f, b = cy + s/2f;
+                    float l = cx - s/2f, rt = cx + s/2f, t = cy - s/2f, b = cy + s/2f;
                     mt.rewind();
-                    mt.moveTo(l, b);
-                    mt.lineTo(l + s * 0.38f, t + s * 0.48f);
-                    mt.lineTo(l + s * 0.62f, t + s * 0.66f);
-                    mt.lineTo(r, b);
+                    mt.moveTo(l, b); mt.lineTo(l + s*0.38f, t + s*0.48f);
+                    mt.lineTo(l + s*0.62f, t + s*0.66f); mt.lineTo(rt, b);
                 }
-                c.drawRoundRect(cx - s/2f, cy - s/2f, cx + s/2f, cy + s/2f, s * 0.12f, s * 0.12f, p);
-                c.drawCircle(cx + s * 0.17f, cy - s/2f + s * 0.26f, s * 0.10f, p);
+                c.drawRoundRect(cx - s/2f, cy - s/2f, cx + s/2f, cy + s/2f, s*0.10f, s*0.10f, p);
+                c.drawCircle(cx + s*0.17f, cy - s/2f + s*0.26f, s*0.10f, p);
                 c.drawPath(mt, p);
             }
         };
-        wpBtnLocal.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-        wpBtnLocal.setFocusable(true); wpBtnLocal.setFocusableInTouchMode(true); wpBtnLocal.setClickable(true);
-        wpBtnLocal.setOnClickListener(v -> openStoragePicker());
-        wpBtnLocal.setOnFocusChangeListener((v, f) -> v.invalidate());
-        wpBtnLocal.setOnKeyListener((v, kc, ev) -> {
+        v.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
+        v.setOnClickListener(view -> openStoragePicker());
+        v.setOnFocusChangeListener((view, f) -> view.invalidate());
+        v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A: v.performClick(); return true;
+                case KeyEvent.KEYCODE_BUTTON_A: view.performClick(); return true;
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView s = shelf;
                     if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
@@ -509,34 +517,47 @@ public class LauncherActivity extends Activity {
                 default: return false;
             }
         });
-        wpBtnView = wpBtnLocal;
+        return v;
+    }
 
-        FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
-        netLp.gravity = Gravity.TOP | Gravity.END;
-        netLp.setMargins(0, MARGIN_TOP, MARGIN_END + BTN_SZ + BTN_GAP, 0);
-        netBtn.setLayoutParams(netLp);
-        root.addView(netBtn);
+    private Paint makeBtnPaint(boolean fill) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(0xFFFFFFFF);
+        p.setStyle(fill ? Paint.Style.FILL : Paint.Style.STROKE);
+        p.setStrokeCap(Paint.Cap.ROUND);
+        return p;
+    }
 
-        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
-        wpLp.gravity = Gravity.TOP | Gravity.END;
-        wpLp.setMargins(0, MARGIN_TOP, MARGIN_END, 0);
-        wpBtnLocal.setLayoutParams(wpLp);
-        root.addView(wpBtnLocal);
+    private Paint makeBtnStrokePaint() {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(0xFFFFFFFF);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeCap(Paint.Cap.ROUND);
+        p.setStrokeJoin(Paint.Join.ROUND);
+        return p;
+    }
 
-        int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        ringView = new RingView(this, strokePx);
-        ringView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        ringView.setLayoutParams(new FrameLayout.LayoutParams(iconPx + strokePx * 2, iconPx + strokePx * 2));
-        ringView.setVisibility(View.INVISIBLE);
-        root.addView(ringView);
+    private Paint makeHlPaint() {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0x55FFFFFF);
+        return p;
+    }
 
-        return root;
+    private Paint makeBgCirclePaint() {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0x55000000);
+        return p;
     }
 
     private void openNetSettings() {
-        try { startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return; } catch (Exception ignored) {}
-        try { startActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return; } catch (Exception ignored) {}
-        try { startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); } catch (Exception ignored) { showToast("Cannot open network settings"); }
+        String[] actions = { Settings.ACTION_WIFI_SETTINGS, Settings.ACTION_WIRELESS_SETTINGS, Settings.ACTION_SETTINGS };
+        for (String a : actions) {
+            try { startActivity(new Intent(a).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return; }
+            catch (Exception ignored) {}
+        }
+        showToast("Cannot open network settings");
     }
 
     final class RecyclingShelfView extends ViewGroup {
@@ -555,6 +576,14 @@ public class LauncherActivity extends Activity {
         private final int cellW, cellH, stride;
         int focusedIndex = 0;
 
+        boolean reorderMode   = false;
+        int     dragIndex     = -1;
+
+        // MENU_MOVE=0, MENU_UNINSTALL=1
+        private static final int MENU_MOVE      = 0;
+        private static final int MENU_UNINSTALL = 1;
+        int menuSelection = MENU_MOVE;
+
         RecyclingShelfView(Context ctx) {
             super(ctx);
             scroller = new OverScroller(ctx);
@@ -563,6 +592,42 @@ public class LauncherActivity extends Activity {
             stride = cellW + dp(10) * 2;
             setFocusable(false);
             setClipChildren(false);
+        }
+
+        void enterReorderMode(int idx) {
+            if (reorderMode) return;
+            reorderMode   = true;
+            dragIndex     = idx;
+            menuSelection = MENU_MOVE;
+            rebindAll();
+        }
+
+        void exitReorderMode(boolean saveOrderNow) {
+            if (!reorderMode) return;
+            reorderMode = false;
+            dragIndex   = -1;
+            if (saveOrderNow) saveOrder();
+            rebindAll();
+        }
+
+        void swapWithNeighbour(int targetIdx) {
+            if (targetIdx < 0 || targetIdx >= appList.size() || targetIdx == dragIndex) return;
+            Collections.swap(appList, dragIndex, targetIdx);
+            dragIndex    = targetIdx;
+            focusedIndex = dragIndex;
+            rebindAll();
+            ensureVisible(dragIndex);
+            CellView cv = attached.get(dragIndex);
+            if (cv != null) cv.requestFocus();
+        }
+
+        private void rebindAll() {
+            for (int i = 0; i < attached.size(); i++) {
+                int idx = attached.keyAt(i);
+                if (idx >= 0 && idx < appList.size()) bindCell(attached.valueAt(i), idx);
+            }
+            CellView focused = attached.get(reorderMode ? dragIndex : focusedIndex);
+            if (focused != null) focused.invalidate();
         }
 
         @Override protected void onDetachedFromWindow() {
@@ -584,20 +649,15 @@ public class LauncherActivity extends Activity {
 
         void setApps(List<AppInfo> apps) {
             for (int i = 0; i < attached.size(); i++) {
-                CellView cv = attached.valueAt(i);
-                cv.setVisibility(GONE); pool.add(cv);
+                CellView cv = attached.valueAt(i); cv.setVisibility(GONE); pool.add(cv);
             }
             attached.clear();
             if (apps.isEmpty()) { focusedIndex = 0; scrollX = 0; }
             if (!apps.isEmpty()) focusedIndex = Math.min(focusedIndex, apps.size() - 1);
-            totalW      = apps.size() * stride;
-            centerX     = 0;
-            needsRefill = true;
+            totalW = apps.size() * stride; centerX = 0; needsRefill = true;
             requestLayout();
             for (AppInfo app : apps) preWarmIcon(app);
             post(() -> requestFocusOnIndex(focusedIndex));
-            TextView lv = loadingView;
-            if (lv != null) lv.setVisibility(apps.isEmpty() ? View.VISIBLE : View.GONE);
         }
 
         void requestFocusOnIndex(int idx) {
@@ -613,8 +673,7 @@ public class LauncherActivity extends Activity {
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             if (w > 0) centerX = (totalW < w) ? (w - totalW) / 2 : dp(24);
-            repositionAttached();
-            fillVisible();
+            repositionAttached(); fillVisible();
         }
 
         private int cellLeft(int i) { return centerX + i * stride + dp(10) - scrollX; }
@@ -666,7 +725,7 @@ public class LauncherActivity extends Activity {
 
         private void ensureVisible(int idx) {
             int left = centerX + idx * stride + dp(10), right = left + cellW, pad = dp(48);
-            if      (left  - pad < scrollX)              doScrollTo(Math.max(0, left - pad));
+            if      (left - pad < scrollX)               doScrollTo(Math.max(0, left - pad));
             else if (right + pad > scrollX + getWidth()) doScrollTo(right + pad - getWidth());
         }
 
@@ -696,63 +755,123 @@ public class LauncherActivity extends Activity {
             return true;
         }
 
+        // ── CellView ──────────────────────────────────────────────────────────
+
         final class CellView extends View {
 
             Bitmap  iconBitmap;
             AppInfo boundApp;
             int     boundIndex;
-            boolean isFocusedCell = false;
+            boolean focused = false;
 
-            private final Paint phRing;
-            private final Paint labelPaint;
-            private final int   cvIconPx;
-            private final float cvPhR;
-            private final float cvPhStroke;
-            private String      labelText = "";
+            private final Paint   phRing;
+            private final Paint   labelPaint;
+            private final Paint   menuBgPaint;
+            private final Paint   menuSelPaint;
+            private final Paint   menuTextPaint;
+            private final Paint   dimPaint;
+            private final Paint   dragRingPaint;
+            private final TextPaint labelTp;
+            private final RectF   menuRect = new RectF();
+            private final int     iconPx;
+            private final float   phR;
+            private final float   phStroke;
+            private       String  labelStr = "";
 
             CellView(Context ctx) {
                 super(ctx);
-                cvIconPx   = dp(ICON_DP);
-                cvPhR      = cvIconPx / 2f - dp(2);
-                cvPhStroke = dp(1);
+                iconPx   = dp(ICON_DP);
+                phR      = iconPx / 2f - dp(2);
+                phStroke = dp(1);
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
                 phRing.setColor(0x55FFFFFF);
-                phRing.setStrokeWidth(cvPhStroke);
+                phRing.setStrokeWidth(phStroke);
 
                 labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
                 labelPaint.setColor(Color.WHITE);
                 labelPaint.setTextSize(dp(11));
                 labelPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
                 labelPaint.setTextAlign(Paint.Align.CENTER);
-                labelPaint.setShadowLayer(dp(3), 0, dp(1), 0xCC000000);
+                labelPaint.setShadowLayer(dp(4), 0, dp(2), 0xDD000000);
+
+                labelTp = new TextPaint(labelPaint);
+
+                menuBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                menuBgPaint.setStyle(Paint.Style.FILL);
+                menuBgPaint.setColor(0xDD111111);
+
+                menuSelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                menuSelPaint.setStyle(Paint.Style.FILL);
+                menuSelPaint.setColor(0xFF2C2C2C);
+
+                menuTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                menuTextPaint.setColor(Color.WHITE);
+                menuTextPaint.setTextSize(dp(12));
+                menuTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                menuTextPaint.setTextAlign(Paint.Align.CENTER);
+
+                dimPaint = new Paint();
+                dimPaint.setStyle(Paint.Style.FILL);
+                dimPaint.setColor(0x55000000);
+
+                dragRingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                dragRingPaint.setStyle(Paint.Style.STROKE);
+                dragRingPaint.setColor(0xCCFFFFFF);
+                dragRingPaint.setStrokeWidth(dp(2));
 
                 setFocusable(true); setFocusableInTouchMode(true);
                 setClickable(true); setLongClickable(true); setWillNotDraw(false);
 
-                setOnClickListener(v -> { if (boundApp != null) launchApp(boundApp); });
+                setOnClickListener(v -> {
+                    if (boundApp == null) return;
+                    if (reorderMode) { exitReorderMode(true); return; }
+                    launchApp(boundApp);
+                });
 
                 setOnLongClickListener(v -> {
                     if (boundApp == null) return false;
-                    Intent intent = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
-                            Uri.parse("package:" + boundApp.packageName));
-                    intent.putExtra(Intent.EXTRA_RETURN_RESULT, false);
-                    try { startActivity(intent); } catch (Exception ignored) {}
+                    if (!reorderMode) enterReorderMode(boundIndex);
                     return true;
                 });
 
-                setOnFocusChangeListener((v, focused) -> {
-                    isFocusedCell = focused;
+                setOnFocusChangeListener((v, f) -> {
+                    focused = f;
                     animate().cancel();
-                    animate().scaleX(focused ? 1.10f : 1f).scaleY(focused ? 1.10f : 1f).setDuration(120).start();
+                    animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
                     invalidate();
-                    if (focused) { focusedIndex = boundIndex; positionRing(this); ensureVisible(boundIndex); }
-                    else { RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE); }
+                    if (f) { focusedIndex = boundIndex; positionRing(this); ensureVisible(boundIndex); }
+                    else   { RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE); }
                 });
 
                 setOnKeyListener((v, kc, ev) -> {
                     if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+
+                    if (reorderMode) {
+                        switch (kc) {
+                            case KeyEvent.KEYCODE_DPAD_LEFT:
+                                if (menuSelection == MENU_MOVE) { swapWithNeighbour(dragIndex - 1); return true; }
+                                return false;
+                            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                                if (menuSelection == MENU_MOVE) { swapWithNeighbour(dragIndex + 1); return true; }
+                                return false;
+                            case KeyEvent.KEYCODE_DPAD_UP:
+                                menuSelection = MENU_UNINSTALL;
+                                invalidate(); return true;
+                            case KeyEvent.KEYCODE_DPAD_DOWN:
+                                if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_MOVE; invalidate(); return true; }
+                                exitReorderMode(true); return true;
+                            case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
+                            case KeyEvent.KEYCODE_BUTTON_A:
+                                if (menuSelection == MENU_UNINSTALL) { triggerUninstall(); return true; }
+                                exitReorderMode(true); return true;
+                            case KeyEvent.KEYCODE_BACK:
+                                exitReorderMode(false); return true;
+                            default: return false;
+                        }
+                    }
+
                     switch (kc) {
                         case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                         case KeyEvent.KEYCODE_BUTTON_A: performClick(); return true;
@@ -765,51 +884,111 @@ public class LauncherActivity extends Activity {
                 });
             }
 
+            private void triggerUninstall() {
+                if (boundApp == null) return;
+                exitReorderMode(true);
+                try {
+                    Intent i = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+                            Uri.parse("package:" + boundApp.packageName));
+                    i.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                    startActivityForResult(i, 0);
+                } catch (Exception e) {
+                    showToast("Cannot uninstall " + boundApp.label);
+                }
+            }
+
             @Override protected void onDraw(Canvas canvas) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
+
                 float cx  = w / 2f;
-                float icy = cvIconPx / 2f + dp(4);
+                float icy = iconPx / 2f + dp(4);
+
+                boolean isDragTarget = reorderMode && boundIndex == dragIndex;
+                float alpha = (reorderMode && !isDragTarget) ? 0.40f : 1f;
+                sCellPaint.setAlpha(Math.round(alpha * 255));
 
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
                     float half = iconBitmap.getWidth() / 2f;
                     canvas.drawBitmap(iconBitmap, cx - half, icy - half, sCellPaint);
                 } else {
-                    canvas.drawCircle(cx, icy, cvPhR, sPhFill);
-                    canvas.drawCircle(cx, icy, cvPhR - cvPhStroke / 2f, phRing);
+                    canvas.drawCircle(cx, icy, phR, sPhFill);
+                    canvas.drawCircle(cx, icy, phR - phStroke / 2f, phRing);
+                }
+                sCellPaint.setAlpha(255);
+
+                if (isDragTarget) {
+                    canvas.drawCircle(cx, icy, iconPx / 2f + dp(3), dragRingPaint);
                 }
 
-                if (isFocusedCell && !labelText.isEmpty()) {
-                    float labelY = icy + cvIconPx / 2f + dp(10);
-                    String display = labelText;
-                    float maxW = w - dp(4);
-                    if (labelPaint.measureText(display) > maxW) {
-                        display = TextUtils.ellipsize(display, new android.text.TextPaint(labelPaint),
-                                maxW, TextUtils.TruncateAt.END).toString();
+                if ((focused && !reorderMode) && !labelStr.isEmpty()) {
+                    float labelY = icy + iconPx / 2f + dp(12);
+                    if (labelY < h) {
+                        float maxW = w - dp(6);
+                        String display = labelPaint.measureText(labelStr) > maxW
+                                ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
+                                : labelStr;
+                        canvas.drawText(display, cx, labelY, labelPaint);
                     }
-                    canvas.drawText(display, cx, labelY, labelPaint);
                 }
+
+                if (isDragTarget) {
+                    drawContextMenu(canvas, cx, icy, w, h);
+                }
+            }
+
+            private void drawContextMenu(Canvas canvas, float cx, float icy, int w, int h) {
+                float itemH   = dp(28);
+                float itemW   = dp(100);
+                float cornerR = dp(8);
+                float menuH   = itemH * 2 + dp(4);
+                float menuW   = itemW;
+                float menuTop = icy - iconPx / 2f - dp(8) - menuH;
+                float menuL   = cx - menuW / 2f;
+                float menuR   = cx + menuW / 2f;
+
+                if (menuTop < 0) menuTop = icy + iconPx / 2f + dp(8);
+
+                menuRect.set(menuL, menuTop, menuR, menuTop + menuH);
+                canvas.drawRoundRect(menuRect, cornerR, cornerR, menuBgPaint);
+
+                float moveTop   = menuTop;
+                float uninstTop = menuTop + itemH + dp(4);
+
+                if (menuSelection == MENU_MOVE) {
+                    menuRect.set(menuL, moveTop, menuR, moveTop + itemH);
+                    canvas.drawRoundRect(menuRect, cornerR, cornerR, menuSelPaint);
+                } else {
+                    menuRect.set(menuL, uninstTop, menuR, uninstTop + itemH);
+                    canvas.drawRoundRect(menuRect, cornerR, cornerR, menuSelPaint);
+                }
+
+                float moveTextY   = moveTop   + itemH / 2f - (menuTextPaint.descent() + menuTextPaint.ascent()) / 2f;
+                float uninstTextY = uninstTop + itemH / 2f - (menuTextPaint.descent() + menuTextPaint.ascent()) / 2f;
+
+                menuTextPaint.setColor(menuSelection == MENU_MOVE ? Color.WHITE : 0xAAFFFFFF);
+                canvas.drawText("\u21D4  Move", cx, moveTextY, menuTextPaint);
+
+                menuTextPaint.setColor(menuSelection == MENU_UNINSTALL ? 0xFFFF6B6B : 0xAAFF6B6B);
+                canvas.drawText("\u2715  Uninstall", cx, uninstTextY, menuTextPaint);
             }
 
             void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
 
             void bind(AppInfo app, int index) {
-                boundApp   = app;
-                boundIndex = index;
-                labelText  = app.label;
-                isFocusedCell = false;
+                boundApp = app; boundIndex = index; labelStr = app.label; focused = false;
                 Bitmap cached = iconCache.get(app.packageName);
                 if (cached != null) { iconBitmap = cached; invalidate(); }
                 else { iconBitmap = null; invalidate(); loadIconAsync(app, this); }
             }
         }
     }
-
     private void loadApps() {
         if (!appsLoading.compareAndSet(false, true)) return;
         try {
             appExecutor.execute(() -> {
                 List<AppInfo> fresh = queryApps();
+                applyStoredOrder(fresh);
                 if (!destroyed) {
                     runOnUiThread(() -> {
                         appsLoading.set(false);
@@ -832,9 +1011,6 @@ public class LauncherActivity extends Activity {
                             appList.clear(); appList.addAll(fresh);
                             RecyclingShelfView s = shelf;
                             if (s != null) s.setApps(appList);
-                        } else {
-                            TextView lv = loadingView;
-                            if (lv != null && !appList.isEmpty()) lv.setVisibility(View.GONE);
                         }
                     });
                 } else { appsLoading.set(false); }
@@ -892,10 +1068,8 @@ public class LauncherActivity extends Activity {
             iconExecutor.execute(() -> {
                 if (destroyed) return;
                 Bitmap bmp = null;
-                try {
-                    bmp = processIcon(app.ri.loadIcon(pm));
-                    if (bmp != null) iconCache.put(key, bmp);
-                } catch (OutOfMemoryError | RuntimeException ignored) {}
+                try { bmp = processIcon(app.ri.loadIcon(pm)); if (bmp != null) iconCache.put(key, bmp); }
+                catch (OutOfMemoryError | RuntimeException ignored) {}
                 if (destroyed) return;
                 final Bitmap fb = bmp;
                 runOnUiThread(() -> {
@@ -922,10 +1096,8 @@ public class LauncherActivity extends Activity {
             iconExecutor.execute(() -> {
                 if (destroyed) return;
                 Bitmap bmp = null;
-                try {
-                    bmp = processIcon(app.ri.loadIcon(pm));
-                    if (bmp != null) iconCache.put(key, bmp);
-                } catch (OutOfMemoryError | RuntimeException ignored) {}
+                try { bmp = processIcon(app.ri.loadIcon(pm)); if (bmp != null) iconCache.put(key, bmp); }
+                catch (OutOfMemoryError | RuntimeException ignored) {}
                 if (destroyed) return;
                 final Bitmap fb = bmp;
                 runOnUiThread(() -> {
@@ -942,88 +1114,54 @@ public class LauncherActivity extends Activity {
     private Bitmap processIcon(Drawable d) {
         if (d == null) return null;
         int sz = dp(ICON_DP);
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && d instanceof AdaptiveIconDrawable) {
             AdaptiveIconDrawable aid = (AdaptiveIconDrawable) d;
             int bleed = Math.round(sz * 18f / 108f);
             int full  = sz + bleed * 2;
             Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
             Canvas c = new Canvas(out);
-            if (aid.getBackground() != null) {
-                aid.getBackground().setBounds(-bleed, -bleed, full - bleed, full - bleed);
-                aid.getBackground().draw(c);
-            }
-            if (aid.getForeground() != null) {
-                aid.getForeground().setBounds(-bleed, -bleed, full - bleed, full - bleed);
-                aid.getForeground().draw(c);
-            }
+            if (aid.getBackground() != null) { aid.getBackground().setBounds(-bleed, -bleed, full - bleed, full - bleed); aid.getBackground().draw(c); }
+            if (aid.getForeground() != null) { aid.getForeground().setBounds(-bleed, -bleed, full - bleed, full - bleed); aid.getForeground().draw(c); }
             return clipToCircle(out, sz);
         }
-
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
-
-        boolean needsFill = needsWhiteFill(raw, sz);
-        float   scale     = needsFill ? 0.80f : 1.08f;
-        int     csz       = Math.round(sz * scale);
-        int     inset     = (sz - csz) / 2;
-
-        Bitmap out    = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+        boolean fill = needsFill(raw, sz);
+        int  csz  = Math.round(sz * (fill ? 0.80f : 1.08f));
+        int  inset = (sz - csz) / 2;
+        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
-
-        if (needsFill) {
-            canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
-        }
-
+        if (fill) canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
         Matrix mx = sMatrixTL.get();
         mx.setScale((float) csz / sz, (float) csz / sz);
         mx.postTranslate(inset, inset);
         canvas.drawBitmap(raw, mx, sDrawPaint);
         raw.recycle();
-
         return clipToCircle(out, sz);
     }
 
-    private boolean needsWhiteFill(Bitmap src, int sz) {
+    private boolean needsFill(Bitmap src, int sz) {
         if (src.getConfig() == Bitmap.Config.ARGB_8888) {
-            return needsWhiteFillFast(src, sz);
+            int needed = src.getByteCount();
+            byte[] px = sPixelBuf.get();
+            if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
+            ByteBuffer buf = ByteBuffer.wrap(px); buf.rewind();
+            src.copyPixelsToBuffer(buf);
+            int step = Math.max(1, sz / 14), total = 0, trans = 0;
+            for (int y = 0; y < sz; y += step)
+                for (int x = 0; x < sz; x += step) {
+                    if ((px[(y * sz + x) * 4 + 3] & 0xFF) < 20) trans++;
+                    total++;
+                }
+            return total > 0 && (float) trans / total >= 0.30f;
         }
-        return needsWhiteFillSafe(src, sz);
-    }
-
-    private boolean needsWhiteFillFast(Bitmap src, int sz) {
-        int needed = src.getByteCount();
-        byte[] px = sPixelBuf.get();
-        if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
-        ByteBuffer buf = ByteBuffer.wrap(px);
-        buf.rewind();
-        src.copyPixelsToBuffer(buf);
-
-        int step = Math.max(1, sz / 12);
-        int total = 0, transparent = 0;
-
-        for (int y = 0; y < sz; y += step) {
+        int step = Math.max(1, sz / 14), total = 0, trans = 0;
+        for (int y = 0; y < sz; y += step)
             for (int x = 0; x < sz; x += step) {
-                int a = px[(y * sz + x) * 4 + 3] & 0xFF;
-                if (a < 16) transparent++;
+                if (Color.alpha(src.getPixel(x, y)) < 20) trans++;
                 total++;
             }
-        }
-        if (total == 0) return false;
-        return (float) transparent / total >= 0.35f;
-    }
-
-    private boolean needsWhiteFillSafe(Bitmap src, int sz) {
-        int step = Math.max(1, sz / 12);
-        int total = 0, transparent = 0;
-        for (int y = 0; y < sz; y += step) {
-            for (int x = 0; x < sz; x += step) {
-                if (Color.alpha(src.getPixel(x, y)) < 16) transparent++;
-                total++;
-            }
-        }
-        if (total == 0) return false;
-        return (float) transparent / total >= 0.35f;
+        return total > 0 && (float) trans / total >= 0.30f;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -1031,19 +1169,19 @@ public class LauncherActivity extends Activity {
             Bitmap src = ((BitmapDrawable) d).getBitmap();
             if (src != null && !src.isRecycled() && src.getWidth() > 0 && src.getHeight() > 0) {
                 Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-                Matrix mx  = sMatrixTL.get();
+                Matrix mx = sMatrixTL.get();
                 mx.setScale((float) sz / src.getWidth(), (float) sz / src.getHeight());
                 new Canvas(out).drawBitmap(src, mx, sDrawPaint);
                 return out;
             }
         }
-        int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : sz;
+        int w = d.getIntrinsicWidth() > 0 ? d.getIntrinsicWidth() : sz;
         int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : sz;
         Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         d.setBounds(0, 0, w, h); d.draw(new Canvas(bmp));
         if (w == sz && h == sz) return bmp;
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Matrix mx  = sMatrixTL.get();
+        Matrix mx = sMatrixTL.get();
         mx.setScale((float) sz / w, (float) sz / h);
         new Canvas(out).drawBitmap(bmp, mx, sDrawPaint);
         bmp.recycle(); return out;
@@ -1063,12 +1201,11 @@ public class LauncherActivity extends Activity {
         RingView rv = ringView; FrameLayout r = root;
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
-        int   iconPx = dp(ICON_DP);
-        float icy    = iconPx / 2f + dp(4);
-        float cx     = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
-        float cy     = (ringCellLoc[1] - ringRootLoc[1]) + icy;
-        int   rvW    = rv.getWidth();
-        if (rvW == 0) rvW = iconPx + dp(RING_STROKE_DP) * 2;
+        float cx  = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
+        float icy = dp(ICON_DP) / 2f + dp(4);
+        float cy  = (ringCellLoc[1] - ringRootLoc[1]) + icy;
+        int   rvW = rv.getWidth();
+        if (rvW == 0) rvW = dp(ICON_DP) + dp(RING_STROKE_DP) * 2;
         float half = rvW / 2f;
         rv.setX(cx - half); rv.setY(cy - half); rv.setVisibility(View.VISIBLE);
     }
@@ -1077,7 +1214,7 @@ public class LauncherActivity extends Activity {
         if (!clockRunning) {
             clockRunning = true;
             TextView cv = clockView;
-            if (cv != null) cv.setText(formatClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
+            if (cv != null) cv.setText(buildClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
             long now = System.currentTimeMillis();
             clockHandler.postDelayed(clockTick, CLOCK_MS - (now % CLOCK_MS));
         }
@@ -1087,18 +1224,15 @@ public class LauncherActivity extends Activity {
 
     private void checkNetNow() {
         if (cm == null) return;
-        boolean connected = false;
+        boolean c = false;
         try {
             Network net = cm.getActiveNetwork();
-            if (net != null) {
-                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
-                connected = caps != null
-                        && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                            || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                            || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
-            }
+            NetworkCapabilities caps = net != null ? cm.getNetworkCapabilities(net) : null;
+            c = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
         } catch (Exception ignored) {}
-        netConnected = connected;
+        netConnected = c;
         View nb = netBtn; if (nb != null) nb.invalidate();
     }
 
@@ -1117,10 +1251,9 @@ public class LauncherActivity extends Activity {
                         Network active = cm.getActiveNetwork();
                         if (active != null) {
                             NetworkCapabilities caps = cm.getNetworkCapabilities(active);
-                            still = caps != null
-                                    && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                                        || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                                        || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
+                            still = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                                    || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
                         }
                     } catch (Exception ignored) {}
                     if (still == netConnected) return;
@@ -1156,22 +1289,12 @@ public class LauncherActivity extends Activity {
         if (!systemWpLoading.compareAndSet(false, true)) return;
         wpExecutor.execute(() -> {
             Bitmap bmp = null;
-            try {
-                Drawable d = WallpaperManager.getInstance(this).getDrawable();
-                if (d != null) bmp = wpDrawable(d);
-            } catch (Exception ignored) {}
+            try { Drawable d = WallpaperManager.getInstance(this).getDrawable(); if (d != null) bmp = wpDrawable(d); }
+            catch (Exception ignored) {}
             final Bitmap fb = bmp; systemWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
                 ImageView wv = wallpaperView;
-                if (fb != null && wv != null) {
-                    Drawable prev = wv.getDrawable();
-                    if (prev instanceof BitmapDrawable) {
-                        Bitmap old = ((BitmapDrawable) prev).getBitmap();
-                        wv.setImageDrawable(null);
-                        if (old != null && !old.isRecycled()) old.recycle();
-                    }
-                    wv.setImageBitmap(fb);
-                }
+                if (fb != null && wv != null) { recyclePrev(wv); wv.setImageBitmap(fb); }
             });
         });
     }
@@ -1183,47 +1306,40 @@ public class LauncherActivity extends Activity {
             try {
                 BitmapFactory.Options opts = new BitmapFactory.Options();
                 opts.inJustDecodeBounds = true;
-                try (InputStream is = getContentResolver().openInputStream(uri)) {
-                    BitmapFactory.decodeStream(is, null, opts);
-                }
+                try (InputStream is = getContentResolver().openInputStream(uri)) { BitmapFactory.decodeStream(is, null, opts); }
                 if (opts.outWidth <= 0 || opts.outHeight <= 0) { userWpLoading.set(false); return; }
-                opts.inSampleSize       = calcSampleSize(opts.outWidth, opts.outHeight);
+                opts.inSampleSize = calcSampleSize(opts.outWidth, opts.outHeight);
                 opts.inJustDecodeBounds = false;
                 opts.inPreferredConfig  = Bitmap.Config.RGB_565;
-                try (InputStream is = getContentResolver().openInputStream(uri)) {
-                    if (is != null) bmp = BitmapFactory.decodeStream(is, null, opts);
-                }
+                try (InputStream is = getContentResolver().openInputStream(uri)) { if (is != null) bmp = BitmapFactory.decodeStream(is, null, opts); }
             } catch (Exception | OutOfMemoryError ignored) { bmp = null; }
             final Bitmap fb = bmp; userWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
                 ImageView wv = wallpaperView;
                 if (fb != null && wv != null) {
-                    Drawable prev = wv.getDrawable();
-                    if (prev instanceof BitmapDrawable) {
-                        Bitmap old = ((BitmapDrawable) prev).getBitmap();
-                        wv.setImageDrawable(null);
-                        if (old != null && !old.isRecycled()) old.recycle();
-                    }
-                    wv.setImageBitmap(fb);
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                            .putString(KEY_WP_URI, uri.toString()).apply();
-                } else {
-                    showToast("Could not load wallpaper");
-                    loadSystemWallpaper();
-                }
+                    recyclePrev(wv); wv.setImageBitmap(fb);
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_WP_URI, uri.toString()).apply();
+                } else { showToast("Could not load wallpaper"); loadSystemWallpaper(); }
             });
         });
     }
 
+    private void recyclePrev(ImageView iv) {
+        Drawable prev = iv.getDrawable();
+        if (prev instanceof BitmapDrawable) {
+            Bitmap old = ((BitmapDrawable) prev).getBitmap();
+            iv.setImageDrawable(null);
+            if (old != null && !old.isRecycled()) old.recycle();
+        }
+    }
+
     private Bitmap wpDrawable(Drawable d) {
-        int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : screenW;
+        int w = d.getIntrinsicWidth() > 0 ? d.getIntrinsicWidth() : screenW;
         int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : screenH;
         int ss = calcSampleSize(w, h);
-        int sw = Math.max(1, w / ss);
-        int sh = Math.max(1, h / ss);
+        int sw = Math.max(1, w / ss), sh = Math.max(1, h / ss);
         Bitmap bmp = Bitmap.createBitmap(sw, sh, Bitmap.Config.RGB_565);
-        d.setBounds(0, 0, sw, sh);
-        d.draw(new Canvas(bmp));
+        d.setBounds(0, 0, sw, sh); d.draw(new Canvas(bmp));
         return bmp;
     }
 
@@ -1261,8 +1377,8 @@ public class LauncherActivity extends Activity {
 
     private void registerPkgReceiver() {
         IntentFilter f = new IntentFilter();
-        f.addAction(Intent.ACTION_PACKAGE_ADDED);    f.addAction(Intent.ACTION_PACKAGE_REMOVED);
-        f.addAction(Intent.ACTION_PACKAGE_CHANGED);  f.addAction(Intent.ACTION_PACKAGE_REPLACED);
+        f.addAction(Intent.ACTION_PACKAGE_ADDED); f.addAction(Intent.ACTION_PACKAGE_REMOVED);
+        f.addAction(Intent.ACTION_PACKAGE_CHANGED); f.addAction(Intent.ACTION_PACKAGE_REPLACED);
         f.addDataScheme("package");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             registerReceiver(packageReceiver, f, Context.RECEIVER_NOT_EXPORTED);
@@ -1281,8 +1397,7 @@ public class LauncherActivity extends Activity {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
         int cores = Runtime.getRuntime().availableProcessors();
-        iconExecutor = new ThreadPoolExecutor(
-                Math.max(1, cores - 1), cores, 30L, TimeUnit.SECONDS,
+        iconExecutor = new ThreadPoolExecutor(Math.max(1, cores - 1), cores, 30L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardPolicy());
         wpExecutor  = Executors.newSingleThreadExecutor();
         appExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS,
@@ -1316,20 +1431,31 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint outerDark = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint white     = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint innerDark = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float od, ow, id, gap;
 
         RingView(Context ctx, int strokePx) {
             super(ctx);
-            ringPaint.setStyle(Paint.Style.STROKE);
-            ringPaint.setColor(0xFFFFFFFF);
-            ringPaint.setStrokeWidth(strokePx);
-            ringPaint.setShadowLayer(strokePx * 1.5f, 0, strokePx * 0.5f, 0xBB000000);
+            od  = strokePx * 0.20f;
+            ow  = strokePx * 0.60f;
+            id  = strokePx * 0.20f;
+            gap = strokePx * 0.10f;
+            outerDark.setStyle(Paint.Style.STROKE); outerDark.setColor(0xBB000000); outerDark.setStrokeWidth(od);
+            white.setStyle(Paint.Style.STROKE);     white.setColor(0xFFFFFFFF);     white.setStrokeWidth(ow);
+            innerDark.setStyle(Paint.Style.STROKE); innerDark.setColor(0xBB000000); innerDark.setStrokeWidth(id);
         }
 
-        @Override protected void onDraw(Canvas canvas) {
+        @Override protected void onDraw(Canvas c) {
             float cx = getWidth() / 2f, cy = getHeight() / 2f;
-            float r  = cx - ringPaint.getStrokeWidth() / 2f;
-            if (r > 0) canvas.drawCircle(cx, cy, r, ringPaint);
+            float outerR = cx - od / 2f;
+            if (outerR <= 0) return;
+            c.drawCircle(cx, cy, outerR, outerDark);
+            float whiteR = outerR - od / 2f - gap - ow / 2f;
+            if (whiteR > 0) c.drawCircle(cx, cy, whiteR, white);
+            float innerR = whiteR - ow / 2f - gap - id / 2f;
+            if (innerR > 0) c.drawCircle(cx, cy, innerR, innerDark);
         }
     }
 }
