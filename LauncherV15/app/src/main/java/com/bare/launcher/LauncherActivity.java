@@ -65,7 +65,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -96,11 +95,8 @@ public class LauncherActivity extends Activity {
     private static final Paint sMaskPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint sSrcInPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private static final Paint sDrawPaint  = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-    private static final Paint sCellPaint  = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private static final Paint sPhFill     = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint sWhiteFill  = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-    private static final RelativeSizeSpan sAmPmSpan = new RelativeSizeSpan(0.55f);
 
     static {
         sMaskPaint.setColor(Color.WHITE);
@@ -135,7 +131,6 @@ public class LauncherActivity extends Activity {
     private final Handler clockHandler = new Handler(Looper.getMainLooper());
     private       boolean clockRunning = false;
 
-    private final SpannableStringBuilder clockSsb   = new SpannableStringBuilder();
     private final java.util.Calendar     clockCal   = java.util.Calendar.getInstance();
     private final char[]                 clockChars = new char[8];
 
@@ -165,10 +160,14 @@ public class LauncherActivity extends Activity {
         int amStart = pos;
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
-        clockSsb.clear(); clockSsb.clearSpans();
-        clockSsb.append(new String(clockChars, 0, pos));
-        clockSsb.setSpan(sAmPmSpan, amStart, pos, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return clockSsb;
+        // Build a fresh SpannableStringBuilder each tick — the clock updates only once
+        // per second so allocation cost is negligible, and this avoids mutating a
+        // SpannableStringBuilder that the TextView's StaticLayout already holds a
+        // reference to (which causes IndexOutOfBoundsException in the layout engine).
+        SpannableStringBuilder ssb = new SpannableStringBuilder();
+        ssb.append(new String(clockChars, 0, pos));
+        ssb.setSpan(new RelativeSizeSpan(0.55f), amStart, pos, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return ssb;
     }
 
     private ThreadPoolExecutor       iconExecutor;
@@ -579,9 +578,9 @@ public class LauncherActivity extends Activity {
         boolean reorderMode   = false;
         int     dragIndex     = -1;
 
-        // MENU_MOVE=0, MENU_UNINSTALL=1
-        private static final int MENU_MOVE      = 0;
-        private static final int MENU_UNINSTALL = 1;
+        // MENU_UNINSTALL=0 (top row), MENU_MOVE=1 (bottom row)
+        private static final int MENU_UNINSTALL = 0;
+        private static final int MENU_MOVE      = 1;
         int menuSelection = MENU_MOVE;
 
         RecyclingShelfView(Context ctx) {
@@ -598,7 +597,7 @@ public class LauncherActivity extends Activity {
             if (reorderMode) return;
             reorderMode   = true;
             dragIndex     = idx;
-            menuSelection = MENU_MOVE;
+            menuSelection = MENU_MOVE; // default: Move selected; UP to reach Uninstall
             rebindAll();
         }
 
@@ -615,10 +614,8 @@ public class LauncherActivity extends Activity {
             Collections.swap(appList, dragIndex, targetIdx);
             dragIndex    = targetIdx;
             focusedIndex = dragIndex;
-            rebindAll();
             ensureVisible(dragIndex);
-            CellView cv = attached.get(dragIndex);
-            if (cv != null) cv.requestFocus();
+            rebindAll(); // rebindAll now also requests focus on dragIndex
         }
 
         private void rebindAll() {
@@ -626,8 +623,12 @@ public class LauncherActivity extends Activity {
                 int idx = attached.keyAt(i);
                 if (idx >= 0 && idx < appList.size()) bindCell(attached.valueAt(i), idx);
             }
-            CellView focused = attached.get(reorderMode ? dragIndex : focusedIndex);
-            if (focused != null) focused.invalidate();
+            int targetIdx = reorderMode ? dragIndex : focusedIndex;
+            CellView focused = attached.get(targetIdx);
+            if (focused != null) {
+                focused.requestFocus();
+                focused.invalidate();
+            }
         }
 
         @Override protected void onDetachedFromWindow() {
@@ -766,10 +767,10 @@ public class LauncherActivity extends Activity {
 
             private final Paint   phRing;
             private final Paint   labelPaint;
+            private final Paint   iconPaint;    // instance — alpha is mutated per-draw
             private final Paint   menuBgPaint;
             private final Paint   menuSelPaint;
             private final Paint   menuTextPaint;
-            private final Paint   dimPaint;
             private final Paint   dragRingPaint;
             private final TextPaint labelTp;
             private final RectF   menuRect = new RectF();
@@ -788,6 +789,8 @@ public class LauncherActivity extends Activity {
                 phRing.setStyle(Paint.Style.STROKE);
                 phRing.setColor(0x55FFFFFF);
                 phRing.setStrokeWidth(phStroke);
+
+                iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
                 labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
                 labelPaint.setColor(Color.WHITE);
@@ -811,10 +814,6 @@ public class LauncherActivity extends Activity {
                 menuTextPaint.setTextSize(dp(12));
                 menuTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
                 menuTextPaint.setTextAlign(Paint.Align.CENTER);
-
-                dimPaint = new Paint();
-                dimPaint.setStyle(Paint.Style.FILL);
-                dimPaint.setColor(0x55000000);
 
                 dragRingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
                 dragRingPaint.setStyle(Paint.Style.STROKE);
@@ -846,32 +845,56 @@ public class LauncherActivity extends Activity {
                 });
 
                 setOnKeyListener((v, kc, ev) -> {
-                    if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
-
                     if (reorderMode) {
+                        if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
                         switch (kc) {
                             case KeyEvent.KEYCODE_DPAD_LEFT:
+                                // Only move when MENU_MOVE (bottom) is selected
                                 if (menuSelection == MENU_MOVE) { swapWithNeighbour(dragIndex - 1); return true; }
-                                return false;
+                                return true; // consume but don't move while Uninstall is selected
                             case KeyEvent.KEYCODE_DPAD_RIGHT:
                                 if (menuSelection == MENU_MOVE) { swapWithNeighbour(dragIndex + 1); return true; }
-                                return false;
+                                return true;
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                menuSelection = MENU_UNINSTALL;
-                                invalidate(); return true;
+                                // Uninstall is on top — pressing UP selects it
+                                if (menuSelection != MENU_UNINSTALL) {
+                                    menuSelection = MENU_UNINSTALL;
+                                    rebindAll();
+                                }
+                                return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_MOVE; invalidate(); return true; }
-                                exitReorderMode(true); return true;
+                                // From Uninstall go back to Move; from Move exit reorder
+                                if (menuSelection == MENU_UNINSTALL) {
+                                    menuSelection = MENU_MOVE;
+                                    rebindAll();
+                                } else {
+                                    exitReorderMode(true);
+                                }
+                                return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                             case KeyEvent.KEYCODE_BUTTON_A:
-                                if (menuSelection == MENU_UNINSTALL) { triggerUninstall(); return true; }
-                                exitReorderMode(true); return true;
+                                if (menuSelection == MENU_UNINSTALL) { triggerUninstall(); }
+                                else { exitReorderMode(true); }
+                                return true;
                             case KeyEvent.KEYCODE_BACK:
                                 exitReorderMode(false); return true;
                             default: return false;
                         }
                     }
 
+                    // Normal (non-reorder) mode
+                    // Handle long-press on DPAD_CENTER to enter reorder (TV remote support)
+                    if ((kc == KeyEvent.KEYCODE_DPAD_CENTER || kc == KeyEvent.KEYCODE_ENTER
+                            || kc == KeyEvent.KEYCODE_BUTTON_A)
+                            && ev.getAction() == KeyEvent.ACTION_DOWN
+                            && ev.getRepeatCount() > 0) {
+                        if (boundApp != null && !reorderMode) {
+                            enterReorderMode(boundIndex);
+                            return true;
+                        }
+                    }
+
+                    if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
                     switch (kc) {
                         case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                         case KeyEvent.KEYCODE_BUTTON_A: performClick(); return true;
@@ -886,14 +909,15 @@ public class LauncherActivity extends Activity {
 
             private void triggerUninstall() {
                 if (boundApp == null) return;
-                exitReorderMode(true);
+                AppInfo appToUninstall = boundApp; // capture before exitReorderMode clears state
+                exitReorderMode(false); // exit cleanly; package receiver will reload apps after uninstall
                 try {
                     Intent i = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
-                            Uri.parse("package:" + boundApp.packageName));
+                            Uri.parse("package:" + appToUninstall.packageName));
                     i.putExtra(Intent.EXTRA_RETURN_RESULT, true);
                     startActivityForResult(i, 0);
                 } catch (Exception e) {
-                    showToast("Cannot uninstall " + boundApp.label);
+                    showToast("Cannot uninstall " + appToUninstall.label);
                 }
             }
 
@@ -905,17 +929,15 @@ public class LauncherActivity extends Activity {
                 float icy = iconPx / 2f + dp(4);
 
                 boolean isDragTarget = reorderMode && boundIndex == dragIndex;
-                float alpha = (reorderMode && !isDragTarget) ? 0.40f : 1f;
-                sCellPaint.setAlpha(Math.round(alpha * 255));
 
-                if (iconBitmap != null && !iconBitmap.isRecycled()) {
-                    float half = iconBitmap.getWidth() / 2f;
-                    canvas.drawBitmap(iconBitmap, cx - half, icy - half, sCellPaint);
+                if (reorderMode && !isDragTarget) {
+                    // Dim non-drag icons by drawing into a translucent layer
+                    int sc = canvas.saveLayerAlpha(0, 0, w, h, 102, Canvas.ALL_SAVE_FLAG); // 102 ≈ 0.40 * 255
+                    drawIcon(canvas, cx, icy);
+                    canvas.restoreToCount(sc);
                 } else {
-                    canvas.drawCircle(cx, icy, phR, sPhFill);
-                    canvas.drawCircle(cx, icy, phR - phStroke / 2f, phRing);
+                    drawIcon(canvas, cx, icy);
                 }
-                sCellPaint.setAlpha(255);
 
                 if (isDragTarget) {
                     canvas.drawCircle(cx, icy, iconPx / 2f + dp(3), dragRingPaint);
@@ -937,6 +959,16 @@ public class LauncherActivity extends Activity {
                 }
             }
 
+            private void drawIcon(Canvas canvas, float cx, float icy) {
+                if (iconBitmap != null && !iconBitmap.isRecycled()) {
+                    float half = iconBitmap.getWidth() / 2f;
+                    canvas.drawBitmap(iconBitmap, cx - half, icy - half, iconPaint);
+                } else {
+                    canvas.drawCircle(cx, icy, phR, sPhFill);
+                    canvas.drawCircle(cx, icy, phR - phStroke / 2f, phRing);
+                }
+            }
+
             private void drawContextMenu(Canvas canvas, float cx, float icy, int w, int h) {
                 float itemH   = dp(28);
                 float itemW   = dp(100);
@@ -952,34 +984,40 @@ public class LauncherActivity extends Activity {
                 menuRect.set(menuL, menuTop, menuR, menuTop + menuH);
                 canvas.drawRoundRect(menuRect, cornerR, cornerR, menuBgPaint);
 
-                float moveTop   = menuTop;
-                float uninstTop = menuTop + itemH + dp(4);
+                // Uninstall is on TOP row, Move is on BOTTOM row
+                float uninstTop = menuTop;
+                float moveTop   = menuTop + itemH + dp(4);
 
-                if (menuSelection == MENU_MOVE) {
-                    menuRect.set(menuL, moveTop, menuR, moveTop + itemH);
+                // Draw selection highlight on the active row
+                if (menuSelection == MENU_UNINSTALL) {
+                    menuRect.set(menuL, uninstTop, menuR, uninstTop + itemH);
                     canvas.drawRoundRect(menuRect, cornerR, cornerR, menuSelPaint);
                 } else {
-                    menuRect.set(menuL, uninstTop, menuR, uninstTop + itemH);
+                    menuRect.set(menuL, moveTop, menuR, moveTop + itemH);
                     canvas.drawRoundRect(menuRect, cornerR, cornerR, menuSelPaint);
                 }
 
-                float moveTextY   = moveTop   + itemH / 2f - (menuTextPaint.descent() + menuTextPaint.ascent()) / 2f;
                 float uninstTextY = uninstTop + itemH / 2f - (menuTextPaint.descent() + menuTextPaint.ascent()) / 2f;
+                float moveTextY   = moveTop   + itemH / 2f - (menuTextPaint.descent() + menuTextPaint.ascent()) / 2f;
 
-                menuTextPaint.setColor(menuSelection == MENU_MOVE ? Color.WHITE : 0xAAFFFFFF);
-                canvas.drawText("\u21D4  Move", cx, moveTextY, menuTextPaint);
-
+                // Uninstall row (top) — red tint
                 menuTextPaint.setColor(menuSelection == MENU_UNINSTALL ? 0xFFFF6B6B : 0xAAFF6B6B);
                 canvas.drawText("\u2715  Uninstall", cx, uninstTextY, menuTextPaint);
+
+                // Move row (bottom) — white
+                menuTextPaint.setColor(menuSelection == MENU_MOVE ? Color.WHITE : 0xAAFFFFFF);
+                canvas.drawText("\u21D4  Move", cx, moveTextY, menuTextPaint);
             }
 
             void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
 
             void bind(AppInfo app, int index) {
-                boundApp = app; boundIndex = index; labelStr = app.label; focused = false;
+                boundApp = app; boundIndex = index; labelStr = app.label;
+                // Don't reset focused here — the View system owns focus state.
+                // Only reload icon data.
                 Bitmap cached = iconCache.get(app.packageName);
-                if (cached != null) { iconBitmap = cached; invalidate(); }
-                else { iconBitmap = null; invalidate(); loadIconAsync(app, this); }
+                if (cached != null && cached != iconBitmap) { iconBitmap = cached; invalidate(); }
+                else if (cached == null) { iconBitmap = null; invalidate(); loadIconAsync(app, this); }
             }
         }
     }
