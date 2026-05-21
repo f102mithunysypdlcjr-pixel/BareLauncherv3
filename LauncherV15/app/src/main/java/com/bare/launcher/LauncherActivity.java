@@ -77,7 +77,7 @@ public class LauncherActivity extends Activity {
     private static final int    ICON_DP        = 68;
     private static final int    CELL_W_DP      = 90;
     private static final int    CELL_H_DP      = 100;
-    private static final int    RING_STROKE_DP = 4;
+    private static final int    RING_STROKE_DP = 3;
     private static final long   CLOCK_MS       = 1_000L;
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
@@ -160,7 +160,8 @@ public class LauncherActivity extends Activity {
         int amStart = pos;
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
-        SpannableStringBuilder ssb = new SpannableStringBuilder(new String(clockChars, 0, pos));
+        SpannableStringBuilder ssb = new SpannableStringBuilder();
+        ssb.append(java.nio.CharBuffer.wrap(clockChars, 0, pos));
         ssb.setSpan(new RelativeSizeSpan(0.55f), amStart, pos, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return ssb;
     }
@@ -354,12 +355,13 @@ public class LauncherActivity extends Activity {
         clockView.setLetterSpacing(0.01f);
         root.addView(clockView);
 
-        final int BTN_SZ  = dp(44);
-        final int BTN_GAP = dp(12);
-        final int MARG_T  = dp(24);
-        final int MARG_E  = dp(32);
+        final int BTN_SZ  = dp(36);
+        final int BTN_GAP = dp(10);
+        final int MARG_T  = dp(26);
+        final int MARG_E  = dp(28);
 
         netBtn = buildNetBtn(BTN_SZ);
+        netBtn.setAlpha(0.55f);
         FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
         netLp.gravity = Gravity.TOP | Gravity.END;
         netLp.setMargins(0, MARG_T, MARG_E + BTN_SZ + BTN_GAP, 0);
@@ -367,6 +369,7 @@ public class LauncherActivity extends Activity {
         root.addView(netBtn);
 
         View wpLocal = buildWpBtn(BTN_SZ);
+        wpLocal.setAlpha(0.55f);
         wpBtnView = wpLocal;
         FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
         wpLp.gravity = Gravity.TOP | Gravity.END;
@@ -375,9 +378,10 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
+        int ringSize = iconPx + strokePx * 2 + dp(4);
         ringView = new RingView(this, strokePx);
         ringView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-        ringView.setLayoutParams(new FrameLayout.LayoutParams(iconPx + strokePx * 2, iconPx + strokePx * 2));
+        ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
         ringView.setVisibility(View.INVISIBLE);
         root.addView(ringView);
 
@@ -386,12 +390,15 @@ public class LauncherActivity extends Activity {
 
     private View buildNetBtn(int sz) {
         View v = new View(this) {
-            private final Paint arcP   = makeBtnPaint(false);
-            private final Paint dotP   = makeBtnPaint(true);
-            private final Paint slashP = makeBtnPaint(false);
-            private final Paint hlP    = makeHlPaint();
-            private final Paint bgP    = makeBgCirclePaint();
-            private final RectF oval   = new RectF();
+            private final Paint arcP  = makeBtnPaint(false);
+            private final Paint dotP  = makeBtnPaint(true);
+            private final Paint hlP   = makeHlPaint();
+            private final Paint bgP   = makeBgCirclePaint();
+            private final Paint dimP  = makeBtnPaint(false);
+            private final RectF oval  = new RectF();
+            {
+                dimP.setAlpha(70);
+            }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
@@ -399,26 +406,33 @@ public class LauncherActivity extends Activity {
                 c.drawCircle(cx, cy, r, bgP);
                 if (isFocused()) c.drawCircle(cx, cy, r, hlP);
                 boolean conn = netConnected;
-                float ic = r * 1.30f, sw = ic * 0.11f, dotR = sw, dotY = cy + ic * 0.22f;
+                float ic = r * 1.28f;
+                float sw = ic * 0.115f;
+                float dotR = sw * 0.9f;
+                float dotY = cy + ic * 0.24f;
                 float startAngle = 202.5f, sweep = 135f;
-                arcP.setStrokeWidth(sw); slashP.setStrokeWidth(sw); dotP.setStrokeWidth(sw);
-                c.drawCircle(cx, dotY, dotR, dotP);
+                arcP.setStrokeWidth(sw);
+                dimP.setStrokeWidth(sw);
+                Paint ap = conn ? arcP : dimP;
+                c.drawCircle(cx, dotY, dotR, conn ? dotP : dimP);
                 float r1 = ic * 0.30f;
                 oval.set(cx - r1, dotY - r1, cx + r1, dotY + r1);
-                c.drawArc(oval, startAngle, sweep, false, arcP);
+                c.drawArc(oval, startAngle, sweep, false, ap);
                 float r2 = ic * 0.56f;
                 oval.set(cx - r2, dotY - r2, cx + r2, dotY + r2);
-                c.drawArc(oval, startAngle, sweep, false, arcP);
+                c.drawArc(oval, startAngle, sweep, false, ap);
                 if (!conn) {
-                    float inset = ic * 0.06f;
-                    c.drawLine(cx - ic*0.38f + inset, dotY + dotR*1.5f, cx + ic*0.38f - inset, dotY - r2 - inset, slashP);
+                    float xs = sw * 0.85f;
+                    float x1 = cx - xs, y1 = dotY - xs, x2 = cx + xs, y2 = dotY + xs;
+                    c.drawLine(x1, y1, x2, y2, arcP);
+                    c.drawLine(x2, y1, x1, y2, arcP);
                 }
             }
         };
         v.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
         v.setOnClickListener(view -> openNetSettings());
-        v.setOnFocusChangeListener((view, f) -> view.invalidate());
+        v.setOnFocusChangeListener((view, f) -> { view.setAlpha(f ? 1f : 0.55f); view.invalidate(); });
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
@@ -468,7 +482,7 @@ public class LauncherActivity extends Activity {
         v.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
         v.setOnClickListener(view -> openStoragePicker());
-        v.setOnFocusChangeListener((view, f) -> view.invalidate());
+        v.setOnFocusChangeListener((view, f) -> { view.setAlpha(f ? 1f : 0.55f); view.invalidate(); });
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
@@ -738,6 +752,7 @@ public class LauncherActivity extends Activity {
             AppInfo boundApp;
             int     boundIndex;
             boolean focused = false;
+            private long centerKeyDownAt = 0;
 
             private final Paint   phRing;
             private final Paint   labelPaint;
@@ -844,32 +859,22 @@ public class LauncherActivity extends Activity {
                         if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
                         switch (kc) {
                             case KeyEvent.KEYCODE_DPAD_LEFT:
-                                // Only move when MENU_MOVE (bottom) is selected
-                                if (menuSelection == MENU_MOVE) { swapWithNeighbour(dragIndex - 1); return true; }
-                                return true; // consume but don't move while Uninstall is selected
+                                if (menuSelection == MENU_MOVE) swapWithNeighbour(dragIndex - 1);
+                                return true;
                             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                                if (menuSelection == MENU_MOVE) { swapWithNeighbour(dragIndex + 1); return true; }
+                                if (menuSelection == MENU_MOVE) swapWithNeighbour(dragIndex + 1);
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                // Uninstall is on top — pressing UP selects it
-                                if (menuSelection != MENU_UNINSTALL) {
-                                    menuSelection = MENU_UNINSTALL;
-                                    rebindAll();
-                                }
+                                if (menuSelection != MENU_UNINSTALL) { menuSelection = MENU_UNINSTALL; rebindAll(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                // From Uninstall go back to Move; from Move exit reorder
-                                if (menuSelection == MENU_UNINSTALL) {
-                                    menuSelection = MENU_MOVE;
-                                    rebindAll();
-                                } else {
-                                    exitReorderMode(true);
-                                }
+                                if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_MOVE; rebindAll(); }
+                                else exitReorderMode(true);
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                             case KeyEvent.KEYCODE_BUTTON_A:
-                                if (menuSelection == MENU_UNINSTALL) { triggerUninstall(); }
-                                else { exitReorderMode(true); }
+                                if (menuSelection == MENU_UNINSTALL) triggerUninstall();
+                                else exitReorderMode(true);
                                 return true;
                             case KeyEvent.KEYCODE_BACK:
                                 exitReorderMode(false); return true;
@@ -877,22 +882,38 @@ public class LauncherActivity extends Activity {
                         }
                     }
 
-                    // Normal (non-reorder) mode
-                    // Handle long-press on DPAD_CENTER to enter reorder (TV remote support)
-                    if ((kc == KeyEvent.KEYCODE_DPAD_CENTER || kc == KeyEvent.KEYCODE_ENTER
-                            || kc == KeyEvent.KEYCODE_BUTTON_A)
-                            && ev.getAction() == KeyEvent.ACTION_DOWN
-                            && ev.getRepeatCount() > 0) {
-                        if (boundApp != null && !reorderMode) {
-                            enterReorderMode(boundIndex);
+                    boolean isCenterKey = kc == KeyEvent.KEYCODE_DPAD_CENTER
+                            || kc == KeyEvent.KEYCODE_ENTER
+                            || kc == KeyEvent.KEYCODE_BUTTON_A;
+
+                    if (isCenterKey) {
+                        if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() == 0) {
+                            centerKeyDownAt = System.currentTimeMillis();
+                            return false;
+                        }
+                        if (ev.getAction() == KeyEvent.ACTION_UP) {
+                            long held = System.currentTimeMillis() - centerKeyDownAt;
+                            centerKeyDownAt = 0;
+                            if (held >= 600 && boundApp != null && !reorderMode) {
+                                enterReorderMode(boundIndex);
+                                return true;
+                            }
+                            performClick();
+                            return true;
+                        }
+                        if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() > 0) {
+                            long held = System.currentTimeMillis() - centerKeyDownAt;
+                            if (held >= 600 && boundApp != null && !reorderMode) {
+                                enterReorderMode(boundIndex);
+                                centerKeyDownAt = 0;
+                                return true;
+                            }
                             return true;
                         }
                     }
 
                     if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
                     switch (kc) {
-                        case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                        case KeyEvent.KEYCODE_BUTTON_A: performClick(); return true;
                         case KeyEvent.KEYCODE_DPAD_LEFT:  requestFocusOnIndex(boundIndex - 1); return true;
                         case KeyEvent.KEYCODE_DPAD_RIGHT: requestFocusOnIndex(boundIndex + 1); return true;
                         case KeyEvent.KEYCODE_DPAD_UP:
@@ -1229,12 +1250,11 @@ public class LauncherActivity extends Activity {
         RingView rv = ringView; FrameLayout r = root;
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
-        float cx  = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
-        float icy = dp(ICON_DP) / 2f + dp(4);
-        float cy  = (ringCellLoc[1] - ringRootLoc[1]) + icy;
-        int   rvW = rv.getWidth();
-        if (rvW == 0) rvW = dp(ICON_DP) + dp(RING_STROKE_DP) * 2;
-        float half = rvW / 2f;
+        int strokePx = dp(RING_STROKE_DP);
+        int ringSize = dp(ICON_DP) + strokePx * 2 + dp(4);
+        float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
+        float cy = (ringCellLoc[1] - ringRootLoc[1]) + dp(ICON_DP) / 2f + dp(4);
+        float half = ringSize / 2f;
         rv.setX(cx - half); rv.setY(cy - half); rv.setVisibility(View.VISIBLE);
     }
 
@@ -1429,7 +1449,7 @@ public class LauncherActivity extends Activity {
                 new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardPolicy());
         wpExecutor  = Executors.newSingleThreadExecutor();
         appExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
+                new ArrayBlockingQueue<>(2), new ThreadPoolExecutor.DiscardOldestPolicy());
     }
 
     @SuppressWarnings("deprecation")
@@ -1459,37 +1479,25 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        private final Paint outerDark = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint white     = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint innerDark = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final float od, ow, id, gap;
-        private float cachedOuterR = -1, cachedWhiteR = -1, cachedInnerR = -1;
+        private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float cachedR = -1;
 
         RingView(Context ctx, int strokePx) {
             super(ctx);
-            od  = strokePx * 0.20f;
-            ow  = strokePx * 0.60f;
-            id  = strokePx * 0.20f;
-            gap = strokePx * 0.10f;
-            outerDark.setStyle(Paint.Style.STROKE); outerDark.setColor(0xBB000000); outerDark.setStrokeWidth(od);
-            white.setStyle(Paint.Style.STROKE);     white.setColor(0xFFFFFFFF);     white.setStrokeWidth(ow);
-            innerDark.setStyle(Paint.Style.STROKE); innerDark.setColor(0xBB000000); innerDark.setStrokeWidth(id);
+            ring.setStyle(Paint.Style.STROKE);
+            ring.setColor(0xFFFFFFFF);
+            ring.setStrokeWidth(strokePx);
+            ring.setShadowLayer(strokePx * 2f, 0f, strokePx * 0.8f, 0xCC000000);
         }
 
-        @Override protected void onSizeChanged(int w, int h, int ow2, int oh) {
-            super.onSizeChanged(w, h, ow2, oh);
-            float cx = w / 2f;
-            cachedOuterR = cx - od / 2f;
-            cachedWhiteR = cachedOuterR - od / 2f - gap - ow / 2f;
-            cachedInnerR = cachedWhiteR - ow / 2f - gap - id / 2f;
+        @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+            super.onSizeChanged(w, h, ow, oh);
+            cachedR = w / 2f - ring.getStrokeWidth() / 2f;
         }
 
         @Override protected void onDraw(Canvas c) {
-            if (cachedOuterR <= 0) return;
-            float cx = getWidth() / 2f, cy = getHeight() / 2f;
-            c.drawCircle(cx, cy, cachedOuterR, outerDark);
-            if (cachedWhiteR > 0) c.drawCircle(cx, cy, cachedWhiteR, white);
-            if (cachedInnerR > 0) c.drawCircle(cx, cy, cachedInnerR, innerDark);
+            if (cachedR <= 0) return;
+            c.drawCircle(getWidth() / 2f, getHeight() / 2f, cachedR, ring);
         }
     }
 }
