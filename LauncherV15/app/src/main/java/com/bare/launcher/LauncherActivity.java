@@ -133,8 +133,10 @@ public class LauncherActivity extends Activity {
     private final Handler clockHandler = new Handler(Looper.getMainLooper());
     private       boolean clockRunning = false;
 
-    private final java.util.Calendar     clockCal   = java.util.Calendar.getInstance();
-    private final char[]                 clockChars = new char[8];
+    private final java.util.Calendar       clockCal   = java.util.Calendar.getInstance();
+    private final char[]                   clockChars = new char[8];
+    private final SpannableStringBuilder   clockSsb   = new SpannableStringBuilder();
+    private final RelativeSizeSpan         clockSpan  = new RelativeSizeSpan(0.55f);
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -162,10 +164,10 @@ public class LauncherActivity extends Activity {
         int amStart = pos;
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
-        SpannableStringBuilder ssb = new SpannableStringBuilder();
-        ssb.append(new String(clockChars, 0, pos));
-        ssb.setSpan(new RelativeSizeSpan(0.55f), amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return ssb;
+        clockSsb.clear(); clockSsb.clearSpans();
+        clockSsb.append(String.valueOf(clockChars, 0, pos));  // valueOf reuses buf, no new char[]
+        clockSsb.setSpan(clockSpan, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return clockSsb;
     }
 
     private ThreadPoolExecutor       iconExecutor;
@@ -182,6 +184,11 @@ public class LauncherActivity extends Activity {
     private final int[]    ringRootLoc      = new int[2];
     private       int      cachedRingSize   = 0;
     private final Runnable pkgReloadRunnable = this::loadApps;
+    private       FrameLayout menuOverlay   = null;
+    private       TextView    menuUninstall = null;
+    private       TextView    menuMove      = null;
+    private final int[]    menuCellLoc      = new int[2];
+    private final int[]    menuRootLoc      = new int[2];
 
     private ConnectivityManager.NetworkCallback networkCallback;
 
@@ -331,12 +338,47 @@ public class LauncherActivity extends Activity {
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         if (iconCache == null) return;
-        if      (level >= TRIM_MEMORY_COMPLETE)   { iconCache.evictAll(); iconInflight.clear(); RecyclingShelfView sv = shelf; if (sv != null) sv.setApps(Collections.emptyList()); appList.clear(); }
+        if      (level >= TRIM_MEMORY_COMPLETE)   {
+            iconCache.evictAll(); iconInflight.clear();
+            RecyclingShelfView sv = shelf;
+            if (sv != null) {
+                sv.setApps(Collections.emptyList()); // moves attached → pool
+                // Now null every pooled bitmap so the evicted bitmaps can be GC'd
+                for (int i = 0; i < sv.pool.size(); i++) sv.pool.get(i).iconBitmap = null;
+            }
+            appList.clear();
+        }
         else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); iconInflight.clear(); }
         else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); iconInflight.clear(); }
     }
 
     @Override public void onWindowFocusChanged(boolean h) { super.onWindowFocusChanged(h); if (h) hideSystemUI(); }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        // Dismiss the context menu when the user taps outside its bounds.
+        if (ev.getAction() == MotionEvent.ACTION_DOWN && menuOverlay != null
+                && menuOverlay.getVisibility() == View.VISIBLE) {
+            int mw = menuOverlay.getWidth();
+            int mh = menuOverlay.getHeight();
+            // Fall back to measured size if layout hasn't run yet (first show)
+            if (mw == 0) mw = menuOverlay.getMeasuredWidth();
+            if (mh == 0) mh = menuOverlay.getMeasuredHeight();
+            if (mw > 0 && mh > 0) {
+                int[] loc = menuRootLoc; // reuse pre-allocated array
+                menuOverlay.getLocationOnScreen(loc);
+                float tx = ev.getRawX(), ty = ev.getRawY();
+                boolean inside = tx >= loc[0] && tx <= loc[0] + mw
+                              && ty >= loc[1] && ty <= loc[1] + mh;
+                if (!inside) {
+                    RecyclingShelfView s = shelf;
+                    if (s != null && s.reorderMode) s.exitReorderMode(false);
+                    return true; // consume the event
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev);
+    }
 
     @Override @SuppressWarnings("deprecation")
     public void onBackPressed() {
@@ -355,6 +397,8 @@ public class LauncherActivity extends Activity {
         root = new FrameLayout(this);
         root.setLayoutParams(new ViewGroup.LayoutParams(MATCH, MATCH));
         root.setBackgroundColor(Color.BLACK);
+        root.setClipChildren(false);
+        root.setClipToPadding(false);
 
         wallpaperView = new ImageView(this);
         wallpaperView.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -406,15 +450,138 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        int ringSize = iconPx + strokePx * 2 + dp(4);
-        cachedRingSize = ringSize;
-        ringView = new RingView(this, strokePx);
-        ringView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        // Add extra padding for the outer shadow bleed (≈ strokePx on each side)
+        int ringShadowBleed = strokePx * 2;
+        int ringSize = iconPx + strokePx * 2 + dp(4) + ringShadowBleed * 2;
+        cachedRingSize = iconPx + strokePx * 2 + dp(4); // logical ring diameter (no bleed)
+        ringView = new RingView(this, strokePx, ringShadowBleed);
+        ringView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
         ringView.setVisibility(View.INVISIBLE);
         root.addView(ringView);
 
+        menuOverlay = new FrameLayout(this) {
+            @Override public boolean onTouchEvent(MotionEvent ev) {
+                // Consume — prevents tap-through to shelf. Dismiss handled by dispatchTouchEvent.
+                return true;
+            }
+        };
+        FrameLayout.LayoutParams menuLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        menuLp.gravity = Gravity.TOP | Gravity.START;
+        menuOverlay.setLayoutParams(menuLp);
+        menuOverlay.setVisibility(View.GONE);
+        menuOverlay.setClipChildren(false);
+        menuOverlay.setClipToPadding(false);
+
+        android.widget.LinearLayout menuCol = new android.widget.LinearLayout(this);
+        menuCol.setOrientation(android.widget.LinearLayout.VERTICAL);
+        menuCol.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.graphics.drawable.GradientDrawable menuBg = new android.graphics.drawable.GradientDrawable();
+        menuBg.setColor(0xEE111111);
+        menuBg.setCornerRadius(dp(10));
+        menuCol.setBackground(menuBg);
+
+        menuUninstall = new TextView(this);
+        menuUninstall.setText("✕  Uninstall");
+        menuUninstall.setTextColor(0xFFFF6B6B);
+        menuUninstall.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        menuUninstall.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        menuUninstall.setGravity(Gravity.CENTER);
+        menuUninstall.setPadding(dp(20), dp(12), dp(20), dp(12));
+        menuUninstall.setClickable(true);
+        menuUninstall.setFocusable(false);
+        menuUninstall.setOnClickListener(v -> {
+            RecyclingShelfView s = shelf;
+            if (s != null && s.reorderMode) {
+                s.menuSelection = RecyclingShelfView.MENU_UNINSTALL;
+                CellView cv = s.attached.get(s.dragIndex);
+                if (cv != null) cv.triggerUninstall();
+                else s.exitReorderMode(false);
+            }
+        });
+
+        View divider = new View(this);
+        divider.setBackgroundColor(0x33FFFFFF);
+
+        menuMove = new TextView(this);
+        menuMove.setText("⇔  Move");
+        menuMove.setTextColor(Color.WHITE);
+        menuMove.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        menuMove.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        menuMove.setGravity(Gravity.CENTER);
+        menuMove.setPadding(dp(20), dp(12), dp(20), dp(12));
+        menuMove.setClickable(true);
+        menuMove.setFocusable(false);
+        menuMove.setOnClickListener(v -> {
+            RecyclingShelfView s = shelf;
+            if (s != null && s.reorderMode) {
+                s.menuSelection = RecyclingShelfView.MENU_MOVE;
+                updateMenuHighlight();
+                // "Move" confirm: exit reorder saving order
+                s.exitReorderMode(true);
+            }
+        });
+
+        menuCol.addView(menuUninstall, new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
+        menuCol.addView(divider, new android.widget.LinearLayout.LayoutParams(MATCH, 1));
+        menuCol.addView(menuMove, new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
+
+        menuOverlay.addView(menuCol, new FrameLayout.LayoutParams(WRAP, WRAP));
+        root.addView(menuOverlay);
+
         return root;
+    }
+
+    void showContextMenu(View cell) {
+        if (menuOverlay == null || menuUninstall == null || menuMove == null) return;
+        cell.getLocationOnScreen(menuCellLoc);
+        FrameLayout r = root; if (r == null) return;
+        r.getLocationOnScreen(menuRootLoc);
+        int cellCx    = (menuCellLoc[0] - menuRootLoc[0]) + cell.getWidth() / 2;
+        int cellRelY  = (menuCellLoc[1] - menuRootLoc[1]);   // cell top in root coords
+
+        menuOverlay.measure(
+                View.MeasureSpec.makeMeasureSpec(r.getWidth(),  View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(r.getHeight(), View.MeasureSpec.AT_MOST));
+        int mw = menuOverlay.getMeasuredWidth();
+        int mh = menuOverlay.getMeasuredHeight();
+
+        int iconPx        = dp(ICON_DP);
+        // icyOffset is iconPx/2 + 4dp — same formula used in CellView.onDraw
+        int icyInCell     = iconPx / 2 + dp(4);
+        int iconTopInRoot = cellRelY + (icyInCell - iconPx / 2);   // top of icon in root
+        int iconBotInRoot = iconTopInRoot + iconPx;
+
+        // Prefer above the icon; fall back to below if it would clip the top
+        int menuY = iconTopInRoot - dp(6) - mh;
+        if (menuY < dp(8)) menuY = iconBotInRoot + dp(6);
+        // Clamp so it never escapes the bottom either
+        menuY = Math.min(menuY, r.getHeight() - mh - dp(8));
+        menuY = Math.max(menuY, dp(8));
+
+        int menuX = cellCx - mw / 2;
+        menuX = Math.max(dp(8), Math.min(menuX, r.getWidth() - mw - dp(8)));
+
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) menuOverlay.getLayoutParams();
+        lp.leftMargin = menuX; lp.topMargin = menuY;
+        lp.gravity = Gravity.TOP | Gravity.START;
+        menuOverlay.setLayoutParams(lp);
+        menuOverlay.setVisibility(View.VISIBLE);
+        updateMenuHighlight();
+    }
+
+    void hideContextMenu() {
+        if (menuOverlay != null) menuOverlay.setVisibility(View.GONE);
+    }
+
+    void updateMenuHighlight() {
+        RecyclingShelfView s = shelf; if (s == null) return;
+        if (menuUninstall == null || menuMove == null) return;
+        boolean uninstSel = s.menuSelection == RecyclingShelfView.MENU_UNINSTALL;
+        menuUninstall.setBackgroundColor(uninstSel ? 0x552C2C2C : Color.TRANSPARENT);
+        menuMove.setBackgroundColor(uninstSel ? Color.TRANSPARENT : 0x552C2C2C);
+        menuUninstall.setTextColor(uninstSel ? 0xFFFF6B6B : 0xAAFF6B6B);
+        menuMove.setTextColor(uninstSel ? 0xAAFFFFFF : Color.WHITE);
     }
 
     private View buildNetBtn(int sz) {
@@ -610,16 +777,16 @@ public class LauncherActivity extends Activity {
             reorderMode   = true;
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
-            for (int i = 0; i < attached.size(); i++) attached.valueAt(i).lastMenuSel = -1;
             rebindAll();
+            CellView cv = attached.get(idx); if (cv != null) showContextMenu(cv);
         }
 
         void exitReorderMode(boolean persist) {
             if (!reorderMode) return;
             reorderMode = false;
             dragIndex   = -1;
+            hideContextMenu();
             if (persist) saveOrder();
-            for (int i = 0; i < attached.size(); i++) attached.valueAt(i).lastMenuSel = -1;
             rebindAll();
         }
 
@@ -629,7 +796,8 @@ public class LauncherActivity extends Activity {
             dragIndex    = targetIdx;
             focusedIndex = dragIndex;
             ensureVisible(dragIndex);
-            rebindAll(); // rebindAll now also requests focus on dragIndex
+            rebindAll();
+            CellView cv = attached.get(dragIndex); if (cv != null) showContextMenu(cv);
         }
 
         private void rebindAll() {
@@ -643,6 +811,7 @@ public class LauncherActivity extends Activity {
                 focused.requestFocus();
                 focused.invalidate();
             }
+            if (reorderMode) updateMenuHighlight();
         }
 
         @Override protected void onDetachedFromWindow() {
@@ -663,6 +832,8 @@ public class LauncherActivity extends Activity {
         }
 
         void setApps(List<AppInfo> apps) {
+            if (reorderMode) exitReorderMode(false); // guard: don't corrupt dragIndex on list refresh
+            hideContextMenu();
             for (int i = 0; i < attached.size(); i++) {
                 CellView cv = attached.valueAt(i); cv.setVisibility(GONE); pool.add(cv);
             }
@@ -713,7 +884,13 @@ public class LauncherActivity extends Activity {
         }
 
         private CellView obtainCell() {
-            if (!pool.isEmpty()) { CellView cv = pool.remove(pool.size() - 1); cv.setVisibility(VISIBLE); return cv; }
+            if (!pool.isEmpty()) {
+                CellView cv = pool.remove(pool.size() - 1);
+                cv.animate().cancel();          // cancel any in-flight scale animation
+                cv.setScaleX(1f); cv.setScaleY(1f); // reset scale before reuse
+                cv.setVisibility(VISIBLE);
+                return cv;
+            }
             CellView cv = new CellView(getContext()); addView(cv); return cv;
         }
 
@@ -778,48 +955,33 @@ public class LauncherActivity extends Activity {
             AppInfo boundApp;
             int     boundIndex;
             boolean focused = false;
-            private long centerKeyDownAt = 0;
+            private long    centerKeyDownAt  = 0;
+            private boolean longPressArmed   = false;
+            private boolean longPressFired   = false;
 
             private final Paint   phRing;
             private final Paint   labelPaint;
             private final Paint   iconPaint;
-            private final Paint   menuBgPaint;
-            private final Paint   menuSelPaint;
-            private final Paint   menuTextPaint;
             private final Paint   dragRingPaint;
             private final TextPaint labelTp;
-            private final RectF   menuRect = new RectF();
             private final int     iconPx;
             private final float   phR;
             private final float   phStroke;
-            private final float   menuItemH;
-            private final float   menuItemW;
-            private final float   menuCornerR;
-            private final float   menuGap;
-            private final float   menuAboveOffset;
-            private final float   menuBelowOffset;
             private final float   dragRingExtra;
             private final float   labelOffsetY;
             private final float   labelMaxWInset;
             private final float   icyOffset;
             private       String  labelStr = "";
-            private       int     lastMenuSel = -1;
 
             CellView(Context ctx) {
                 super(ctx);
-                iconPx          = dp(ICON_DP);
-                phR             = iconPx / 2f - dp(2);
-                phStroke        = dp(1);
-                menuItemH       = dp(28);
-                menuItemW       = dp(100);
-                menuCornerR     = dp(8);
-                menuGap         = dp(4);
-                menuAboveOffset = iconPx / 2f + dp(8);
-                menuBelowOffset = iconPx / 2f + dp(8);
-                dragRingExtra   = dp(3);
-                labelOffsetY    = iconPx / 2f + dp(12);
-                labelMaxWInset  = dp(6);
-                icyOffset       = iconPx / 2f + dp(4);
+                iconPx         = dp(ICON_DP);
+                phR            = iconPx / 2f - dp(2);
+                phStroke       = dp(1);
+                dragRingExtra  = dp(3);
+                labelOffsetY   = iconPx / 2f + dp(12);
+                labelMaxWInset = dp(6);
+                icyOffset      = iconPx / 2f + dp(4);
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
@@ -837,20 +999,6 @@ public class LauncherActivity extends Activity {
 
                 labelTp = new TextPaint(labelPaint);
 
-                menuBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                menuBgPaint.setStyle(Paint.Style.FILL);
-                menuBgPaint.setColor(0xDD111111);
-
-                menuSelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                menuSelPaint.setStyle(Paint.Style.FILL);
-                menuSelPaint.setColor(0xFF2C2C2C);
-
-                menuTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                menuTextPaint.setColor(Color.WHITE);
-                menuTextPaint.setTextSize(dp(12));
-                menuTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-                menuTextPaint.setTextAlign(Paint.Align.CENTER);
-
                 dragRingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
                 dragRingPaint.setStyle(Paint.Style.STROKE);
                 dragRingPaint.setColor(0xCCFFFFFF);
@@ -861,13 +1009,13 @@ public class LauncherActivity extends Activity {
 
                 setOnClickListener(v -> {
                     if (boundApp == null) return;
-                    if (reorderMode) { exitReorderMode(true); return; }
-                    launchApp(boundApp);
+                    if (!reorderMode) launchApp(boundApp);
+                    // In reorder mode clicks are consumed but do nothing — menu buttons handle confirm/cancel
                 });
 
                 setOnLongClickListener(v -> {
-                    if (boundApp == null) return false;
-                    if (!reorderMode) enterReorderMode(boundIndex);
+                    if (boundApp == null || reorderMode) return true;
+                    enterReorderMode(boundIndex);
                     return true;
                 });
 
@@ -900,10 +1048,10 @@ public class LauncherActivity extends Activity {
                                 if (menuSelection == MENU_MOVE) swapWithNeighbour(dragIndex + 1);
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                if (menuSelection != MENU_UNINSTALL) { menuSelection = MENU_UNINSTALL; rebindAll(); }
+                                if (menuSelection != MENU_UNINSTALL) { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_MOVE; rebindAll(); }
+                                if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_MOVE; updateMenuHighlight(); }
                                 else exitReorderMode(true);
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
@@ -922,24 +1070,28 @@ public class LauncherActivity extends Activity {
                             || kc == KeyEvent.KEYCODE_BUTTON_A;
 
                     if (isCenterKey) {
-                        if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() == 0) {
-                            centerKeyDownAt = System.currentTimeMillis();
-                            return true; // consume — handle launch on ACTION_UP
-                        }
-                        if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() > 0) {
-                            if (centerKeyDownAt != 0) {
+                        if (ev.getAction() == KeyEvent.ACTION_DOWN) {
+                            if (ev.getRepeatCount() == 0) {
+                                centerKeyDownAt = System.currentTimeMillis();
+                                longPressArmed  = true;
+                                longPressFired  = false;
+                            } else if (longPressArmed && !longPressFired) {
                                 long held = System.currentTimeMillis() - centerKeyDownAt;
-                                if (held >= 500 && boundApp != null && !reorderMode) {
-                                    centerKeyDownAt = 0; // disarm: ACTION_UP won't launch
+                                if (held >= 600 && boundApp != null && !reorderMode) {
+                                    longPressFired = true;
+                                    longPressArmed = false;
+                                    centerKeyDownAt = 0;
                                     enterReorderMode(boundIndex);
                                 }
                             }
                             return true;
                         }
                         if (ev.getAction() == KeyEvent.ACTION_UP) {
-                            long t = centerKeyDownAt;
+                            boolean wasArmed = longPressArmed;
+                            longPressArmed  = false;
+                            longPressFired  = false;
                             centerKeyDownAt = 0;
-                            if (t != 0) performClick(); // short press: launch
+                            if (wasArmed && !reorderMode) performClick();
                             return true;
                         }
                         return false;
@@ -956,17 +1108,27 @@ public class LauncherActivity extends Activity {
                 });
             }
 
-            private void triggerUninstall() {
+            void triggerUninstall() {
                 if (boundApp == null) return;
                 AppInfo appToUninstall = boundApp;
-                exitReorderMode(false); // don't save yet — user may cancel the dialog
+                exitReorderMode(false);
+                // ACTION_DELETE works universally on Android TV without needing
+                // REQUEST_DELETE_PACKAGES. Falls back to deprecated intent.
                 try {
-                    Intent i = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+                    Intent i = new Intent(Intent.ACTION_DELETE,
                             Uri.parse("package:" + appToUninstall.packageName));
-                    i.putExtra(Intent.EXTRA_RETURN_RESULT, true);
-                    startActivityForResult(i, REQ_UNINSTALL);
-                } catch (Exception e) {
-                    showToast("Cannot uninstall " + appToUninstall.label);
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                } catch (Exception e1) {
+                    try {
+                        Intent i2 = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+                                Uri.parse("package:" + appToUninstall.packageName));
+                        i2.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                        i2.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivityForResult(i2, REQ_UNINSTALL);
+                    } catch (Exception e2) {
+                        showToast("Cannot uninstall " + appToUninstall.label);
+                    }
                 }
             }
 
@@ -1002,9 +1164,7 @@ public class LauncherActivity extends Activity {
                     }
                 }
 
-                if (isDragTarget) {
-                    drawContextMenu(canvas, cx, icy, w, h);
-                }
+
             }
 
             private void drawIcon(Canvas canvas, float cx, float icy) {
@@ -1017,35 +1177,7 @@ public class LauncherActivity extends Activity {
                 }
             }
 
-            private void drawContextMenu(Canvas canvas, float cx, float icy, int w, int h) {
-                float menuH   = menuItemH * 2 + menuGap;
-                float menuTop = icy - menuAboveOffset - menuH;
-                float menuL   = cx - menuItemW / 2f;
-                float menuR   = cx + menuItemW / 2f;
-                if (menuTop < 0) menuTop = icy + menuBelowOffset;
 
-                menuRect.set(menuL, menuTop, menuR, menuTop + menuH);
-                canvas.drawRoundRect(menuRect, menuCornerR, menuCornerR, menuBgPaint);
-
-                float uninstTop = menuTop;
-                float moveTop   = menuTop + menuItemH + menuGap;
-
-                if (menuSelection == MENU_UNINSTALL) {
-                    menuRect.set(menuL, uninstTop, menuR, uninstTop + menuItemH);
-                } else {
-                    menuRect.set(menuL, moveTop, menuR, moveTop + menuItemH);
-                }
-                canvas.drawRoundRect(menuRect, menuCornerR, menuCornerR, menuSelPaint);
-
-                float ascDesc  = menuTextPaint.descent() + menuTextPaint.ascent();
-                float uninstTY = uninstTop + menuItemH / 2f - ascDesc / 2f;
-                float moveTY   = moveTop   + menuItemH / 2f - ascDesc / 2f;
-
-                menuTextPaint.setColor(menuSelection == MENU_UNINSTALL ? 0xFFFF6B6B : 0xAAFF6B6B);
-                canvas.drawText("\u2715  Uninstall", cx, uninstTY, menuTextPaint);
-                menuTextPaint.setColor(menuSelection == MENU_MOVE ? Color.WHITE : 0xAAFFFFFF);
-                canvas.drawText("\u21D4  Move", cx, moveTY, menuTextPaint);
-            }
 
             void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
 
@@ -1227,7 +1359,7 @@ public class LauncherActivity extends Activity {
             int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
             for (int y = q1; y < q3; y += step)
                 for (int x = q1; x < q3; x += step) {
-                    if ((px[(y * sz + x) * 4 + 3] & 0xFF) < 20) trans++;
+                    if ((px[(y * sz + x) * 4] & 0xFF) < 20) trans++;  // ARGB_8888: byte[0]=A
                     total++;
                 }
             return total > 0 && (float) trans / total >= 0.50f;
@@ -1280,8 +1412,12 @@ public class LauncherActivity extends Activity {
         if (cell.getWidth() == 0) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
         float cx   = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
-        float cy   = (ringCellLoc[1] - ringRootLoc[1]) + dp(ICON_DP) / 2f + dp(4);
-        float half = cachedRingSize / 2f;
+        // Icon is drawn at icyOffset from the cell's top edge (iconPx/2 + 4dp).
+        int iconPx = dp(ICON_DP);
+        float icyOffset = iconPx / 2f + dp(4);
+        float cy   = (ringCellLoc[1] - ringRootLoc[1]) + icyOffset;
+        // rv is larger than cachedRingSize by shadowBleed on each side
+        float half = rv.getWidth() / 2f;
         rv.setX(cx - half); rv.setY(cy - half); rv.setVisibility(View.VISIBLE);
     }
 
@@ -1420,10 +1556,7 @@ public class LauncherActivity extends Activity {
 
     private int calcSampleSize(int srcW, int srcH) {
         int ss = 1;
-        if (srcH > screenH || srcW > screenW) {
-            int hH = srcH / 2, hW = srcW / 2;
-            while ((hH / ss) > screenH || (hW / ss) > screenW) ss *= 2;
-        }
+        while (srcH / ss > screenH || srcW / ss > screenW) ss *= 2;
         return ss;
     }
 
@@ -1448,7 +1581,10 @@ public class LauncherActivity extends Activity {
                 applyWallpaperFromUri(uri);
             }
         } else if (req == REQ_UNINSTALL) {
-            loadApps(); // refresh list — package receiver may not fire while in foreground on all ROMs
+            // Result may be RESULT_CANCELED even on successful uninstall (ACTION_DELETE doesn't
+            // always return RESULT_OK). Always refresh — the package receiver is unreliable
+            // while we're in the foreground on some ROMs.
+            uiHandler.postDelayed(this::loadApps, 400);
         }
     }
 
@@ -1508,25 +1644,38 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private float cachedR = -1;
+        private final Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint white  = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint inner  = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float bleed; // extra inset on each side for shadow room
+        private float cxf, cyf, wR, sRo, sRi;
 
-        RingView(Context ctx, int strokePx) {
+        RingView(Context ctx, int strokePx, int bleedPx) {
             super(ctx);
-            ring.setStyle(Paint.Style.STROKE);
-            ring.setColor(0xFFFFFFFF);
-            ring.setStrokeWidth(strokePx);
-            ring.setShadowLayer(strokePx * 2f, 0f, strokePx * 0.8f, 0xCC000000);
+            this.bleed = bleedPx;
+            float ws = strokePx * 0.9f;
+            float ds = strokePx * 0.5f;
+            shadow.setStyle(Paint.Style.STROKE); shadow.setColor(0xBB000000); shadow.setStrokeWidth(ds);
+            white.setStyle(Paint.Style.STROKE);  white.setColor(0xFFFFFFFF);  white.setStrokeWidth(ws);
+            inner.setStyle(Paint.Style.STROKE);  inner.setColor(0x88000000);  inner.setStrokeWidth(ds);
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
-            cachedR = w / 2f - ring.getStrokeWidth() / 2f;
+            cxf = w / 2f; cyf = h / 2f;
+            float ws = white.getStrokeWidth(), ds = shadow.getStrokeWidth();
+            // Logical ring radius starts at (w - 2*bleed)/2, inset by half stroke
+            float logR = (w - 2f * bleed) / 2f;
+            wR  = logR - ws / 2f;
+            sRo = wR + ws / 2f + ds / 2f;
+            sRi = wR - ws / 2f - ds / 2f;
         }
 
         @Override protected void onDraw(Canvas c) {
-            if (cachedR <= 0) return;
-            c.drawCircle(getWidth() / 2f, getHeight() / 2f, cachedR, ring);
+            if (wR <= 0) return;
+            c.drawCircle(cxf, cyf, sRo, shadow);
+            c.drawCircle(cxf, cyf, wR,  white);
+            c.drawCircle(cxf, cyf, sRi, inner);
         }
     }
 }
