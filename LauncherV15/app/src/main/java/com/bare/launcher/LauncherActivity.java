@@ -82,6 +82,7 @@ public class LauncherActivity extends Activity {
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
+    private static final String KEY_APP_ORDER  = "app_order";
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
@@ -178,6 +179,7 @@ public class LauncherActivity extends Activity {
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
+    private       int      cachedRingSize   = 0;
     private final Runnable pkgReloadRunnable = this::loadApps;
 
     private ConnectivityManager.NetworkCallback networkCallback;
@@ -211,8 +213,32 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    private void applyStoredOrder(List<AppInfo> apps) {
+        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_APP_ORDER, null);
+        if (raw == null || raw.isEmpty()) return;
+        String[] order = raw.split(",", -1);
+        ArrayMap<String, Integer> rank = new ArrayMap<>(order.length);
+        for (int i = 0; i < order.length; i++) rank.put(order[i], i);
+        Collections.sort(apps, (a, b) -> {
+            Integer ra = rank.get(a.packageName), rb = rank.get(b.packageName);
+            if (ra != null && rb != null) return ra - rb;
+            if (ra != null) return -1;
+            if (rb != null) return  1;
+            return a.label.compareToIgnoreCase(b.label);
+        });
+    }
+
+    private void saveOrder() {
+        if (appList.isEmpty()) return;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < appList.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(appList.get(i).packageName);
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_APP_ORDER, sb.toString()).apply();
+    }
+
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         DisplayMetrics dm = getResources().getDisplayMetrics();
@@ -378,10 +404,10 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        int ringSize = iconPx + strokePx * 2 + dp(4);
+        cachedRingSize = iconPx + strokePx * 2 + dp(4);
         ringView = new RingView(this, strokePx);
         ringView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-        ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
+        ringView.setLayoutParams(new FrameLayout.LayoutParams(cachedRingSize, cachedRingSize));
         ringView.setVisibility(View.INVISIBLE);
         root.addView(ringView);
 
@@ -581,7 +607,6 @@ public class LauncherActivity extends Activity {
             reorderMode   = true;
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
-            for (int i = 0; i < attached.size(); i++) attached.valueAt(i).lastMenuSel = -1;
             rebindAll();
         }
 
@@ -589,11 +614,7 @@ public class LauncherActivity extends Activity {
             if (!reorderMode) return;
             reorderMode = false;
             dragIndex   = -1;
-            if (persist) {
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putInt(KEY_SCROLL_IDX, focusedIndex).apply();
-            }
-            for (int i = 0; i < attached.size(); i++) attached.valueAt(i).lastMenuSel = -1;
+            if (persist) saveOrder();
             rebindAll();
         }
 
@@ -777,7 +798,6 @@ public class LauncherActivity extends Activity {
             private final float   labelMaxWInset;
             private final float   icyOffset;
             private       String  labelStr = "";
-            private       int     lastMenuSel = -1;
 
             CellView(Context ctx) {
                 super(ctx);
@@ -847,11 +867,23 @@ public class LauncherActivity extends Activity {
 
                 setOnFocusChangeListener((v, f) -> {
                     focused = f;
-                    animate().cancel();
-                    animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
+                    // Don't animate scale during reorder — causes flicker on every rebindAll
+                    if (!reorderMode) {
+                        animate().cancel();
+                        animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
+                    }
                     invalidate();
-                    if (f) { focusedIndex = boundIndex; positionRing(this); ensureVisible(boundIndex); }
-                    else   { RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE); }
+                    if (f) {
+                        focusedIndex = boundIndex;
+                        // Post ring positioning so layout is stable first
+                        post(() -> { if (focused) positionRing(this); });
+                        if (!reorderMode) ensureVisible(boundIndex);
+                    } else {
+                        // Only hide ring if we're not in reorder mode (reorder manages ring itself)
+                        if (!reorderMode) {
+                            RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+                        }
+                    }
                 });
 
                 setOnKeyListener((v, kc, ev) -> {
@@ -889,27 +921,29 @@ public class LauncherActivity extends Activity {
                     if (isCenterKey) {
                         if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() == 0) {
                             centerKeyDownAt = System.currentTimeMillis();
-                            return false;
-                        }
-                        if (ev.getAction() == KeyEvent.ACTION_UP) {
-                            long held = System.currentTimeMillis() - centerKeyDownAt;
-                            centerKeyDownAt = 0;
-                            if (held >= 600 && boundApp != null && !reorderMode) {
-                                enterReorderMode(boundIndex);
-                                return true;
-                            }
-                            performClick();
-                            return true;
+                            return true; // consume — we handle launch on ACTION_UP ourselves
                         }
                         if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() > 0) {
-                            long held = System.currentTimeMillis() - centerKeyDownAt;
-                            if (held >= 600 && boundApp != null && !reorderMode) {
-                                enterReorderMode(boundIndex);
-                                centerKeyDownAt = 0;
-                                return true;
+                            if (centerKeyDownAt != 0) {
+                                long held = System.currentTimeMillis() - centerKeyDownAt;
+                                if (held >= 500 && boundApp != null && !reorderMode) {
+                                    centerKeyDownAt = 0; // disarm so ACTION_UP won't launch
+                                    enterReorderMode(boundIndex);
+                                }
                             }
                             return true;
                         }
+                        if (ev.getAction() == KeyEvent.ACTION_UP) {
+                            long t = centerKeyDownAt;
+                            centerKeyDownAt = 0;
+                            if (t != 0) {
+                                // Was not consumed by long-press — short press: launch
+                                performClick();
+                            }
+                            // else: long-press already handled in ACTION_DOWN repeat path
+                            return true;
+                        }
+                        return false;
                     }
 
                     if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
@@ -926,7 +960,7 @@ public class LauncherActivity extends Activity {
             private void triggerUninstall() {
                 if (boundApp == null) return;
                 AppInfo appToUninstall = boundApp;
-                exitReorderMode(true);
+                exitReorderMode(false); // don't save yet — user may cancel the uninstall dialog
                 try {
                     Intent i = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
                             Uri.parse("package:" + appToUninstall.packageName));
@@ -1008,16 +1042,10 @@ public class LauncherActivity extends Activity {
                 float uninstTY = uninstTop + menuItemH / 2f - ascDesc / 2f;
                 float moveTY   = moveTop   + menuItemH / 2f - ascDesc / 2f;
 
-                if (lastMenuSel != menuSelection) {
-                    lastMenuSel = menuSelection;
-                    menuTextPaint.setColor(menuSelection == MENU_UNINSTALL ? 0xFFFF6B6B : 0xAAFF6B6B);
-                    canvas.drawText("\u2715  Uninstall", cx, uninstTY, menuTextPaint);
-                    menuTextPaint.setColor(menuSelection == MENU_MOVE ? Color.WHITE : 0xAAFFFFFF);
-                    canvas.drawText("\u21D4  Move", cx, moveTY, menuTextPaint);
-                } else {
-                    canvas.drawText("\u2715  Uninstall", cx, uninstTY, menuTextPaint);
-                    canvas.drawText("\u21D4  Move", cx, moveTY, menuTextPaint);
-                }
+                menuTextPaint.setColor(menuSelection == MENU_UNINSTALL ? 0xFFFF6B6B : 0xAAFF6B6B);
+                canvas.drawText("\u2715  Uninstall", cx, uninstTY, menuTextPaint);
+                menuTextPaint.setColor(menuSelection == MENU_MOVE ? Color.WHITE : 0xAAFFFFFF);
+                canvas.drawText("\u21D4  Move", cx, moveTY, menuTextPaint);
             }
 
             void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
@@ -1037,6 +1065,7 @@ public class LauncherActivity extends Activity {
         try {
             appExecutor.execute(() -> {
                 List<AppInfo> fresh = queryApps();
+                applyStoredOrder(fresh);
                 if (!destroyed) {
                     runOnUiThread(() -> {
                         appsLoading.set(false);
@@ -1080,7 +1109,7 @@ public class LauncherActivity extends Activity {
             //noinspection deprecation
             addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0), self, seen, out);
         }
-        Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label));
+        Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label)); // initial alpha; applyStoredOrder reorders by saved rank
         return out;
     }
 
@@ -1249,12 +1278,11 @@ public class LauncherActivity extends Activity {
     private void positionRing(View cell) {
         RingView rv = ringView; FrameLayout r = root;
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
+        if (cell.getWidth() == 0) return; // not laid out yet — post() caller will retry
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
-        int strokePx = dp(RING_STROKE_DP);
-        int ringSize = dp(ICON_DP) + strokePx * 2 + dp(4);
-        float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
-        float cy = (ringCellLoc[1] - ringRootLoc[1]) + dp(ICON_DP) / 2f + dp(4);
-        float half = ringSize / 2f;
+        float cx   = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
+        float cy   = (ringCellLoc[1] - ringRootLoc[1]) + dp(ICON_DP) / 2f + dp(4);
+        float half = cachedRingSize / 2f;
         rv.setX(cx - half); rv.setY(cy - half); rv.setVisibility(View.VISIBLE);
     }
 
@@ -1420,6 +1448,10 @@ public class LauncherActivity extends Activity {
                 userWpLoading.set(false);
                 applyWallpaperFromUri(uri);
             }
+        } else if (req == REQ_UNINSTALL) {
+            // Reload regardless — user may have uninstalled or cancelled; package receiver
+            // handles the broadcast but may not fire if we're still in foreground on some ROMs
+            loadApps();
         }
     }
 
