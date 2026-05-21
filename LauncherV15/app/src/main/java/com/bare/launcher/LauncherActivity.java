@@ -494,7 +494,7 @@ public class LauncherActivity extends Activity {
             RecyclingShelfView s = shelf;
             if (s != null && s.reorderMode) {
                 s.menuSelection = RecyclingShelfView.MENU_UNINSTALL;
-                CellView cv = s.attached.get(s.dragIndex);
+                RecyclingShelfView.CellView cv = s.attached.get(s.dragIndex);
                 if (cv != null) cv.triggerUninstall();
                 else s.exitReorderMode(false);
             }
@@ -778,7 +778,7 @@ public class LauncherActivity extends Activity {
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
             rebindAll();
-            CellView cv = attached.get(idx); if (cv != null) showContextMenu(cv);
+            CellView cv = attached.get(idx); if (cv != null) LauncherActivity.this.showContextMenu(cv);
         }
 
         void exitReorderMode(boolean persist) {
@@ -797,7 +797,7 @@ public class LauncherActivity extends Activity {
             focusedIndex = dragIndex;
             ensureVisible(dragIndex);
             rebindAll();
-            CellView cv = attached.get(dragIndex); if (cv != null) showContextMenu(cv);
+            CellView cv = attached.get(dragIndex); if (cv != null) LauncherActivity.this.showContextMenu(cv);
         }
 
         private void rebindAll() {
