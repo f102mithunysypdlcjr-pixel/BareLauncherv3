@@ -437,7 +437,6 @@ public class LauncherActivity extends Activity {
         final int MARG_E  = dp(28);
 
         netBtn = buildNetBtn(BTN_SZ);
-        netBtn.setAlpha(0.55f);
         FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
         netLp.gravity = Gravity.TOP | Gravity.END;
         netLp.setMargins(0, MARG_T, MARG_E + BTN_SZ + BTN_GAP, 0);
@@ -445,7 +444,6 @@ public class LauncherActivity extends Activity {
         root.addView(netBtn);
 
         View wpLocal = buildWpBtn(BTN_SZ);
-        wpLocal.setAlpha(0.55f);
         wpBtnView = wpLocal;
         FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
         wpLp.gravity = Gravity.TOP | Gravity.END;
@@ -593,23 +591,26 @@ public class LauncherActivity extends Activity {
         View v = new View(this) {
             private final Paint arcP  = makeBtnPaint(false);
             private final Paint dotP  = makeBtnPaint(true);
-            private final Paint hlP   = makeHlPaint();
             private final Paint bgP   = makeBgCirclePaint();
+            private final Paint glowP = makeHlPaint();
             private final Paint dimP  = makeBtnPaint(false);
             private final RectF oval  = new RectF();
             {
-                dimP.setColor(0xFFFF5A5A);
-                dimP.setAlpha(255);
+                dimP.setAlpha(70);
             }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
+                boolean focused = isFocused();
+                // Scale effect: slightly smaller when not focused
+                float scale = focused ? 1f : 0.88f;
+                float cx = w / 2f, cy = h / 2f;
+                float r = Math.min(cx, cy) * scale;
+                // Glow behind circle when focused
+                if (focused) c.drawCircle(cx, cy, r * 1.15f, glowP);
                 c.drawCircle(cx, cy, r, bgP);
-                if (isFocused()) {
-    c.drawCircle(cx, cy, r * 1.06f, hlP);
-}
-                c.save(); c.clipRect(0, 0, w, h);
+                c.save();
+                c.clipPath(makeCirclePath(cx, cy, r));
                 boolean conn = netConnected;
                 float ic = r * 0.88f;
                 float sw = ic * 0.115f;
@@ -634,11 +635,19 @@ public class LauncherActivity extends Activity {
                 }
                 c.restore();
             }
+            private final android.graphics.Path _cp = new android.graphics.Path();
+            private android.graphics.Path makeCirclePath(float cx, float cy, float r) {
+                _cp.rewind(); _cp.addCircle(cx, cy, r, android.graphics.Path.Direction.CW); return _cp;
+            }
         };
         v.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
         v.setOnClickListener(view -> openNetSettings());
-        v.setOnFocusChangeListener((view, f) -> { view.setAlpha(f ? 1f : 0.55f); view.invalidate(); });
+        v.setOnFocusChangeListener((view, f) -> {
+            view.animate().cancel();
+            view.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(120).start();
+            view.invalidate();
+        });
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
@@ -660,37 +669,49 @@ public class LauncherActivity extends Activity {
 
     private View buildWpBtn(int sz) {
         View v = new View(this) {
-            private final Paint p   = makeBtnStrokePaint();
-            private final Paint hlP = makeHlPaint();
-            private final Paint bgP = makeBgCirclePaint();
+            private final Paint p    = makeBtnStrokePaint();
+            private final Paint glowP= makeHlPaint();
+            private final Paint bgP  = makeBgCirclePaint();
             private final android.graphics.Path mt = new android.graphics.Path();
+            private final android.graphics.Path _cp = new android.graphics.Path();
             private int lw = 0, lh = 0;
+            private android.graphics.Path makeCirclePath(float cx, float cy, float r) {
+                _cp.rewind(); _cp.addCircle(cx, cy, r, android.graphics.Path.Direction.CW); return _cp;
+            }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
+                boolean focused = isFocused();
+                float scale = focused ? 1f : 0.88f;
+                float cx = w / 2f, cy = h / 2f;
+                float r = Math.min(cx, cy) * scale;
+                if (focused) c.drawCircle(cx, cy, r * 1.15f, glowP);
                 c.drawCircle(cx, cy, r, bgP);
-                if (isFocused()) {
-    c.drawCircle(cx, cy, r * 1.06f, hlP);
-}
                 float s = r * 0.90f;
                 p.setStrokeWidth(s * 0.10f);
-                if (w != lw || h != lh) {
+                if (w != lw || h != lh || lw == 0) {
                     lw = w; lh = h;
                     float l = cx - s/2f, rt = cx + s/2f, t = cy - s/2f, b = cy + s/2f;
                     mt.rewind();
                     mt.moveTo(l, b); mt.lineTo(l + s*0.38f, t + s*0.48f);
                     mt.lineTo(l + s*0.62f, t + s*0.66f); mt.lineTo(rt, b);
                 }
+                c.save();
+                c.clipPath(makeCirclePath(cx, cy, r));
                 c.drawRoundRect(cx - s/2f, cy - s/2f, cx + s/2f, cy + s/2f, s*0.10f, s*0.10f, p);
                 c.drawCircle(cx + s*0.17f, cy - s/2f + s*0.26f, s*0.10f, p);
                 c.drawPath(mt, p);
+                c.restore();
             }
         };
         v.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
         v.setOnClickListener(view -> openStoragePicker());
-        v.setOnFocusChangeListener((view, f) -> { view.setAlpha(f ? 1f : 0.55f); view.invalidate(); });
+        v.setOnFocusChangeListener((view, f) -> {
+            view.animate().cancel();
+            view.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(120).start();
+            view.invalidate();
+        });
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
@@ -730,9 +751,9 @@ public class LauncherActivity extends Activity {
     private Paint makeHlPaint() {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);
-        p.setColor(0xAAFFFFFF);
+        p.setColor(0x66FFFFFF);
         p.setMaskFilter(new android.graphics.BlurMaskFilter(
-                dp(8), android.graphics.BlurMaskFilter.Blur.NORMAL));
+                dp(10), android.graphics.BlurMaskFilter.Blur.NORMAL));
         return p;
     }
 
@@ -793,9 +814,15 @@ public class LauncherActivity extends Activity {
             menuSelection = MENU_MOVE;
             rebindAll();
             CellView cv = attached.get(idx); if (cv != null) LauncherActivity.this.showContextMenu(cv);
-            // Ring position: cell is already laid out; position immediately, then
-            // re-check after the next layout pass in case a requestLayout is in flight.
-            post(LauncherActivity.this::updateRingAfterMove);
+            // Ring position: wait for layout to finish before positioning the ring.
+            // Using post() alone can fire before repositionAttached completes if a
+            // requestLayout is in flight; addOnGlobalLayoutListener is more reliable.
+            getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+                @Override public void onGlobalLayout() {
+                    getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                    LauncherActivity.this.updateRingAfterMove();
+                }
+            });
         }
 
         void exitReorderMode(boolean persist) {
@@ -816,9 +843,13 @@ public class LauncherActivity extends Activity {
             rebindAll();                // re-layouts all cells at their new positions
             CellView cv = attached.get(dragIndex);
             if (cv != null) LauncherActivity.this.showContextMenu(cv);
-            // Position ring synchronously AFTER layout/scroll — the focus listener's
-            // deferred post() would fire too early (before repositionAttached completes).
-            updateRingAfterMove();
+            // Wait for layout to finish, then position ring precisely.
+            getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+                @Override public void onGlobalLayout() {
+                    getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                    LauncherActivity.this.updateRingAfterMove();
+                }
+            });
         }
 
         private void rebindAll() {
@@ -856,7 +887,14 @@ public class LauncherActivity extends Activity {
             if (reorderMode) exitReorderMode(false); // guard: don't corrupt dragIndex on list refresh
             hideContextMenu();
             for (int i = 0; i < attached.size(); i++) {
-                CellView cv = attached.valueAt(i); cv.setVisibility(GONE); pool.add(cv);
+                CellView cv = attached.valueAt(i);
+                // Detach from any pending icon loads
+                if (cv.boundApp != null) {
+                    List<CellView> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                    if (waiters != null) waiters.remove(cv);
+                }
+                cv.iconBitmap = null;
+                cv.setVisibility(GONE); pool.add(cv);
             }
             attached.clear();
             if (apps.isEmpty()) { focusedIndex = 0; scrollX = 0; }
@@ -864,7 +902,8 @@ public class LauncherActivity extends Activity {
             totalW = apps.size() * stride; centerX = 0; needsRefill = true;
             requestLayout();
             for (AppInfo app : apps) preWarmIcon(app);
-            post(() -> requestFocusOnIndex(focusedIndex));
+            final int targetIdx = focusedIndex;
+            post(() -> requestFocusOnIndex(targetIdx));
         }
 
         void requestFocusOnIndex(int idx) {
@@ -895,6 +934,12 @@ public class LauncherActivity extends Activity {
                 int idx = attached.keyAt(i);
                 if (idx < first || idx > last) {
                     CellView cv = attached.valueAt(i);
+                    // Detach from any pending icon load so stale bitmap isn't delivered
+                    if (cv.boundApp != null) {
+                        List<CellView> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                        if (waiters != null) waiters.remove(cv);
+                    }
+                    cv.iconBitmap = null;
                     cv.setVisibility(GONE); pool.add(cv); attached.removeAt(i);
                 }
             }
@@ -909,6 +954,8 @@ public class LauncherActivity extends Activity {
                 CellView cv = pool.remove(pool.size() - 1);
                 cv.animate().cancel();          // cancel any in-flight scale animation
                 cv.setScaleX(1f); cv.setScaleY(1f); // reset scale before reuse
+                cv.iconBitmap = null;           // clear stale bitmap — prevents ghost icons
+                cv.boundApp   = null;           // clear stale binding
                 cv.setVisibility(VISIBLE);
                 return cv;
             }
@@ -1038,14 +1085,21 @@ public class LauncherActivity extends Activity {
                 setOnFocusChangeListener((v, f) -> {
                     if (!reorderMode) {
                         animate().cancel();
-                        animate().scaleX(f ? 1.16f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
+                        animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
                     }
                     invalidate();
                     if (f) {
                         focusedIndex = boundIndex;
-                        post(() -> { if (isFocused()) positionRing(this); });
+                        // Position ring after next layout pass to get accurate coordinates
+                        getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+                            @Override public void onGlobalLayout() {
+                                getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                                if (isFocused()) positionRing(CellView.this);
+                            }
+                        });
                         if (!reorderMode) ensureVisible(boundIndex);
                     } else {
+                        // Only hide ring if not in reorder mode (reorder keeps ring on dragIndex)
                         if (!reorderMode) {
                             RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
                         }
@@ -1163,7 +1217,7 @@ public class LauncherActivity extends Activity {
                 if (w <= 0 || h <= 0) return;
 
                 float cx  = w / 2f;
-                float icy = icyOffset + (isFocused() ? 0 : dp(4));
+                float icy = icyOffset;
 
                 boolean isDragTarget = reorderMode && boundIndex == dragIndex;
 
@@ -1174,15 +1228,14 @@ public class LauncherActivity extends Activity {
                 } else {
                     drawIcon(canvas, cx, icy);
                 }
-                // NOTE: dragRingPaint circle removed — RingView (root-level) now draws the
-                // selection ring with a blur glow. Drawing it here too caused a double ring.
 
-                if ((isFocused() && !reorderMode) && !labelDisplay.isEmpty()) {
+                // Show label: always for focused+normal, always for drag target in reorder
+                boolean showLabel = (!labelDisplay.isEmpty()) &&
+                        ((isFocused() && !reorderMode) || isDragTarget);
+                if (showLabel) {
                     float labelY = icy + labelOffsetY;
                     if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);
                 }
-
-
             }
 
             private void drawIcon(Canvas canvas, float cx, float icy) {
@@ -1209,8 +1262,13 @@ public class LauncherActivity extends Activity {
                             : labelStr;
                 }
                 Bitmap cached = iconCache.get(app.packageName);
-                if (cached != null && cached != iconBitmap) { iconBitmap = cached; invalidate(); }
-                else if (cached == null) { iconBitmap = null; invalidate(); loadIconAsync(app, this); }
+                if (cached != null) {
+                    if (cached != iconBitmap) { iconBitmap = cached; invalidate(); }
+                } else {
+                    // Icon not yet loaded — clear any stale bitmap and request load
+                    if (iconBitmap != null) { iconBitmap = null; invalidate(); }
+                    loadIconAsync(app, this);
+                }
             }
         }
     }
@@ -1293,7 +1351,7 @@ public class LauncherActivity extends Activity {
     private void preWarmIcon(AppInfo app) {
         String key = app.packageName;
         if (iconCache.get(key) != null || iconInflight.containsKey(key)) return;
-        List<RecyclingShelfView.CellView> waiters = new ArrayList<>(0);
+        List<RecyclingShelfView.CellView> waiters = new ArrayList<>(2);
         iconInflight.put(key, waiters);
         try {
             iconExecutor.execute(() -> {
@@ -1305,10 +1363,19 @@ public class LauncherActivity extends Activity {
                 final Bitmap fb = bmp;
                 runOnUiThread(() -> {
                     if (destroyed) return;
-                    iconInflight.remove(key);
-                    for (RecyclingShelfView.CellView cell : waiters)
+                    List<RecyclingShelfView.CellView> pending = iconInflight.remove(key);
+                    if (pending == null) return;
+                    for (RecyclingShelfView.CellView cell : pending)
                         if (key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
                             cell.setIconBitmap(fb);
+                    // Also fill any cells that were attached while load was in flight
+                    RecyclingShelfView s = shelf;
+                    if (s == null || fb == null) return;
+                    for (int i = 0; i < s.attached.size(); i++) {
+                        RecyclingShelfView.CellView cv = s.attached.valueAt(i);
+                        if (cv.iconBitmap == null && key.equals(cv.boundApp != null ? cv.boundApp.packageName : null))
+                            cv.setIconBitmap(fb);
+                    }
                 });
             });
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
@@ -1319,7 +1386,10 @@ public class LauncherActivity extends Activity {
         Bitmap cached = iconCache.get(key);
         if (cached != null) { target.setIconBitmap(cached); return; }
         List<RecyclingShelfView.CellView> waiters = iconInflight.get(key);
-        if (waiters != null) { waiters.add(target); return; }
+        if (waiters != null) {
+            if (!waiters.contains(target)) waiters.add(target); // avoid duplicate registration
+            return;
+        }
         waiters = new ArrayList<>(2); waiters.add(target);
         iconInflight.put(key, waiters);
         final List<RecyclingShelfView.CellView> fw = waiters;
@@ -1334,9 +1404,11 @@ public class LauncherActivity extends Activity {
                 runOnUiThread(() -> {
                     if (destroyed) return;
                     iconInflight.remove(key);
-                    for (RecyclingShelfView.CellView cell : fw)
+                    for (RecyclingShelfView.CellView cell : fw) {
+                        // Guard: only deliver if cell is still bound to this package
                         if (key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
                             cell.setIconBitmap(fb);
+                    }
                 });
             });
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
@@ -1385,7 +1457,7 @@ public class LauncherActivity extends Activity {
                     if ((px[(y * sz + x) * 4 + 3] & 0xFF) < 20) trans++;  // RGBA: alpha at +3
                     total++;
                 }
-            return total > 0 && (float) trans / total >= 0.28f;
+            return total > 0 && (float) trans / total >= 0.50f;
         }
         int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
         for (int y = q1; y < q3; y += step)
@@ -1393,7 +1465,7 @@ public class LauncherActivity extends Activity {
                 if (Color.alpha(src.getPixel(x, y)) < 20) trans++;
                 total++;
             }
-        return total > 0 && (float) trans / total >= 0.28f;
+        return total > 0 && (float) trans / total >= 0.50f;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -1434,12 +1506,14 @@ public class LauncherActivity extends Activity {
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
         if (cell.getWidth() == 0) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
+        // Icon center: horizontally centered in cell, vertically at icyOffset from cell top
         float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
         float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset;
-        // Use stored layout size (includes bleed padding) — rv.getWidth() may still be 0
-        // if the first layout pass hasn't completed yet, which would mis-place the ring.
+        // ringLayoutSize includes bleed padding on all sides; center the view on icon center
         float half = ringLayoutSize / 2f;
-        rv.setX(cx - half); rv.setY(cy - half); rv.setVisibility(View.VISIBLE);
+        rv.setX(cx - half); rv.setY(cy - half);
+        rv.setVisibility(View.VISIBLE);
+        rv.invalidate(); // force redraw in case it was already visible at this position
     }
 
     /** Synchronously repositions the ring over the drag-target cell.
@@ -1463,56 +1537,19 @@ public class LauncherActivity extends Activity {
 
     private void stopClock() { clockRunning = false; clockHandler.removeCallbacks(clockTick); }
 
-private void checkNetNow() {
-    boolean connected = false;
-
-    try {
-        ConnectivityManager cm =
-                (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-
-        if (cm != null) {
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-
-                Network network = cm.getActiveNetwork();
-
-                if (network != null) {
-
-                    NetworkCapabilities caps =
-                            cm.getNetworkCapabilities(network);
-
-                    connected =
-                            caps != null &&
-                            caps.hasCapability(
-                                    NetworkCapabilities.NET_CAPABILITY_INTERNET
-                            ) &&
-                            caps.hasCapability(
-                                    NetworkCapabilities.NET_CAPABILITY_VALIDATED
-                            );
-                }
-
-            } else {
-
-                android.net.NetworkInfo info =
-                        cm.getActiveNetworkInfo();
-
-                connected =
-                        info != null &&
-                        info.isConnected();
-            }
-        }
-
-    } catch (Exception ignored) {
+    private void checkNetNow() {
+        if (cm == null) return;
+        boolean c = false;
+        try {
+            Network net = cm.getActiveNetwork();
+            NetworkCapabilities caps = net != null ? cm.getNetworkCapabilities(net) : null;
+            c = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
+        } catch (Exception ignored) {}
+        netConnected = c;
+        View nb = netBtn; if (nb != null) nb.invalidate();
     }
-
-    netConnected = connected;
-
-    View nb = netBtn;
-
-    if (nb != null) {
-        runOnUiThread(nb::invalidate);
-    }
-}
 
     private void registerNetworkCallback() {
         if (cm == null) return;
@@ -1722,10 +1759,11 @@ private void checkNetNow() {
             this.bleedPx = bleedPx;
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
 
-            // Pass 1: solid opaque white ring — always visible regardless of background
+            // Pass 1: solid opaque white ring with drop shadow for depth
             solidPaint.setStyle(Paint.Style.STROKE);
             solidPaint.setColor(0xFFFFFFFF);
             solidPaint.setStrokeWidth(strokePx * 1.2f);
+            solidPaint.setShadowLayer(strokePx * 1.5f, 0, strokePx * 0.8f, 0xAA000000);
 
             // Pass 2: larger-alpha blurred glow for the soft halo effect
             glowPaint.setStyle(Paint.Style.STROKE);
