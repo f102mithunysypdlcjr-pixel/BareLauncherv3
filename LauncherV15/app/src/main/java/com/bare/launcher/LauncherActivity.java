@@ -141,9 +141,9 @@ public class LauncherActivity extends Activity {
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
             if (destroyed || !clockRunning) return;
-            TextView cv = clockView;
-            if (cv != null) cv.setText(buildClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
             long now = System.currentTimeMillis();
+            TextView cv = clockView;
+            if (cv != null) cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
             clockHandler.postDelayed(this, CLOCK_MS - (now % CLOCK_MS));
         }
     };
@@ -165,7 +165,7 @@ public class LauncherActivity extends Activity {
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
         clockSsb.clear(); clockSsb.clearSpans();
-        clockSsb.append(String.valueOf(clockChars, 0, pos));  // valueOf reuses buf, no new char[]
+        clockSsb.append(new String(clockChars, 0, pos));
         clockSsb.setSpan(clockSpan, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return clockSsb;
     }
@@ -183,12 +183,14 @@ public class LauncherActivity extends Activity {
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
     private       int      cachedRingSize   = 0;
+    private       float    cachedIcyOffset  = 0f;
     private final Runnable pkgReloadRunnable = this::loadApps;
     private       FrameLayout menuOverlay   = null;
     private       TextView    menuUninstall = null;
     private       TextView    menuMove      = null;
     private final int[]    menuCellLoc      = new int[2];
     private final int[]    menuRootLoc      = new int[2];
+    private final int[]    menuOverlayLoc   = new int[2];
 
     private ConnectivityManager.NetworkCallback networkCallback;
 
@@ -342,11 +344,11 @@ public class LauncherActivity extends Activity {
             iconCache.evictAll(); iconInflight.clear();
             RecyclingShelfView sv = shelf;
             if (sv != null) {
-                sv.setApps(Collections.emptyList()); // moves attached → pool
-                // Now null every pooled bitmap so the evicted bitmaps can be GC'd
+                sv.setApps(Collections.emptyList());
                 for (int i = 0; i < sv.pool.size(); i++) sv.pool.get(i).iconBitmap = null;
             }
             appList.clear();
+            uiHandler.postDelayed(this::loadApps, 1000);
         }
         else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); iconInflight.clear(); }
         else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); iconInflight.clear(); }
@@ -365,7 +367,7 @@ public class LauncherActivity extends Activity {
             if (mw == 0) mw = menuOverlay.getMeasuredWidth();
             if (mh == 0) mh = menuOverlay.getMeasuredHeight();
             if (mw > 0 && mh > 0) {
-                int[] loc = menuRootLoc; // reuse pre-allocated array
+                int[] loc = menuOverlayLoc;
                 menuOverlay.getLocationOnScreen(loc);
                 float tx = ev.getRawX(), ty = ev.getRawY();
                 boolean inside = tx >= loc[0] && tx <= loc[0] + mw
@@ -450,12 +452,12 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Add extra padding for the outer shadow bleed (≈ strokePx on each side)
         int ringShadowBleed = strokePx * 2;
         int ringSize = iconPx + strokePx * 2 + dp(4) + ringShadowBleed * 2;
-        cachedRingSize = iconPx + strokePx * 2 + dp(4); // logical ring diameter (no bleed)
+        cachedRingSize  = iconPx + strokePx * 2 + dp(4);
+        cachedIcyOffset = iconPx / 2f + dp(4);
         ringView = new RingView(this, strokePx, ringShadowBleed);
-        ringView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // RingView sets LAYER_TYPE_SOFTWARE in its constructor (BlurMaskFilter requirement).
         ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
         ringView.setVisibility(View.INVISIBLE);
         root.addView(ringView);
@@ -540,16 +542,16 @@ public class LauncherActivity extends Activity {
         int cellCx    = (menuCellLoc[0] - menuRootLoc[0]) + cell.getWidth() / 2;
         int cellRelY  = (menuCellLoc[1] - menuRootLoc[1]);   // cell top in root coords
 
+        int rW = r.getWidth()  > 0 ? r.getWidth()  : screenW;
+        int rH = r.getHeight() > 0 ? r.getHeight() : screenH;
         menuOverlay.measure(
-                View.MeasureSpec.makeMeasureSpec(r.getWidth(),  View.MeasureSpec.AT_MOST),
-                View.MeasureSpec.makeMeasureSpec(r.getHeight(), View.MeasureSpec.AT_MOST));
+                View.MeasureSpec.makeMeasureSpec(rW, View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(rH, View.MeasureSpec.AT_MOST));
         int mw = menuOverlay.getMeasuredWidth();
         int mh = menuOverlay.getMeasuredHeight();
 
         int iconPx        = dp(ICON_DP);
-        // icyOffset is iconPx/2 + 4dp — same formula used in CellView.onDraw
-        int icyInCell     = iconPx / 2 + dp(4);
-        int iconTopInRoot = cellRelY + (icyInCell - iconPx / 2);   // top of icon in root
+        int iconTopInRoot = cellRelY + (int)(cachedIcyOffset - iconPx / 2f);
         int iconBotInRoot = iconTopInRoot + iconPx;
 
         // Prefer above the icon; fall back to below if it would clip the top
@@ -601,8 +603,9 @@ public class LauncherActivity extends Activity {
                 float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
                 c.drawCircle(cx, cy, r, bgP);
                 if (isFocused()) c.drawCircle(cx, cy, r, hlP);
+                c.save(); c.clipRect(0, 0, w, h);
                 boolean conn = netConnected;
-                float ic = r * 1.28f;
+                float ic = r * 0.88f;
                 float sw = ic * 0.115f;
                 float dotR = sw * 0.9f;
                 float dotY = cy + ic * 0.24f;
@@ -620,9 +623,10 @@ public class LauncherActivity extends Activity {
                 if (!conn) {
                     float xs = sw * 0.85f;
                     float x1 = cx - xs, y1 = dotY - xs, x2 = cx + xs, y2 = dotY + xs;
-                    c.drawLine(x1, y1, x2, y2, arcP);
-                    c.drawLine(x2, y1, x1, y2, arcP);
+                    c.drawLine(x1, y1, x2, y2, dimP);
+                    c.drawLine(x2, y1, x1, y2, dimP);
                 }
+                c.restore();
             }
         };
         v.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
@@ -661,7 +665,7 @@ public class LauncherActivity extends Activity {
                 float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
                 c.drawCircle(cx, cy, r, bgP);
                 if (isFocused()) c.drawCircle(cx, cy, r, hlP);
-                float s = r * 1.30f;
+                float s = r * 0.90f;
                 p.setStrokeWidth(s * 0.10f);
                 if (w != lw || h != lh) {
                     lw = w; lh = h;
@@ -718,7 +722,9 @@ public class LauncherActivity extends Activity {
     private Paint makeHlPaint() {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);
-        p.setColor(0x55FFFFFF);
+        p.setColor(0xAAFFFFFF);
+        p.setMaskFilter(new android.graphics.BlurMaskFilter(
+                dp(8), android.graphics.BlurMaskFilter.Blur.NORMAL));
         return p;
     }
 
@@ -778,7 +784,10 @@ public class LauncherActivity extends Activity {
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
             rebindAll();
-            CellView cv = attached.get(idx); if (cv != null) LauncherActivity.this.showContextMenu(cv);
+            CellView cv = attached.get(idx); if (cv != null) showContextMenu(cv);
+            // Ring position: cell is already laid out; position immediately, then
+            // re-check after the next layout pass in case a requestLayout is in flight.
+            post(LauncherActivity.this::updateRingAfterMove);
         }
 
         void exitReorderMode(boolean persist) {
@@ -795,9 +804,13 @@ public class LauncherActivity extends Activity {
             Collections.swap(appList, dragIndex, targetIdx);
             dragIndex    = targetIdx;
             focusedIndex = dragIndex;
-            ensureVisible(dragIndex);
-            rebindAll();
-            CellView cv = attached.get(dragIndex); if (cv != null) LauncherActivity.this.showContextMenu(cv);
+            ensureVisible(dragIndex);   // may scroll → repositionAttached
+            rebindAll();                // re-layouts all cells at their new positions
+            CellView cv = attached.get(dragIndex);
+            if (cv != null) showContextMenu(cv);
+            // Position ring synchronously AFTER layout/scroll — the focus listener's
+            // deferred post() would fire too early (before repositionAttached completes).
+            updateRingAfterMove();
         }
 
         private void rebindAll() {
@@ -954,31 +967,31 @@ public class LauncherActivity extends Activity {
             Bitmap  iconBitmap;
             AppInfo boundApp;
             int     boundIndex;
-            boolean focused = false;
-            private long    centerKeyDownAt  = 0;
-            private boolean longPressArmed   = false;
-            private boolean longPressFired   = false;
+            private long    centerKeyDownAt      = 0;
+            private boolean longPressArmed       = false;
+            private boolean longPressFired       = false;
+            // Set true when reorderMode is entered via key long-press so that the
+            // continued key-repeat (and KEY_UP) don't immediately confirm/exit.
+            private boolean suppressCenterUntilUp = false;
 
             private final Paint   phRing;
             private final Paint   labelPaint;
             private final Paint   iconPaint;
-            private final Paint   dragRingPaint;
             private final TextPaint labelTp;
             private final int     iconPx;
             private final float   phR;
             private final float   phStroke;
-            private final float   dragRingExtra;
             private final float   labelOffsetY;
             private final float   labelMaxWInset;
             private final float   icyOffset;
-            private       String  labelStr = "";
+            private       String  labelStr     = "";
+            private       String  labelDisplay = "";
 
             CellView(Context ctx) {
                 super(ctx);
                 iconPx         = dp(ICON_DP);
                 phR            = iconPx / 2f - dp(2);
                 phStroke       = dp(1);
-                dragRingExtra  = dp(3);
                 labelOffsetY   = iconPx / 2f + dp(12);
                 labelMaxWInset = dp(6);
                 icyOffset      = iconPx / 2f + dp(4);
@@ -999,13 +1012,8 @@ public class LauncherActivity extends Activity {
 
                 labelTp = new TextPaint(labelPaint);
 
-                dragRingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                dragRingPaint.setStyle(Paint.Style.STROKE);
-                dragRingPaint.setColor(0xCCFFFFFF);
-                dragRingPaint.setStrokeWidth(dp(2));
-
                 setFocusable(true); setFocusableInTouchMode(true);
-                setClickable(true); setLongClickable(true); setWillNotDraw(false);
+                setClickable(true); setWillNotDraw(false);
 
                 setOnClickListener(v -> {
                     if (boundApp == null) return;
@@ -1020,7 +1028,6 @@ public class LauncherActivity extends Activity {
                 });
 
                 setOnFocusChangeListener((v, f) -> {
-                    focused = f;
                     if (!reorderMode) {
                         animate().cancel();
                         animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
@@ -1028,7 +1035,7 @@ public class LauncherActivity extends Activity {
                     invalidate();
                     if (f) {
                         focusedIndex = boundIndex;
-                        post(() -> { if (focused) positionRing(this); });
+                        post(() -> { if (isFocused()) positionRing(this); });
                         if (!reorderMode) ensureVisible(boundIndex);
                     } else {
                         if (!reorderMode) {
@@ -1039,6 +1046,18 @@ public class LauncherActivity extends Activity {
 
                 setOnKeyListener((v, kc, ev) -> {
                     if (reorderMode) {
+                        boolean isCenterKey = kc == KeyEvent.KEYCODE_DPAD_CENTER
+                                || kc == KeyEvent.KEYCODE_ENTER
+                                || kc == KeyEvent.KEYCODE_BUTTON_A;
+
+                        // Clear the suppression latch on KEY_UP so the next press works normally.
+                        if (isCenterKey && ev.getAction() == KeyEvent.ACTION_UP) {
+                            suppressCenterUntilUp = false;
+                            return true; // consume — don't treat KEY_UP as a confirm
+                        }
+                        // Suppress repeating center-key presses until the key is fully released.
+                        if (isCenterKey && suppressCenterUntilUp) return true;
+
                         if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
                         switch (kc) {
                             case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -1081,6 +1100,7 @@ public class LauncherActivity extends Activity {
                                     longPressFired = true;
                                     longPressArmed = false;
                                     centerKeyDownAt = 0;
+                                    suppressCenterUntilUp = true; // block repeat/UP from immediately exiting
                                     enterReorderMode(boundIndex);
                                 }
                             }
@@ -1112,23 +1132,21 @@ public class LauncherActivity extends Activity {
                 if (boundApp == null) return;
                 AppInfo appToUninstall = boundApp;
                 exitReorderMode(false);
-                // ACTION_DELETE works universally on Android TV without needing
-                // REQUEST_DELETE_PACKAGES. Falls back to deprecated intent.
+                // Uri.fromParts is canonical — avoids any parsing edge cases.
+                Uri pkgUri = Uri.fromParts("package", appToUninstall.packageName, null);
+                // ACTION_DELETE is preferred on Android TV and does not require any special
+                // permission. Do NOT add FLAG_ACTIVITY_NEW_TASK — we launch from an Activity.
                 try {
-                    Intent i = new Intent(Intent.ACTION_DELETE,
-                            Uri.parse("package:" + appToUninstall.packageName));
-                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    startActivity(i);
-                } catch (Exception e1) {
-                    try {
-                        Intent i2 = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
-                                Uri.parse("package:" + appToUninstall.packageName));
-                        i2.putExtra(Intent.EXTRA_RETURN_RESULT, true);
-                        i2.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivityForResult(i2, REQ_UNINSTALL);
-                    } catch (Exception e2) {
-                        showToast("Cannot uninstall " + appToUninstall.label);
-                    }
+                    startActivity(new Intent(Intent.ACTION_DELETE, pkgUri));
+                    return;
+                } catch (Exception e1) { /* fall through to deprecated path */ }
+                // Fallback for unusual environments where ACTION_DELETE is unavailable.
+                try {
+                    Intent i2 = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri);
+                    i2.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                    startActivityForResult(i2, REQ_UNINSTALL);
+                } catch (Exception e2) {
+                    showToast("Cannot uninstall " + appToUninstall.label);
                 }
             }
 
@@ -1148,20 +1166,12 @@ public class LauncherActivity extends Activity {
                 } else {
                     drawIcon(canvas, cx, icy);
                 }
+                // NOTE: dragRingPaint circle removed — RingView (root-level) now draws the
+                // selection ring with a blur glow. Drawing it here too caused a double ring.
 
-                if (isDragTarget) {
-                    canvas.drawCircle(cx, icy, iconPx / 2f + dragRingExtra, dragRingPaint);
-                }
-
-                if ((focused && !reorderMode) && !labelStr.isEmpty()) {
+                if ((isFocused() && !reorderMode) && !labelDisplay.isEmpty()) {
                     float labelY = icy + labelOffsetY;
-                    if (labelY < h) {
-                        float maxW = w - labelMaxWInset;
-                        String display = labelPaint.measureText(labelStr) > maxW
-                                ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
-                                : labelStr;
-                        canvas.drawText(display, cx, labelY, labelPaint);
-                    }
+                    if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);
                 }
 
 
@@ -1182,9 +1192,14 @@ public class LauncherActivity extends Activity {
             void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
 
             void bind(AppInfo app, int index) {
+                boolean labelChanged = !app.label.equals(labelStr);
                 boundApp = app; boundIndex = index; labelStr = app.label;
-                // Don't reset focused here — the View system owns focus state.
-                // Only reload icon data.
+                if (labelChanged) {
+                    float maxW = dp(CELL_W_DP) - labelMaxWInset;
+                    labelDisplay = labelPaint.measureText(labelStr) > maxW
+                            ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
+                            : labelStr;
+                }
                 Bitmap cached = iconCache.get(app.packageName);
                 if (cached != null && cached != iconBitmap) { iconBitmap = cached; invalidate(); }
                 else if (cached == null) { iconBitmap = null; invalidate(); loadIconAsync(app, this); }
@@ -1359,7 +1374,7 @@ public class LauncherActivity extends Activity {
             int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
             for (int y = q1; y < q3; y += step)
                 for (int x = q1; x < q3; x += step) {
-                    if ((px[(y * sz + x) * 4] & 0xFF) < 20) trans++;  // ARGB_8888: byte[0]=A
+                    if ((px[(y * sz + x) * 4 + 3] & 0xFF) < 20) trans++;  // RGBA: alpha at +3
                     total++;
                 }
             return total > 0 && (float) trans / total >= 0.50f;
@@ -1411,22 +1426,27 @@ public class LauncherActivity extends Activity {
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
         if (cell.getWidth() == 0) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
-        float cx   = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
-        // Icon is drawn at icyOffset from the cell's top edge (iconPx/2 + 4dp).
-        int iconPx = dp(ICON_DP);
-        float icyOffset = iconPx / 2f + dp(4);
-        float cy   = (ringCellLoc[1] - ringRootLoc[1]) + icyOffset;
-        // rv is larger than cachedRingSize by shadowBleed on each side
+        float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
+        float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset;
         float half = rv.getWidth() / 2f;
         rv.setX(cx - half); rv.setY(cy - half); rv.setVisibility(View.VISIBLE);
+    }
+
+    /** Synchronously repositions the ring over the drag-target cell.
+     *  Must be called AFTER layout/scroll changes have been applied. */
+    private void updateRingAfterMove() {
+        RecyclingShelfView s = shelf;
+        if (s == null || !s.reorderMode) return;
+        RecyclingShelfView.CellView cv = s.attached.get(s.dragIndex);
+        if (cv != null && cv.isAttachedToWindow() && cv.getWidth() > 0) positionRing(cv);
     }
 
     private void startClock() {
         if (!clockRunning) {
             clockRunning = true;
-            TextView cv = clockView;
-            if (cv != null) cv.setText(buildClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
             long now = System.currentTimeMillis();
+            TextView cv = clockView;
+            if (cv != null) cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
             clockHandler.postDelayed(clockTick, CLOCK_MS - (now % CLOCK_MS));
         }
     }
@@ -1536,12 +1556,9 @@ public class LauncherActivity extends Activity {
     }
 
     private void recyclePrev(ImageView iv) {
-        Drawable prev = iv.getDrawable();
-        if (prev instanceof BitmapDrawable) {
-            Bitmap old = ((BitmapDrawable) prev).getBitmap();
-            iv.setImageDrawable(null);
-            if (old != null && !old.isRecycled()) old.recycle();
-        }
+        // Do not recycle the old bitmap — GPU may still hold a reference to the
+        // texture. Setting null drops the ImageView reference; GC handles cleanup.
+        iv.setImageDrawable(null);
     }
 
     private Bitmap wpDrawable(Drawable d) {
@@ -1614,7 +1631,7 @@ public class LauncherActivity extends Activity {
                 new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardPolicy());
         wpExecutor  = Executors.newSingleThreadExecutor();
         appExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(2), new ThreadPoolExecutor.DiscardOldestPolicy());
+                new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
     }
 
     @SuppressWarnings("deprecation")
@@ -1644,38 +1661,37 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        private final Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint white  = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint inner  = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final float bleed; // extra inset on each side for shadow room
-        private float cxf, cyf, wR, sRo, sRi;
+        // Single white stroke ring with a soft outer glow via BlurMaskFilter.
+        // LAYER_TYPE_SOFTWARE is required — BlurMaskFilter is incompatible with hardware layers.
+        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float bleedPx;
+        private float cx, cy, radius;
 
         RingView(Context ctx, int strokePx, int bleedPx) {
             super(ctx);
-            this.bleed = bleedPx;
-            float ws = strokePx * 0.9f;
-            float ds = strokePx * 0.5f;
-            shadow.setStyle(Paint.Style.STROKE); shadow.setColor(0xBB000000); shadow.setStrokeWidth(ds);
-            white.setStyle(Paint.Style.STROKE);  white.setColor(0xFFFFFFFF);  white.setStrokeWidth(ws);
-            inner.setStyle(Paint.Style.STROKE);  inner.setColor(0x88000000);  inner.setStrokeWidth(ds);
+            this.bleedPx = bleedPx;
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+            ringPaint.setStyle(Paint.Style.STROKE);
+            ringPaint.setColor(0xFFFFFFFF);
+            ringPaint.setStrokeWidth(strokePx * 1.15f);
+            // Soft outer glow — blur radius equals bleed so it fits exactly in the padding.
+            ringPaint.setMaskFilter(new android.graphics.BlurMaskFilter(
+                    bleedPx, android.graphics.BlurMaskFilter.Blur.OUTER));
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
-            cxf = w / 2f; cyf = h / 2f;
-            float ws = white.getStrokeWidth(), ds = shadow.getStrokeWidth();
-            // Logical ring radius starts at (w - 2*bleed)/2, inset by half stroke
-            float logR = (w - 2f * bleed) / 2f;
-            wR  = logR - ws / 2f;
-            sRo = wR + ws / 2f + ds / 2f;
-            sRi = wR - ws / 2f - ds / 2f;
+            cx = w / 2f; cy = h / 2f;
+            // The view is oversized by bleedPx on each side relative to the logical ring.
+            // Logical ring diameter = w - 2*bleedPx. Ring radius = logical_radius - stroke/2.
+            float logR = (w - 2f * bleedPx) / 2f;
+            radius = logR - ringPaint.getStrokeWidth() / 2f;
+            if (radius < 1f) radius = 1f;
         }
 
         @Override protected void onDraw(Canvas c) {
-            if (wR <= 0) return;
-            c.drawCircle(cxf, cyf, sRo, shadow);
-            c.drawCircle(cxf, cyf, wR,  white);
-            c.drawCircle(cxf, cyf, sRi, inner);
+            if (radius <= 0) return;
+            c.drawCircle(cx, cy, radius, ringPaint);
         }
     }
 }
