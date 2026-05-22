@@ -135,8 +135,6 @@ public class LauncherActivity extends Activity {
 
     private final java.util.Calendar       clockCal   = java.util.Calendar.getInstance();
     private final char[]                   clockChars = new char[8];
-    private final SpannableStringBuilder   clockSsb   = new SpannableStringBuilder();
-    private final RelativeSizeSpan         clockSpan  = new RelativeSizeSpan(0.55f);
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -164,10 +162,13 @@ public class LauncherActivity extends Activity {
         int amStart = pos;
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
-        clockSsb.clear(); clockSsb.clearSpans();
-        clockSsb.append(new String(clockChars, 0, pos));
-        clockSsb.setSpan(clockSpan, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return clockSsb;
+        // Fresh SSB each tick — reusing a shared instance and calling clear()/append()
+        // mutates the SpannableStringBuilder while the TextView's StaticLayout still holds
+        // a reference, which causes IndexOutOfBoundsException in the layout engine.
+        SpannableStringBuilder ssb = new SpannableStringBuilder();
+        ssb.append(new String(clockChars, 0, pos));
+        ssb.setSpan(new RelativeSizeSpan(0.55f), amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return ssb;
     }
 
     private ThreadPoolExecutor       iconExecutor;
@@ -182,7 +183,8 @@ public class LauncherActivity extends Activity {
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
-    private       int      cachedRingSize   = 0;
+    private       int      cachedRingSize   = 0;  // logical ring diameter (no bleed)
+    private       int      ringLayoutSize   = 0;  // full view size including bleed padding
     private       float    cachedIcyOffset  = 0f;
     private final Runnable pkgReloadRunnable = this::loadApps;
     private       FrameLayout menuOverlay   = null;
@@ -455,6 +457,7 @@ public class LauncherActivity extends Activity {
         int ringShadowBleed = strokePx * 2;
         int ringSize = iconPx + strokePx * 2 + dp(4) + ringShadowBleed * 2;
         cachedRingSize  = iconPx + strokePx * 2 + dp(4);
+        ringLayoutSize  = ringSize;   // full view size including bleed — used by positionRing
         cachedIcyOffset = iconPx / 2f + dp(4);
         ringView = new RingView(this, strokePx, ringShadowBleed);
         // RingView sets LAYER_TYPE_SOFTWARE in its constructor (BlurMaskFilter requirement).
@@ -784,7 +787,7 @@ public class LauncherActivity extends Activity {
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
             rebindAll();
-            CellView cv = attached.get(idx); if (cv != null) LauncherActivity.this.showContextMenu(cv);
+            CellView cv = attached.get(idx); if (cv != null) showContextMenu(cv);
             // Ring position: cell is already laid out; position immediately, then
             // re-check after the next layout pass in case a requestLayout is in flight.
             post(LauncherActivity.this::updateRingAfterMove);
@@ -807,7 +810,7 @@ public class LauncherActivity extends Activity {
             ensureVisible(dragIndex);   // may scroll → repositionAttached
             rebindAll();                // re-layouts all cells at their new positions
             CellView cv = attached.get(dragIndex);
-            if (cv != null) LauncherActivity.this.showContextMenu(cv);
+            if (cv != null) showContextMenu(cv);
             // Position ring synchronously AFTER layout/scroll — the focus listener's
             // deferred post() would fire too early (before repositionAttached completes).
             updateRingAfterMove();
@@ -1132,15 +1135,15 @@ public class LauncherActivity extends Activity {
                 if (boundApp == null) return;
                 AppInfo appToUninstall = boundApp;
                 exitReorderMode(false);
-                // Uri.fromParts is canonical — avoids any parsing edge cases.
                 Uri pkgUri = Uri.fromParts("package", appToUninstall.packageName, null);
-                // ACTION_DELETE is preferred on Android TV and does not require any special
-                // permission. Do NOT add FLAG_ACTIVITY_NEW_TASK — we launch from an Activity.
+                // Use startActivityForResult so onActivityResult always fires and we can
+                // refresh the app list. ACTION_DELETE is preferred on Android TV — it does
+                // not require special permission and works on all API levels.
                 try {
-                    startActivity(new Intent(Intent.ACTION_DELETE, pkgUri));
+                    startActivityForResult(new Intent(Intent.ACTION_DELETE, pkgUri), REQ_UNINSTALL);
                     return;
-                } catch (Exception e1) { /* fall through to deprecated path */ }
-                // Fallback for unusual environments where ACTION_DELETE is unavailable.
+                } catch (Exception e1) { /* fall through */ }
+                // Fallback: deprecated uninstall API for unusual environments.
                 try {
                     Intent i2 = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri);
                     i2.putExtra(Intent.EXTRA_RETURN_RESULT, true);
@@ -1428,7 +1431,9 @@ public class LauncherActivity extends Activity {
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
         float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
         float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset;
-        float half = rv.getWidth() / 2f;
+        // Use stored layout size (includes bleed padding) — rv.getWidth() may still be 0
+        // if the first layout pass hasn't completed yet, which would mis-place the ring.
+        float half = ringLayoutSize / 2f;
         rv.setX(cx - half); rv.setY(cy - half); rv.setVisibility(View.VISIBLE);
     }
 
@@ -1573,7 +1578,7 @@ public class LauncherActivity extends Activity {
 
     private int calcSampleSize(int srcW, int srcH) {
         int ss = 1;
-        while (srcH / ss > screenH || srcW / ss > screenW) ss *= 2;
+        while ((srcH / ss > screenH || srcW / ss > screenW) && ss < 0x8000) ss *= 2;
         return ss;
     }
 
@@ -1661,9 +1666,12 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        // Single white stroke ring with a soft outer glow via BlurMaskFilter.
-        // LAYER_TYPE_SOFTWARE is required — BlurMaskFilter is incompatible with hardware layers.
-        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        // Two-pass rendering: solid ring (always opaque) + blurred glow ring on top.
+        // BlurMaskFilter.Blur.OUTER on a stroke makes the stroke itself translucent,
+        // so we keep them separate — solid first, glow second.
+        // LAYER_TYPE_SOFTWARE is required for BlurMaskFilter.
+        private final Paint solidPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glowPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float bleedPx;
         private float cx, cy, radius;
 
@@ -1671,27 +1679,33 @@ public class LauncherActivity extends Activity {
             super(ctx);
             this.bleedPx = bleedPx;
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-            ringPaint.setStyle(Paint.Style.STROKE);
-            ringPaint.setColor(0xFFFFFFFF);
-            ringPaint.setStrokeWidth(strokePx * 1.15f);
-            // Soft outer glow — blur radius equals bleed so it fits exactly in the padding.
-            ringPaint.setMaskFilter(new android.graphics.BlurMaskFilter(
-                    bleedPx, android.graphics.BlurMaskFilter.Blur.OUTER));
+
+            // Pass 1: solid opaque white ring — always visible regardless of background
+            solidPaint.setStyle(Paint.Style.STROKE);
+            solidPaint.setColor(0xFFFFFFFF);
+            solidPaint.setStrokeWidth(strokePx * 1.2f);
+
+            // Pass 2: larger-alpha blurred glow for the soft halo effect
+            glowPaint.setStyle(Paint.Style.STROKE);
+            glowPaint.setColor(0xCCFFFFFF);
+            glowPaint.setStrokeWidth(strokePx * 1.2f);
+            glowPaint.setMaskFilter(new android.graphics.BlurMaskFilter(
+                    bleedPx, android.graphics.BlurMaskFilter.Blur.NORMAL));
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
-            // The view is oversized by bleedPx on each side relative to the logical ring.
-            // Logical ring diameter = w - 2*bleedPx. Ring radius = logical_radius - stroke/2.
+            // Logical ring sits inset by bleedPx on each side; stroke is centred on radius.
             float logR = (w - 2f * bleedPx) / 2f;
-            radius = logR - ringPaint.getStrokeWidth() / 2f;
+            radius = logR - solidPaint.getStrokeWidth() / 2f;
             if (radius < 1f) radius = 1f;
         }
 
         @Override protected void onDraw(Canvas c) {
             if (radius <= 0) return;
-            c.drawCircle(cx, cy, radius, ringPaint);
+            c.drawCircle(cx, cy, radius, glowPaint);  // glow pass first (underneath)
+            c.drawCircle(cx, cy, radius, solidPaint); // solid ring on top — always opaque
         }
     }
 }
