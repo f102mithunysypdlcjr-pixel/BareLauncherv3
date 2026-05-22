@@ -17,49 +17,54 @@
     <!-- Required to enumerate installed apps for the launcher grid -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <!-- Required for uninstall intent -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+
     <!-- HARDWARE FEATURES
          Both declared as NOT required so the APK installs on phones too
          (useful for sideloading / testing) -->
     <uses-feature
         android:name="android.software.leanback"
         android:required="false" />
+
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
-    <!-- PACKAGE VISIBILITY (Android 11+)
-         Required so queryIntentActivities returns results on API 30+
-         Without this the app grid is empty on modern Android TV firmware. -->
+    <!-- PACKAGE VISIBILITY (Android 11+) -->
     <queries>
+
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
         </intent>
+
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+
     </queries>
 
     <application
-        android:label="@string/app_name"
-        android:icon="@mipmap/ic_launcher"
-        android:banner="@drawable/banner"
-        android:theme="@style/Theme.BareLauncher"
         android:allowBackup="false"
-        android:supportsRtl="true"
+        android:banner="@drawable/banner"
         android:hardwareAccelerated="true"
-        android:largeHeap="false">
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="false"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BareLauncher">
 
         <activity
             android:name=".LauncherActivity"
-            android:exported="true"
             android:clearTaskOnLaunch="true"
-            android:stateNotNeeded="true"
-            android:launchMode="singleTask"
-            android:screenOrientation="landscape"
-            android:resizeableActivity="false"
             android:configChanges="keyboard|keyboardHidden|navigation|screenSize|uiMode|locale|layoutDirection"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape"
+            android:stateNotNeeded="true"
             android:windowSoftInputMode="stateUnspecified|adjustPan">
 
             <!-- Standard Android HOME launcher -->
