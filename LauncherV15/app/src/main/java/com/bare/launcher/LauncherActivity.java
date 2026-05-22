@@ -784,7 +784,7 @@ public class LauncherActivity extends Activity {
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
             rebindAll();
-            CellView cv = attached.get(idx); if (cv != null) showContextMenu(cv);
+            CellView cv = attached.get(idx); if (cv != null) LauncherActivity.this.showContextMenu(cv);
             // Ring position: cell is already laid out; position immediately, then
             // re-check after the next layout pass in case a requestLayout is in flight.
             post(LauncherActivity.this::updateRingAfterMove);
@@ -807,7 +807,7 @@ public class LauncherActivity extends Activity {
             ensureVisible(dragIndex);   // may scroll → repositionAttached
             rebindAll();                // re-layouts all cells at their new positions
             CellView cv = attached.get(dragIndex);
-            if (cv != null) showContextMenu(cv);
+            if (cv != null) LauncherActivity.this.showContextMenu(cv);
             // Position ring synchronously AFTER layout/scroll — the focus listener's
             // deferred post() would fire too early (before repositionAttached completes).
             updateRingAfterMove();
