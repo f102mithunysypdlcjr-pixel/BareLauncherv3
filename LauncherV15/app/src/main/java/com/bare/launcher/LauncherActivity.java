@@ -598,14 +598,17 @@ public class LauncherActivity extends Activity {
             private final Paint dimP  = makeBtnPaint(false);
             private final RectF oval  = new RectF();
             {
-                dimP.setAlpha(70);
+                dimP.setColor(0xFFFF5A5A);
+                dimP.setAlpha(255);
             }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
                 float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
                 c.drawCircle(cx, cy, r, bgP);
-                if (isFocused()) c.drawCircle(cx, cy, r, hlP);
+                if (isFocused()) {
+    c.drawCircle(cx, cy, r * 1.06f, hlP);
+}
                 c.save(); c.clipRect(0, 0, w, h);
                 boolean conn = netConnected;
                 float ic = r * 0.88f;
@@ -667,7 +670,9 @@ public class LauncherActivity extends Activity {
                 if (w <= 0 || h <= 0) return;
                 float cx = w / 2f, cy = h / 2f, r = Math.min(cx, cy);
                 c.drawCircle(cx, cy, r, bgP);
-                if (isFocused()) c.drawCircle(cx, cy, r, hlP);
+                if (isFocused()) {
+    c.drawCircle(cx, cy, r * 1.06f, hlP);
+}
                 float s = r * 0.90f;
                 p.setStrokeWidth(s * 0.10f);
                 if (w != lw || h != lh) {
@@ -1033,7 +1038,7 @@ public class LauncherActivity extends Activity {
                 setOnFocusChangeListener((v, f) -> {
                     if (!reorderMode) {
                         animate().cancel();
-                        animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
+                        animate().scaleX(f ? 1.16f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
                     }
                     invalidate();
                     if (f) {
@@ -1158,7 +1163,7 @@ public class LauncherActivity extends Activity {
                 if (w <= 0 || h <= 0) return;
 
                 float cx  = w / 2f;
-                float icy = icyOffset;
+                float icy = icyOffset + (isFocused() ? 0 : dp(4));
 
                 boolean isDragTarget = reorderMode && boundIndex == dragIndex;
 
@@ -1380,7 +1385,7 @@ public class LauncherActivity extends Activity {
                     if ((px[(y * sz + x) * 4 + 3] & 0xFF) < 20) trans++;  // RGBA: alpha at +3
                     total++;
                 }
-            return total > 0 && (float) trans / total >= 0.50f;
+            return total > 0 && (float) trans / total >= 0.28f;
         }
         int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
         for (int y = q1; y < q3; y += step)
@@ -1388,7 +1393,7 @@ public class LauncherActivity extends Activity {
                 if (Color.alpha(src.getPixel(x, y)) < 20) trans++;
                 total++;
             }
-        return total > 0 && (float) trans / total >= 0.50f;
+        return total > 0 && (float) trans / total >= 0.28f;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -1458,19 +1463,56 @@ public class LauncherActivity extends Activity {
 
     private void stopClock() { clockRunning = false; clockHandler.removeCallbacks(clockTick); }
 
-    private void checkNetNow() {
-        if (cm == null) return;
-        boolean c = false;
-        try {
-            Network net = cm.getActiveNetwork();
-            NetworkCapabilities caps = net != null ? cm.getNetworkCapabilities(net) : null;
-            c = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                    || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
-        } catch (Exception ignored) {}
-        netConnected = c;
-        View nb = netBtn; if (nb != null) nb.invalidate();
+private void checkNetNow() {
+    boolean connected = false;
+
+    try {
+        ConnectivityManager cm =
+                (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+
+        if (cm != null) {
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+
+                Network network = cm.getActiveNetwork();
+
+                if (network != null) {
+
+                    NetworkCapabilities caps =
+                            cm.getNetworkCapabilities(network);
+
+                    connected =
+                            caps != null &&
+                            caps.hasCapability(
+                                    NetworkCapabilities.NET_CAPABILITY_INTERNET
+                            ) &&
+                            caps.hasCapability(
+                                    NetworkCapabilities.NET_CAPABILITY_VALIDATED
+                            );
+                }
+
+            } else {
+
+                android.net.NetworkInfo info =
+                        cm.getActiveNetworkInfo();
+
+                connected =
+                        info != null &&
+                        info.isConnected();
+            }
+        }
+
+    } catch (Exception ignored) {
     }
+
+    netConnected = connected;
+
+    View nb = netBtn;
+
+    if (nb != null) {
+        runOnUiThread(nb::invalidate);
+    }
+}
 
     private void registerNetworkCallback() {
         if (cm == null) return;
