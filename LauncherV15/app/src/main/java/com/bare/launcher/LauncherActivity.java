@@ -452,11 +452,12 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        int ringSize = iconPx + strokePx * 6 + dp(4);
+        // Ring view diameter = icon + white stroke each side + dark stroke each side + 2px gap
+        int ringSize = iconPx + strokePx * 4 + dp(2);
         cachedRingSize  = ringSize;
         ringLayoutSize  = ringSize;
-        cachedIcyOffset = iconPx / 2f + dp(4);
-        ringView = new RingView(this, strokePx, 0);
+        cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
+        ringView = new RingView(this, strokePx, iconPx);
         ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
         ringView.setVisibility(View.INVISIBLE);
         root.addView(ringView);
@@ -643,6 +644,7 @@ public class LauncherActivity extends Activity {
             }
         };
         v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        v.setBackground(null);  // suppress Android default square focus/press highlight
         v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
         v.setOnClickListener(view -> openNetSettings());
         v.setOnFocusChangeListener((view, f) -> {
@@ -716,6 +718,7 @@ public class LauncherActivity extends Activity {
             }
         };
         v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        v.setBackground(null);  // suppress Android default square focus/press highlight
         v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
         v.setOnClickListener(view -> openStoragePicker());
         v.setOnFocusChangeListener((view, f) -> {
@@ -1061,9 +1064,9 @@ public class LauncherActivity extends Activity {
                 iconPx         = dp(ICON_DP);
                 phR            = iconPx / 2f - dp(2);
                 phStroke       = dp(1);
-                labelOffsetY   = iconPx / 2f + dp(12);
+                labelOffsetY   = iconPx / 2f + dp(11);
                 labelMaxWInset = dp(6);
-                icyOffset      = iconPx / 2f + dp(4);
+                icyOffset      = iconPx / 2f;  // centred in cell — ring aligns to this
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
@@ -1459,7 +1462,8 @@ public class LauncherActivity extends Activity {
             int needed   = rowBytes * src.getHeight();
             byte[] px = sPixelBuf.get();
             if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
-            ByteBuffer buf = ByteBuffer.wrap(px); buf.rewind();
+            ByteBuffer buf = ByteBuffer.wrap(px);
+            buf.order(java.nio.ByteOrder.nativeOrder()).rewind();
             src.copyPixelsToBuffer(buf);
             int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
             for (int y = q1; y < q3; y += step)
@@ -1764,21 +1768,26 @@ public class LauncherActivity extends Activity {
         private final Paint darkInner = new Paint(Paint.ANTI_ALIAS_FLAG);
         private float cx, cy, wR, outerR, innerR;
 
-        RingView(Context ctx, int strokePx, int ignored) {
+        private final float iconR;  // icon radius in px — ring hugs icon edge
+
+        RingView(Context ctx, int strokePx, int iconPx) {
             super(ctx);
             setLayerType(View.LAYER_TYPE_HARDWARE, null);
-            float ws = strokePx * 1.6f;
-            float ds = strokePx * 0.8f;
-            darkOuter.setStyle(Paint.Style.STROKE); darkOuter.setColor(0xBB000000); darkOuter.setStrokeWidth(ds);
+            this.iconR = iconPx / 2f;
+            float ws = strokePx * 1.5f;
+            float ds = strokePx * 0.7f;
+            darkOuter.setStyle(Paint.Style.STROKE); darkOuter.setColor(0xCC000000); darkOuter.setStrokeWidth(ds);
             white.setStyle(Paint.Style.STROKE);     white.setColor(0xFFFFFFFF);     white.setStrokeWidth(ws);
-            darkInner.setStyle(Paint.Style.STROKE); darkInner.setColor(0xBB000000); darkInner.setStrokeWidth(ds);
+            darkInner.setStyle(Paint.Style.STROKE); darkInner.setColor(0xCC000000); darkInner.setStrokeWidth(ds);
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
             float ws = white.getStrokeWidth(), ds = darkOuter.getStrokeWidth();
-            wR     = cx - ws / 2f;
+            // White ring centre sits exactly at icon radius + half white stroke width
+            // so the ring inner edge is flush with the icon boundary.
+            wR     = iconR + ws / 2f;
             outerR = wR + ws / 2f + ds / 2f;
             innerR = wR - ws / 2f - ds / 2f;
         }
