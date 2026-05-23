@@ -135,6 +135,8 @@ public class LauncherActivity extends Activity {
 
     private final java.util.Calendar       clockCal   = java.util.Calendar.getInstance();
     private final char[]                   clockChars = new char[8];
+    private final SpannableStringBuilder   clockSsb   = new SpannableStringBuilder();
+    private final RelativeSizeSpan         clockSpan  = new RelativeSizeSpan(0.55f);
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -162,13 +164,12 @@ public class LauncherActivity extends Activity {
         int amStart = pos;
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
-        // Fresh SSB each tick — reusing a shared instance and calling clear()/append()
-        // mutates the SpannableStringBuilder while the TextView's StaticLayout still holds
-        // a reference, which causes IndexOutOfBoundsException in the layout engine.
-        SpannableStringBuilder ssb = new SpannableStringBuilder();
-        ssb.append(new String(clockChars, 0, pos));
-        ssb.setSpan(new RelativeSizeSpan(0.55f), amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return ssb;
+        // Reuse shared SSB — TextView.setText(Spannable, SPANNABLE) copies internally,
+        // so clearing and re-building clockSsb next tick does not corrupt what the TextView holds.
+        clockSsb.clear(); clockSsb.clearSpans();
+        clockSsb.append(String.valueOf(clockChars, 0, pos));
+        clockSsb.setSpan(clockSpan, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return clockSsb;
     }
 
     private ThreadPoolExecutor       iconExecutor;
@@ -413,7 +414,7 @@ public class LauncherActivity extends Activity {
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
         shelfLp.gravity = Gravity.BOTTOM;
-        shelfLp.setMargins(0, 0, 0, dp(28));
+        shelfLp.setMargins(0, 0, 0, dp(12));
         shelf.setLayoutParams(shelfLp);
         root.addView(shelf);
 
@@ -588,14 +589,14 @@ public class LauncherActivity extends Activity {
 
     private View buildNetBtn(int sz) {
         View v = new View(this) {
-            private final Paint arcP  = makeBtnPaint(false);
-            private final Paint dotP  = makeBtnPaint(true);
-            private final Paint bgP   = makeBgCirclePaint();
-            private final Paint dimP  = makeBtnPaint(false);
-            private final RectF oval  = new RectF();
-            {
-                dimP.setAlpha(70);
-            }
+            private final Paint arcP   = makeBtnPaint(false);
+            private final Paint dotP   = makeBtnPaint(true);
+            private final Paint bgP    = makeBgCirclePaint();
+            private final Paint dimP   = makeBtnPaint(false);
+            private final Paint glowP1 = makeGlowPaint(0x44FFFFFF);
+            private final Paint glowP2 = makeGlowPaint(0x22FFFFFF);
+            private final RectF oval   = new RectF();
+            { dimP.setAlpha(70); }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
@@ -604,12 +605,8 @@ public class LauncherActivity extends Activity {
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
                 if (focused) {
-                    Paint gp = new Paint(Paint.ANTI_ALIAS_FLAG);
-                    gp.setStyle(Paint.Style.FILL);
-                    gp.setColor(0x44FFFFFF);
-                    c.drawCircle(cx, cy, r * 1.20f, gp);
-                    gp.setColor(0x22FFFFFF);
-                    c.drawCircle(cx, cy, r * 1.35f, gp);
+                    c.drawCircle(cx, cy, r * 1.20f, glowP1);
+                    c.drawCircle(cx, cy, r * 1.35f, glowP2);
                 }
                 c.drawCircle(cx, cy, r, bgP);
                 c.save();
@@ -673,8 +670,10 @@ public class LauncherActivity extends Activity {
 
     private View buildWpBtn(int sz) {
         View v = new View(this) {
-            private final Paint p   = makeBtnStrokePaint();
-            private final Paint bgP = makeBgCirclePaint();
+            private final Paint p     = makeBtnStrokePaint();
+            private final Paint bgP   = makeBgCirclePaint();
+            private final Paint glowP1 = makeGlowPaint(0x44FFFFFF);
+            private final Paint glowP2 = makeGlowPaint(0x22FFFFFF);
             private final android.graphics.Path mt  = new android.graphics.Path();
             private final android.graphics.Path _cp = new android.graphics.Path();
             private int   lw = 0, lh = 0;
@@ -689,14 +688,9 @@ public class LauncherActivity extends Activity {
                 float scale = focused ? 1f : 0.88f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
-                // Focused glow: semi-transparent larger circle (GPU-native, no BlurMaskFilter)
                 if (focused) {
-                    Paint gp = new Paint(Paint.ANTI_ALIAS_FLAG);
-                    gp.setStyle(Paint.Style.FILL);
-                    gp.setColor(0x44FFFFFF);
-                    c.drawCircle(cx, cy, r * 1.20f, gp);
-                    gp.setColor(0x22FFFFFF);
-                    c.drawCircle(cx, cy, r * 1.35f, gp);
+                    c.drawCircle(cx, cy, r * 1.20f, glowP1);
+                    c.drawCircle(cx, cy, r * 1.35f, glowP2);
                 }
                 c.drawCircle(cx, cy, r, bgP);
                 float s = r * 0.88f;
@@ -766,6 +760,13 @@ public class LauncherActivity extends Activity {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);
         p.setColor(0x55000000);
+        return p;
+    }
+
+    private Paint makeGlowPaint(int color) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(color);
         return p;
     }
 
@@ -850,14 +851,15 @@ public class LauncherActivity extends Activity {
             Collections.swap(appList, dragIndex, targetIdx);
             dragIndex    = targetIdx;
             focusedIndex = dragIndex;
-            ensureVisible(dragIndex);   // may scroll → repositionAttached
-            rebindAll();                // re-layouts all cells at their new positions
+            ensureVisible(dragIndex);   // scroll + repositionAttached — fully synchronous
+            rebindAll();                // bindCell → layout() — cell positions final now
             CellView cv = attached.get(dragIndex);
             if (cv != null) LauncherActivity.this.showContextMenu(cv);
-            // ensureVisible() → doScrollTo() → repositionAttached() are all synchronous.
-            // post() fires after the current message loop iteration, i.e. after any
-            // pending draw pass, so screen coordinates are accurate by then.
-            post(LauncherActivity.this::updateRingAfterMove);
+            // Direct call — cell.mLeft is already updated by repositionAttached() above,
+            // so getLocationOnScreen() returns the correct coordinate immediately.
+            // post() would race: focus listener's post(positionRing) fires first at the
+            // pre-scroll position, producing a 1-frame left-shift artifact.
+            LauncherActivity.this.updateRingAfterMove();
         }
 
         private void rebindAll() {
@@ -1064,7 +1066,7 @@ public class LauncherActivity extends Activity {
                 iconPx         = dp(ICON_DP);
                 phR            = iconPx / 2f - dp(2);
                 phStroke       = dp(1);
-                labelOffsetY   = iconPx / 2f + dp(11);
+                labelOffsetY   = iconPx / 2f + dp(17);
                 labelMaxWInset = dp(6);
                 icyOffset      = iconPx / 2f;  // centred in cell — ring aligns to this
 
@@ -1107,14 +1109,14 @@ public class LauncherActivity extends Activity {
                     invalidate();
                     if (f) {
                         focusedIndex = boundIndex;
-                        // Use post() — the cell is already laid out at this point
-                        // (bindCell calls layout() directly, not requestLayout()).
-                        // OnGlobalLayoutListener fires on every layout pass including
-                        // scroll-driven ones, causing a lag spike on every D-pad move.
-                        post(() -> { if (isFocused() && isAttachedToWindow()) positionRing(CellView.this); });
-                        if (!reorderMode) ensureVisible(boundIndex);
+                        // In reorder mode the ring is managed exclusively by updateRingAfterMove
+                        // which runs after ensureVisible+repositionAttached — using post() here
+                        // races with the scroll and produces a 1-frame left-shift artifact.
+                        if (!reorderMode) {
+                            post(() -> { if (isFocused() && isAttachedToWindow()) positionRing(CellView.this); });
+                            ensureVisible(boundIndex);
+                        }
                     } else {
-                        // Only hide ring if not in reorder mode (reorder keeps ring on dragIndex)
                         if (!reorderMode) {
                             RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
                         }
