@@ -25,10 +25,6 @@ import android.graphics.Typeface;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -92,7 +88,6 @@ public class LauncherActivity extends Activity {
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
-    private static final int    REQ_UNINSTALL  = 43;
 
     private static final ThreadLocal<Matrix> sMatrixTL = new ThreadLocal<Matrix>() {
         @Override protected Matrix initialValue() { return new Matrix(); }
@@ -124,10 +119,8 @@ public class LauncherActivity extends Activity {
     private final AtomicBoolean systemWpLoading = new AtomicBoolean(false);
     private final AtomicBoolean userWpLoading   = new AtomicBoolean(false);
     private final AtomicBoolean appsLoading     = new AtomicBoolean(false);
-    private volatile boolean    netConnected    = false;
 
     private PackageManager      pm;
-    private ConnectivityManager cm;
 
     private RecyclingShelfView shelf;
     private ImageView          wallpaperView;
@@ -198,8 +191,7 @@ public class LauncherActivity extends Activity {
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
-    private       int      cachedRingSize   = 0;  // logical ring diameter (no bleed)
-    private       int      ringLayoutSize   = 0;  // full view size including bleed padding
+    private       int      ringLayoutSize   = 0;  // full RingView box size (large enough at 1.12x focus scale)
     private       float    cachedIcyOffset  = 0f;
     private final Runnable pkgReloadRunnable = this::loadApps;
 
@@ -210,7 +202,17 @@ public class LauncherActivity extends Activity {
     private final int[]    menuRootLoc      = new int[2];
     private final int[]    menuOverlayLoc   = new int[2];
 
-    private ConnectivityManager.NetworkCallback networkCallback;
+    /** Hides the selection ring whenever focus moves OUT of any shelf cell.
+     *  Single source of truth for "ring should not be visible right now". */
+    private final ViewTreeObserver.OnGlobalFocusChangeListener globalFocusListener =
+            (oldFocus, newFocus) -> {
+                if (destroyed) return;
+                boolean newIsCell = newFocus instanceof RecyclingShelfView.CellView;
+                if (!newIsCell) {
+                    RingView rv = ringView;
+                    if (rv != null) rv.setVisibility(View.INVISIBLE);
+                }
+            };
 
     private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
@@ -273,14 +275,12 @@ public class LauncherActivity extends Activity {
         DisplayMetrics dm = getResources().getDisplayMetrics();
         density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels;
         pm = getPackageManager();
-        cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         initCaches();
         setContentView(buildLayout());
         hideSystemUI();
         loadWallpaper();
         loadApps();
         registerPkgReceiver();
-        registerNetworkCallback();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                     android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, () -> {
@@ -295,7 +295,6 @@ public class LauncherActivity extends Activity {
         super.onResume();
         hideSystemUI();
         startClock();
-        checkNetNow();
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         RecyclingShelfView s = shelf;
         if (s != null) {
@@ -312,12 +311,22 @@ public class LauncherActivity extends Activity {
             ViewTreeObserver vto = s.getViewTreeObserver();
             if (vto.isAlive()) vto.addOnGlobalLayoutListener(focusRestoreListener);
         }
+        FrameLayout r = root;
+        if (r != null) {
+            ViewTreeObserver rvto = r.getViewTreeObserver();
+            if (rvto.isAlive()) rvto.addOnGlobalFocusChangeListener(globalFocusListener);
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         stopClock();
+        FrameLayout r = root;
+        if (r != null) {
+            ViewTreeObserver rvto = r.getViewTreeObserver();
+            if (rvto.isAlive()) rvto.removeOnGlobalFocusChangeListener(globalFocusListener);
+        }
         RecyclingShelfView s = shelf;
         if (s != null) {
             if (s.reorderMode) s.exitReorderMode(false);
@@ -337,7 +346,6 @@ public class LauncherActivity extends Activity {
         clockHandler.removeCallbacksAndMessages(null);
         uiHandler.removeCallbacksAndMessages(null);
         unregisterPkgReceiver();
-        unregisterNetworkCallback();
         shutdown(iconExecutor); shutdown(wpExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
@@ -482,11 +490,11 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Ring view diameter = icon + stroke + generous bleed for soft shadow blur.
-        // Bleed must exceed BlurMaskFilter radius (~3.2*strokePx) AND account for
-        // the 1.12x focus scale, otherwise the shadow gets clipped by view bounds.
-        int ringSize = iconPx + strokePx * 12;
-        cachedRingSize  = ringSize;
+        // Ring view diameter = icon + gap + stroke + scale headroom.
+        // No shadow bleed needed (RingView is shadowless). The 1.12x focus
+        // scale is applied to the RingView at draw time, so the layout box
+        // must be large enough to hold the ring at full focus radius.
+        int ringSize = iconPx + dp(20);
         ringLayoutSize  = ringSize;
         cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
         ringView = new RingView(this, strokePx, iconPx);
@@ -624,14 +632,17 @@ public class LauncherActivity extends Activity {
 
     private View buildNetBtn(int sz) {
         View v = new View(this) {
-            // Apple-TV style: dark glass when idle, frosted-white when focused;
-            // symbol inverts (white → near-black) on focus for crisp contrast.
-            private final Paint stroke    = makeBtnPaint(false);   // hairline-style strokes
-            private final Paint dot       = makeBtnPaint(true);    // solid dot
+            // Pure shortcut button: opens WiFi settings. No status indicator —
+            // the system already surfaces connectivity in its own UI; mirroring
+            // it here creates two sources of truth that can disagree.
+            //
+            // Glyph: iOS-style WiFi fan — a filled wedge built from 3 stacked
+            // arc bands plus a dot apex. Stroke caps are ROUND so the bands
+            // read as smooth ribbons rather than line-art.
+            private final Paint stroke    = makeBtnPaint(false);
+            private final Paint dot       = makeBtnPaint(true);
             private final Paint bgIdle    = makeBgIdlePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
-            private final Paint glowOuter = makeGlowPaint(0x40FFFFFF);
-            private final Paint glowMid   = makeGlowPaint(0x22FFFFFF);
             private final Paint rim       = makeRimPaint();
             private final RectF oval      = new RectF();
             @Override protected void onDraw(Canvas c) {
@@ -641,64 +652,40 @@ public class LauncherActivity extends Activity {
                 float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
-                if (focused) {
-                    // Soft, dominant outer halo (Apple-TV signature glow)
-                    c.drawCircle(cx, cy, r * 1.55f, glowMid);
-                    c.drawCircle(cx, cy, r * 1.32f, glowOuter);
-                }
                 // Background plate — frosted white when focused, dark glass when idle
                 c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
                 // Subtle 1dp inner rim — gives the glass plate a defined edge
                 c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
 
-                c.save();
-                c.clipPath(makeCirclePath(cx, cy, r));
                 int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
                 stroke.setColor(symbolColor);
                 dot.setColor(symbolColor);
-                boolean conn = netConnected;
 
-                // Apple-TV style WiFi glyph: 3 concentric arcs + dot apex.
+                // iOS-style WiFi fan. Bands are thicker than the previous
+                // hairline draw so the glyph reads as a solid ribbon, not
+                // a wireframe outline.
                 //
-                //   Geometry: arcs are centred on a virtual anchor below the
-                //   icon centre (so the dot sits low and the arcs curve up
-                //   over it like radio waves). Radii at 0.26/0.50/0.74 give
-                //   even visual spacing. Sweep is 145° centred on 270° (up),
-                //   so arcs span 197.5°→342.5°.
-                float ic   = r * 0.96f;
-                float sw   = ic * 0.115f;
-                float ay   = cy + ic * 0.20f;     // arc-anchor / dot baseline
-                float dotR = sw * 0.85f;
-                float dotY = ay + sw * 0.55f;     // small gap below smallest arc
-                float startAngle = 197.5f, sweep = 145f;
+                //   ay    arc-anchor (below cell centre so dot+arcs cluster low)
+                //   sw    band thickness (~16% of icon size — solid feel)
+                //   radii 0.32 / 0.58 / 0.84 of the icon size — even spacing
+                //   sweep 160° centred on 270° (up): 190°→350°
+                float ic         = r * 0.96f;
+                float sw         = ic * 0.165f;
+                float ay         = cy + ic * 0.30f;
+                float dotR       = sw * 0.62f;
+                float dotY       = ay - sw * 0.05f;
+                float startAngle = 190f, sweep = 160f;
 
                 stroke.setStrokeWidth(sw);
                 stroke.setStrokeJoin(Paint.Join.ROUND);
                 stroke.setStrokeCap(Paint.Cap.ROUND);
 
                 c.drawCircle(cx, dotY, dotR, dot);
-
-                float[] radii = { ic * 0.26f, ic * 0.50f, ic * 0.74f };
+                float[] radii = { ic * 0.32f, ic * 0.58f, ic * 0.84f };
                 for (float rr : radii) {
                     oval.set(cx - rr, ay - rr, cx + rr, ay + rr);
                     c.drawArc(oval, startAngle, sweep, false, stroke);
                 }
-
-                if (!conn) {
-                    // Apple-style "wifi off" cue: clean diagonal slash from upper-right
-                    // to lower-left through the entire glyph. Reads instantly; doesn't
-                    // visually compete with the arcs the way an X-on-dot does.
-                    float slashLen = ic * 0.78f;
-                    float dx = (float)(slashLen * Math.cos(Math.toRadians(45)));
-                    float dy = (float)(slashLen * Math.sin(Math.toRadians(45)));
-                    float mx = cx, my = cy + ic * 0.04f;
-                    c.drawLine(mx - dx, my + dy, mx + dx, my - dy, stroke);
-                }
-                c.restore();
-            }
-            private final android.graphics.Path _cp = new android.graphics.Path();
-            private android.graphics.Path makeCirclePath(float cx, float cy, float r) {
-                _cp.rewind(); _cp.addCircle(cx, cy, r, android.graphics.Path.Direction.CW); return _cp;
             }
         };
         applyApplePillStyle(v);
@@ -731,22 +718,16 @@ public class LauncherActivity extends Activity {
 
     private View buildWpBtn(int sz) {
         View v = new View(this) {
-            // Apple-TV style: matches the network button aesthetic. The "landscape"
-            // glyph (sun + mountain) is drawn as crisp full-bright white strokes,
-            // inverting to dark on focus for the frosted-glass effect.
+            // Same Apple-TV glass aesthetic as the WiFi button. Glyph is a
+            // landscape (sun + mountain) drawn as crisp white strokes that
+            // invert to dark on focus for the frosted-plate effect.
             private final Paint stroke    = makeBtnStrokePaint();
             private final Paint bgIdle    = makeBgIdlePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
-            private final Paint glowOuter = makeGlowPaint(0x40FFFFFF);
-            private final Paint glowMid   = makeGlowPaint(0x22FFFFFF);
             private final Paint rim       = makeRimPaint();
             private final android.graphics.Path mt  = new android.graphics.Path();
-            private final android.graphics.Path _cp = new android.graphics.Path();
             private int   lw = 0, lh = 0;
             private float ls = -1f;
-            private android.graphics.Path makeCirclePath(float cx, float cy, float r) {
-                _cp.rewind(); _cp.addCircle(cx, cy, r, android.graphics.Path.Direction.CW); return _cp;
-            }
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
@@ -754,17 +735,13 @@ public class LauncherActivity extends Activity {
                 float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
-                if (focused) {
-                    c.drawCircle(cx, cy, r * 1.55f, glowMid);
-                    c.drawCircle(cx, cy, r * 1.32f, glowOuter);
-                }
                 c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
                 c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
 
                 int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
                 stroke.setColor(symbolColor);
                 float s = r * 0.92f;
-                stroke.setStrokeWidth(s * 0.13f);     // bolder strokes for crisp Apple-TV read
+                stroke.setStrokeWidth(s * 0.13f);
                 if (w != lw || h != lh || scale != ls) {
                     lw = w; lh = h; ls = scale;
                     float l = cx - s/2f, rt = cx + s/2f, t = cy - s/2f, b = cy + s/2f;
@@ -772,13 +749,10 @@ public class LauncherActivity extends Activity {
                     mt.moveTo(l, b); mt.lineTo(l + s*0.38f, t + s*0.48f);
                     mt.lineTo(l + s*0.62f, t + s*0.66f); mt.lineTo(rt, b);
                 }
-                c.save();
-                c.clipPath(makeCirclePath(cx, cy, r));
                 // Landscape icon: outer frame, sun dot, mountain path — full bright.
                 c.drawCircle(cx, cy, s * 0.46f, stroke);
                 c.drawCircle(cx + s*0.17f, cy - s*0.18f, s*0.10f, stroke);
                 c.drawPath(mt, stroke);
-                c.restore();
             }
         };
         applyApplePillStyle(v);
@@ -875,13 +849,6 @@ public class LauncherActivity extends Activity {
         p.setStyle(Paint.Style.STROKE);
         p.setColor(0x33FFFFFF);
         p.setStrokeWidth(dp(1));
-        return p;
-    }
-
-    private Paint makeGlowPaint(int color) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(color);
         return p;
     }
 
@@ -1140,11 +1107,51 @@ public class LauncherActivity extends Activity {
             else if (right + pad > scrollX + getWidth()) doScrollTo(right + pad - getWidth());
         }
 
+        // True from ACTION_DOWN until the fling settles. While set, the ring is
+        // hidden and focus changes are suppressed. Snapping to the centermost
+        // visible cell happens once the scroller fully stops, which restores
+        // the ring on the destination cell in a single frame.
+        private boolean touchScrolling = false;
+
         @Override public void computeScroll() {
             if (scroller.computeScrollOffset()) {
                 doScrollTo(scroller.getCurrX());
                 postInvalidateOnAnimation();
+            } else if (touchScrolling) {
+                // Fling has settled. Snap focus to the cell whose centre is
+                // closest to the viewport centre — that's the natural target
+                // for touch-scroll on a horizontal carousel.
+                touchScrolling = false;
+                snapFocusToVisibleCenter();
             }
+        }
+
+        /** Finds the attached cell whose centre is closest to the viewport
+         *  centre and gives it focus. Called only after a touch fling settles. */
+        private void snapFocusToVisibleCenter() {
+            int w = getWidth();
+            if (w <= 0 || appList.isEmpty()) return;
+            int viewportCenterX = scrollX + w / 2;
+            int bestIdx = focusedIndex;
+            int bestDist = Integer.MAX_VALUE;
+            for (int i = 0; i < attached.size(); i++) {
+                int idx = attached.keyAt(i);
+                int cellCenter = centerX + idx * stride + dp(10) + cellW / 2;
+                int dist = Math.abs(cellCenter - viewportCenterX);
+                if (dist < bestDist) { bestDist = dist; bestIdx = idx; }
+            }
+            if (bestIdx != focusedIndex) {
+                requestFocusOnIndex(bestIdx);
+                return;
+            }
+            // Same cell — make sure focus and ring are restored.
+            CellView cv = attached.get(bestIdx);
+            if (cv == null || !cv.isAttachedToWindow() || cv.getWidth() <= 0) {
+                requestFocusOnIndex(bestIdx);
+                return;
+            }
+            if (!cv.isFocused()) cv.requestFocus();
+            LauncherActivity.this.positionRing(cv);
         }
 
         @Override public boolean onTouchEvent(MotionEvent ev) {
@@ -1152,19 +1159,42 @@ public class LauncherActivity extends Activity {
             velTracker.addMovement(ev);
             switch (ev.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    scroller.abortAnimation(); lastTouchX = ev.getX(); break;
+                    scroller.abortAnimation();
+                    lastTouchX = ev.getX();
+                    touchScrolling = true;
+                    // Hide the ring immediately — during a touch drag the
+                    // ring shouldn't track the originally-focused cell as it
+                    // scrolls off; that produced a "ghost ring slides off the
+                    // edge" artefact and made the icons appear to overlap as
+                    // their selection halo dragged across them.
+                    RingView rvDown = ringView;
+                    if (rvDown != null) rvDown.setVisibility(View.INVISIBLE);
+                    break;
                 case MotionEvent.ACTION_MOVE:
                     float dx = lastTouchX - ev.getX(); lastTouchX = ev.getX();
                     doScrollTo(scrollX + (int) dx); break;
                 case MotionEvent.ACTION_UP:
                     velTracker.computeCurrentVelocity(1000);
-                    scroller.fling(scrollX, 0, (int) -velTracker.getXVelocity(), 0,
+                    int vx = (int) velTracker.getXVelocity();
+                    scroller.fling(scrollX, 0, -vx, 0,
                             0, Math.max(0, totalW - getWidth()), 0, 0);
                     velTracker.recycle(); velTracker = null;
-                    postInvalidateOnAnimation(); break;
+                    if (scroller.isFinished()) {
+                        // Zero-velocity release: settle handler in computeScroll
+                        // won't fire because no fling animation was queued.
+                        // Snap immediately so the ring reappears.
+                        touchScrolling = false;
+                        snapFocusToVisibleCenter();
+                    } else {
+                        postInvalidateOnAnimation();
+                    }
+                    break;
                 case MotionEvent.ACTION_CANCEL:
                     scroller.abortAnimation();
-                    velTracker.recycle(); velTracker = null; break;
+                    velTracker.recycle(); velTracker = null;
+                    touchScrolling = false;
+                    snapFocusToVisibleCenter();
+                    break;
             }
             return true;
         }
@@ -1275,18 +1305,30 @@ public class LauncherActivity extends Activity {
                     invalidate();
                     if (f) {
                         focusedIndex = boundIndex;
-                        // In reorder mode the ring is managed exclusively by updateRingAfterMove
-                        // which runs after ensureVisible+repositionAttached — using post() here
-                        // races with the scroll and produces a 1-frame left-shift artifact.
                         if (!reorderMode) {
-                            // Use postOnAnimation for proper frame sync — avoids ring position race
-                            postOnAnimation(() -> { if (isFocused() && isAttachedToWindow()) positionRing(CellView.this); });
+                            // Position the ring SYNCHRONOUSLY here. By the time we get
+                            // a focus-gain callback, requestFocusOnIndex has already
+                            // run ensureVisible+fillVisible+bindCell, which means
+                            // cv.layout() has been called and getLocationOnScreen()
+                            // returns the final stable coordinates. Posting the call
+                            // produced a 1-frame ring lag during fast d-pad presses
+                            // (each press hid the ring on the prior cell, so the user
+                            // saw the ring "disappear" between consecutive cells).
+                            if (isAttachedToWindow() && getWidth() > 0)
+                                positionRing(CellView.this);
                             ensureVisible(boundIndex);
                         }
                     } else {
-                        if (!reorderMode) {
-                            RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
-                        }
+                        // Don't hide the ring on focus loss — the next cell to gain
+                        // focus will reposition it in the SAME frame. Hiding here
+                        // produced the "ring stutters across only a handful of apps
+                        // during fast scroll" artefact, because the brief INVISIBLE
+                        // state was visible to the user between every key press.
+                        // The ring is hidden explicitly when:
+                        //   • focus leaves the shelf entirely (handled by
+                        //     RecyclingShelfView.onFocusChange below)
+                        //   • the activity exits or the shelf is re-populated
+                        //   • a touch interaction begins on the shelf
                     }
                 });
 
@@ -1383,19 +1425,27 @@ public class LauncherActivity extends Activity {
                 final AppInfo appToUninstall = boundApp;
                 final Uri pkgUri = Uri.fromParts("package", appToUninstall.packageName, null);
 
-                // ACTION_UNINSTALL_PACKAGE is the most universally supported on
-                // Android TV (handled by the system PackageInstaller). ACTION_DELETE
-                // is the modern non-deprecated equivalent but isn't always wired up
-                // on TV ROMs, so it's the fallback. We exit reorder mode only after
-                // a launch succeeds, so a failure leaves the menu open and the user
-                // can dismiss / try again instead of being silently stuck.
-                @SuppressWarnings("deprecation")
-                Intent primary = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri)
-                        .putExtra(Intent.EXTRA_RETURN_RESULT, true);
-                if (tryUninstall(primary)) { exitReorderMode(false); return; }
+                // Always exit reorder mode FIRST so the dialog opens cleanly
+                // and the menu doesn't linger if the user dismisses the system
+                // confirmation. The package broadcast receiver will refresh
+                // the app list automatically when the uninstall completes.
+                exitReorderMode(false);
 
-                Intent fallback = new Intent(Intent.ACTION_DELETE, pkgUri);
-                if (tryUninstall(fallback)) { exitReorderMode(false); return; }
+                // ACTION_DELETE is the modern, non-deprecated path and is
+                // wired up by every PackageInstaller variant (including TV
+                // ROMs running Android 14+). EXTRA_RETURN_RESULT is removed
+                // because (a) it's only honoured by the deprecated
+                // ACTION_UNINSTALL_PACKAGE entry point and (b) it caused the
+                // result code to come back as RESULT_CANCELED on successful
+                // uninstall on several TV ROMs, which masked the success.
+                Intent primary = new Intent(Intent.ACTION_DELETE, pkgUri)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                if (tryUninstall(primary)) return;
+
+                @SuppressWarnings("deprecation")
+                Intent fallback = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                if (tryUninstall(fallback)) return;
 
                 showToast("Cannot uninstall " + appToUninstall.label);
             }
@@ -1403,7 +1453,10 @@ public class LauncherActivity extends Activity {
             private boolean tryUninstall(Intent intent) {
                 try {
                     if (intent.resolveActivity(pm) == null) return false;
-                    startActivityForResult(intent, REQ_UNINSTALL);
+                    // Plain startActivity — we don't need a result. The
+                    // PACKAGE_REMOVED broadcast triggers loadApps() reliably
+                    // across every Android version we support.
+                    startActivity(intent);
                     return true;
                 } catch (Exception ignored) { return false; }
             }
@@ -1762,64 +1815,6 @@ public class LauncherActivity extends Activity {
 
     private void stopClock() { clockRunning = false; clockHandler.removeCallbacks(clockTick); }
 
-    private void checkNetNow() {
-        if (cm == null) return;
-        boolean c = false;
-        try {
-            Network net = cm.getActiveNetwork();
-            NetworkCapabilities caps = net != null ? cm.getNetworkCapabilities(net) : null;
-            c = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                    || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
-        } catch (Exception ignored) {}
-        netConnected = c;
-        View nb = netBtn; if (nb != null) nb.invalidate();
-    }
-
-    private void registerNetworkCallback() {
-        if (cm == null) return;
-        try {
-            networkCallback = new ConnectivityManager.NetworkCallback() {
-                @Override public void onAvailable(Network n) {
-                    if (netConnected) return;
-                    netConnected = true;
-                    uiHandler.post(() -> { View nb = netBtn; if (nb != null) nb.invalidate(); });
-                }
-                @Override public void onLost(Network n) {
-                    boolean still = false;
-                    try {
-                        Network active = cm.getActiveNetwork();
-                        if (active != null) {
-                            NetworkCapabilities caps = cm.getNetworkCapabilities(active);
-                            still = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                                    || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
-                        }
-                    } catch (Exception ignored) {}
-                    if (still == netConnected) return;
-                    netConnected = still;
-                    uiHandler.post(() -> { View nb = netBtn; if (nb != null) nb.invalidate(); });
-                }
-                @Override public void onCapabilitiesChanged(Network n, NetworkCapabilities caps) {
-                    boolean ok = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                            || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                            || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
-                    if (ok == netConnected) return;
-                    netConnected = ok;
-                    uiHandler.post(() -> { View nb = netBtn; if (nb != null) nb.invalidate(); });
-                }
-            };
-            cm.registerNetworkCallback(new NetworkRequest.Builder().build(), networkCallback);
-        } catch (Exception ignored) { networkCallback = null; }
-    }
-
-    private void unregisterNetworkCallback() {
-        if (cm != null && networkCallback != null) {
-            try { cm.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) {}
-            networkCallback = null;
-        }
-    }
-
     private void loadWallpaper() {
         String uri = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_WP_URI, null);
         if (uri != null) applyWallpaperFromUri(Uri.parse(uri)); else loadSystemWallpaper();
@@ -1906,11 +1901,6 @@ public class LauncherActivity extends Activity {
                 userWpLoading.set(false);
                 applyWallpaperFromUri(uri);
             }
-        } else if (req == REQ_UNINSTALL) {
-            // Result may be RESULT_CANCELED even on successful uninstall (ACTION_DELETE doesn't
-            // always return RESULT_OK). Always refresh — the package receiver is unreliable
-            // while we're in the foreground on some ROMs.
-            uiHandler.postDelayed(this::loadApps, 400);
         }
     }
 
@@ -1970,66 +1960,51 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        // Premium ring with deep, soft drop shadow — pre-rendered to bitmap
-        // because BlurMaskFilter requires a software canvas.
-        private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint shadowDrawPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
-        private float cx, cy, ringRadius;
-        private Bitmap shadowBmp;
+        // Premium clean ring — no shadow, no glow. Sits clearly OUTSIDE the
+        // icon edge with a deliberate gap so the icon and ring never touch.
+        // The ring is rendered as a single crisp white stroke; an inner hint
+        // (40% alpha) is layered just inside to add depth without bloat.
+        private final Paint ring      = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint ringInner = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float cx, cy, ringRadius, ringInnerRadius;
 
         private final float iconR;
-        private final int strokePx;
-        private final float shadowOffset;
+        private final int   strokePx;
+        private final float gapPx;
 
         RingView(Context ctx, int strokePx, int iconPx) {
             super(ctx);
+            // Hardware layer is fine for solid strokes.
             setLayerType(View.LAYER_TYPE_HARDWARE, null);
-            this.iconR = iconPx / 2f;
+            this.iconR    = iconPx / 2f;
             this.strokePx = strokePx;
-            float ws = strokePx * 0.75f;          // slightly heavier ring stroke
+            // Visible gap between icon edge and ring inner edge — 4dp reads as
+            // an intentional halo and keeps the ring CLEARLY outside the icon.
+            this.gapPx    = strokePx * 1.4f;
+
+            float ws = strokePx * 0.95f;        // crisp medium weight
             ring.setStyle(Paint.Style.STROKE);
             ring.setColor(0xFFFFFFFF);
             ring.setStrokeWidth(ws);
-            shadowOffset = strokePx * 0.9f;       // deeper drop
+
+            ringInner.setStyle(Paint.Style.STROKE);
+            ringInner.setColor(0x66FFFFFF);     // soft inner accent — depth without shadow
+            ringInner.setStrokeWidth(Math.max(1f, ws * 0.45f));
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
             float ws = ring.getStrokeWidth();
-            ringRadius = iconR + ws * 0.85f;
-            // Pre-render two shadow passes into a bitmap (BlurMaskFilter needs SOFTWARE canvas).
-            // Two passes: a wide soft halo + a tighter darker drop shadow → reads as elevation.
-            if (shadowBmp != null) { shadowBmp.recycle(); shadowBmp = null; }
-            if (w > 0 && h > 0) {
-                shadowBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-                Canvas sc = new Canvas(shadowBmp);
-
-                // Pass 1: wide ambient halo
-                Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
-                halo.setStyle(Paint.Style.STROKE);
-                halo.setStrokeWidth(ws + strokePx * 3.0f);
-                halo.setColor(0x55000000);
-                halo.setMaskFilter(new android.graphics.BlurMaskFilter(
-                        strokePx * 3.2f, android.graphics.BlurMaskFilter.Blur.NORMAL));
-                sc.drawCircle(cx, cy + shadowOffset, ringRadius, halo);
-
-                // Pass 2: tighter drop shadow
-                Paint drop = new Paint(Paint.ANTI_ALIAS_FLAG);
-                drop.setStyle(Paint.Style.STROKE);
-                drop.setStrokeWidth(ws + strokePx * 1.2f);
-                drop.setColor(0x88000000);
-                drop.setMaskFilter(new android.graphics.BlurMaskFilter(
-                        strokePx * 1.4f, android.graphics.BlurMaskFilter.Blur.NORMAL));
-                sc.drawCircle(cx, cy + shadowOffset, ringRadius, drop);
-            }
+            // Outer ring sits a clear gap OUTSIDE the icon edge.
+            ringRadius      = iconR + gapPx + ws / 2f;
+            // Inner accent ring sits just inside it for premium depth.
+            ringInnerRadius = ringRadius - ws * 0.5f - ringInner.getStrokeWidth() * 1.6f;
         }
 
         @Override protected void onDraw(Canvas c) {
             if (ringRadius <= 0) return;
-            if (shadowBmp != null && !shadowBmp.isRecycled()) {
-                c.drawBitmap(shadowBmp, 0, 0, shadowDrawPaint);
-            }
+            if (ringInnerRadius > 0) c.drawCircle(cx, cy, ringInnerRadius, ringInner);
             c.drawCircle(cx, cy, ringRadius, ring);
         }
     }
