@@ -486,10 +486,10 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Ring view diameter = icon + headroom for the focus scale-up.
-        // Ring sits with ZERO gap on the icon edge now, so headroom is just
-        // enough to fit the scaled-up ring (icon + stroke) at focus scale.
-        int ringSize = iconPx + dp(12);
+        // Ring view diameter = icon + just enough headroom for the 3dp stroke
+        // and AA. Cells no longer animate-scale, so the previous 12dp
+        // headroom (for a 1.12× focus pop) is gone.
+        int ringSize = iconPx + dp(8);
         ringLayoutSize  = ringSize;
         cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
         ringView = new RingView(this, strokePx, iconPx);
@@ -627,46 +627,36 @@ public class LauncherActivity extends Activity {
 
     private View buildNetBtn(int sz) {
         View v = new View(this) {
-            // Pure shortcut button: opens WiFi settings. No status indicator —
-            // the system already surfaces connectivity in its own UI; mirroring
-            // it here creates two sources of truth that can disagree.
-            //
-            // Glyph: iOS-style WiFi fan — a filled wedge built from 3 stacked
-            // arc bands plus a dot apex. Stroke caps are ROUND so the bands
-            // read as smooth ribbons rather than line-art.
-            private final Paint stroke    = makeBtnPaint(false);
-            private final Paint dot       = makeBtnPaint(true);
-            private final Paint bgIdle    = makeBgIdlePaint();
-            private final Paint bgFocus   = makeBgFocusPaint();
-            private final Paint rim       = makeRimPaint();
-            private final RectF oval      = new RectF();
+            // Solid-black squircle plate + bold white WiFi fan — matches the
+            // reference image (rounded-square app-tile look, NOT a glass pill).
+            // Three BUTT-cap arc bands plus a wedge dot at the apex give the
+            // chunky, filled-fan silhouette.
+            private final Paint stroke = makeBtnPaint(false);
+            private final Paint dot    = makeBtnPaint(true);
+            private final Paint plate  = makePlatePaint();
+            private final Paint rim    = makeRimPaint();
+            private final RectF oval   = new RectF();
+            private final RectF rect   = new RectF();
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
                 boolean focused = isFocused();
                 float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
-                float r = Math.min(cx, cy) * scale;
-                // Background plate — frosted white when focused, dark glass when idle
-                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
-                // Subtle 1dp inner rim — gives the glass plate a defined edge
-                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+                float s  = Math.min(cx, cy) * scale;
+                float cr = s * 0.28f;
 
-                int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
-                stroke.setColor(symbolColor);
-                dot.setColor(symbolColor);
+                // Black plate (always black to match the reference image)
+                rect.set(cx - s, cy - s, cx + s, cy + s);
+                c.drawRoundRect(rect, cr, cr, plate);
+                // Hairline rim — slightly brighter on focus for visual feedback
+                rim.setColor(focused ? 0x66FFFFFF : 0x33FFFFFF);
+                c.drawRoundRect(rect, cr, cr, rim);
 
-                // Bold solid WiFi fan — matches the "after" reference: three
-                // chunky stacked arcs with FLAT ends (BUTT caps) plus a small
-                // wedge dot at the apex. No rounded caps, no wireframe feel.
-                //
-                //   ay    arc-anchor (below cell centre so dot+arcs cluster low)
-                //   sw    band thickness — bumped to ~20% of icon size for the
-                //         heavy-ribbon look you see in the reference image
-                //   radii 0.36 / 0.62 / 0.88 of the icon size — even spacing
-                //   sweep 150° centred on 270° (up): 195°→345°  (slightly tighter
-                //         than before so the bands taper into a fan shape)
-                float ic         = r * 0.96f;
+                stroke.setColor(0xFFFFFFFF);
+                dot.setColor(0xFFFFFFFF);
+
+                float ic         = s * 0.96f;
                 float sw         = ic * 0.20f;
                 float ay         = cy + ic * 0.34f;
                 float dotR       = sw * 0.70f;
@@ -675,7 +665,7 @@ public class LauncherActivity extends Activity {
 
                 stroke.setStrokeWidth(sw);
                 stroke.setStrokeJoin(Paint.Join.MITER);
-                stroke.setStrokeCap(Paint.Cap.BUTT);   // FLAT band ends — key to the bold look
+                stroke.setStrokeCap(Paint.Cap.BUTT);
 
                 c.drawCircle(cx, dotY, dotR, dot);
                 float[] radii = { ic * 0.36f, ic * 0.62f, ic * 0.88f };
@@ -715,13 +705,13 @@ public class LauncherActivity extends Activity {
 
     private View buildWpBtn(int sz) {
         View v = new View(this) {
-            // Same Apple-TV glass aesthetic as the WiFi button. Glyph is a
-            // landscape (sun + mountain) drawn as crisp white strokes that
-            // invert to dark on focus for the frosted-plate effect.
-            private final Paint stroke    = makeBtnStrokePaint();
-            private final Paint bgIdle    = makeBgIdlePaint();
-            private final Paint bgFocus   = makeBgFocusPaint();
-            private final Paint rim       = makeRimPaint();
+            // Matches the WiFi button's solid-black squircle plate aesthetic.
+            // Glyph: simple white landscape (sun + mountain) rendered as crisp
+            // strokes — no inversion-on-focus, the plate stays black.
+            private final Paint stroke = makeBtnStrokePaint();
+            private final Paint plate  = makePlatePaint();
+            private final Paint rim    = makeRimPaint();
+            private final RectF rect   = new RectF();
             private final android.graphics.Path mt  = new android.graphics.Path();
             private int   lw = 0, lh = 0;
             private float ls = -1f;
@@ -731,24 +721,27 @@ public class LauncherActivity extends Activity {
                 boolean focused = isFocused();
                 float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
-                float r = Math.min(cx, cy) * scale;
-                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
-                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+                float s  = Math.min(cx, cy) * scale;
+                float cr = s * 0.28f;
 
-                int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
-                stroke.setColor(symbolColor);
-                float s = r * 0.92f;
-                stroke.setStrokeWidth(s * 0.13f);
+                rect.set(cx - s, cy - s, cx + s, cy + s);
+                c.drawRoundRect(rect, cr, cr, plate);
+                rim.setColor(focused ? 0x66FFFFFF : 0x33FFFFFF);
+                c.drawRoundRect(rect, cr, cr, rim);
+
+                stroke.setColor(0xFFFFFFFF);
+                float gs = s * 0.92f;
+                stroke.setStrokeWidth(gs * 0.13f);
                 if (w != lw || h != lh || scale != ls) {
                     lw = w; lh = h; ls = scale;
-                    float l = cx - s/2f, rt = cx + s/2f, t = cy - s/2f, b = cy + s/2f;
+                    float l = cx - gs/2f, rt = cx + gs/2f, t = cy - gs/2f, b = cy + gs/2f;
                     mt.rewind();
-                    mt.moveTo(l, b); mt.lineTo(l + s*0.38f, t + s*0.48f);
-                    mt.lineTo(l + s*0.62f, t + s*0.66f); mt.lineTo(rt, b);
+                    mt.moveTo(l, b); mt.lineTo(l + gs*0.38f, t + gs*0.48f);
+                    mt.lineTo(l + gs*0.62f, t + gs*0.66f); mt.lineTo(rt, b);
                 }
-                // Landscape icon: outer frame, sun dot, mountain path — full bright.
-                c.drawCircle(cx, cy, s * 0.46f, stroke);
-                c.drawCircle(cx + s*0.17f, cy - s*0.18f, s*0.10f, stroke);
+                // Frame, sun dot, mountain path.
+                c.drawCircle(cx, cy, gs * 0.46f, stroke);
+                c.drawCircle(cx + gs*0.17f, cy - gs*0.18f, gs*0.10f, stroke);
                 c.drawPath(mt, stroke);
             }
         };
@@ -780,15 +773,13 @@ public class LauncherActivity extends Activity {
         return v;
     }
 
-    /** Common Apple-TV pill setup: round outline clip, no system focus rect,
-     *  no state list animator, hardware layer, sound effects on. */
+    /** Squircle (rounded-square) outline clip — matches Android adaptive-icon
+     *  shape so the top-right shortcuts read as miniature app tiles. */
     private void applyApplePillStyle(View v) {
         v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         v.setBackground(null);
         v.setForeground(null);
         v.setStateListAnimator(null);
-        // Kills the platform's default rectangular focus highlight that
-        // Theme.DeviceDefault paints under any focusable View on TV.
         v.setDefaultFocusHighlightEnabled(false);
         v.setOutlineProvider(new ViewOutlineProvider() {
             @Override public void getOutline(View view, Outline outline) {
@@ -796,7 +787,8 @@ public class LauncherActivity extends Activity {
                 int s = Math.min(w, h);
                 int x = (w - s) / 2;
                 int y = (h - s) / 2;
-                outline.setOval(x, y, x + s, y + s);
+                // ~28% radius == Android adaptive icon mask radius.
+                outline.setRoundRect(x, y, x + s, y + s, s * 0.28f);
             }
         });
         v.setClipToOutline(true);
@@ -825,20 +817,12 @@ public class LauncherActivity extends Activity {
         return p;
     }
 
-    /** Idle button background — dark glass that reads on any wallpaper. */
-    private Paint makeBgIdlePaint() {
+    /** Solid black plate paint — used by both top-right shortcut buttons.
+     *  Matches the reference image's app-tile aesthetic. */
+    private Paint makePlatePaint() {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);
-        p.setColor(0x66000000);
-        return p;
-    }
-
-    /** Focused button background — frosted near-white that lifts the symbol
-     *  via inversion. This is the Apple-TV "selected pill" effect. */
-    private Paint makeBgFocusPaint() {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(0xF2F4F4F6);
+        p.setColor(0xFF000000);
         return p;
     }
 
@@ -1064,15 +1048,15 @@ public class LauncherActivity extends Activity {
         private CellView obtainCell() {
             if (!pool.isEmpty()) {
                 CellView cv = pool.remove(pool.size() - 1);
-                cv.animate().cancel();          // cancel any in-flight scale animation
-                cv.animate().setUpdateListener(null).setListener(null); // drop captured lambdas before reuse
-                cv.setScaleX(1f); cv.setScaleY(1f); // reset scale before reuse
-                cv.setAlpha(1f);                // reset alpha
+                // Cells no longer animate on focus, but we still defensively
+                // reset scale/alpha in case a future feature animates them.
+                cv.setScaleX(1f); cv.setScaleY(1f);
+                cv.setAlpha(1f);
                 cv.iconBitmap = null;           // clear stale bitmap — prevents ghost icons
-                cv.boundApp   = null;           // clear stale binding
-                cv.boundIndex = -1;             // clear stale index
+                cv.boundApp   = null;
+                cv.boundIndex = -1;
                 cv.setVisibility(VISIBLE);
-                cv.invalidate();                // force redraw with clean state
+                cv.invalidate();
                 return cv;
             }
             CellView cv = new CellView(getContext()); addView(cv); return cv;
@@ -1281,68 +1265,43 @@ public class LauncherActivity extends Activity {
                 });
 
                 setOnFocusChangeListener((v, f) -> {
-                    if (!reorderMode) {
-                        animate().cancel();
-                        if (f) {
-                            // Subtle, FAST focus pop. Smaller scale (1.06) + shorter
-                            // duration (120ms) + linear interpolator means:
-                            //   • adjacent cells never visually overlap during fast
-                            //     d-pad scroll (the 1.12 + overshoot combo briefly
-                            //     pushed cells past their stride boundary, which the
-                            //     user saw as "apps overriding each other on the
-                            //     right corner")
-                            //   • the ring follows every cell snappily — no slow
-                            //     bloom that gets interrupted by the next keypress,
-                            //     so it no longer looks like the ring "skips" apps
-                            // updateListener keeps the RingView's scale in lockstep
-                            // with the cell across every animation frame.
-                            animate().scaleX(1.06f).scaleY(1.06f)
-                                     .setDuration(120)
-                                     .setInterpolator(null)
-                                     .setUpdateListener(anim -> {
-                                         if (isFocused() && isAttachedToWindow())
-                                             positionRing(CellView.this);
-                                     })
-                                     .start();
-                        } else {
-                            // Clear the update listener so the lambda (which captures
-                            // CellView.this) doesn't persist on ViewPropertyAnimator
-                            // and fire pointlessly during the unfocus tween.
-                            animate().scaleX(1f).scaleY(1f)
-                                     .setDuration(100)
-                                     .setInterpolator(null)
-                                     .setUpdateListener(null)
-                                     .start();
-                        }
-                    }
                     invalidate();
-                    if (f) {
+                    if (f && !reorderMode) {
+                        // No cell scale animation: the RingView is the focus
+                        // indicator. Removing the scale + per-frame ring
+                        // updateListener fixes three issues at once:
+                        //   • adjacent cells no longer visually overlap during
+                        //     fast d-pad scroll (the prior 1.06× pop pushed
+                        //     scaled-up cells past their stride boundary,
+                        //     which the user saw as "icons cloned/overriding
+                        //     each other on the right corner")
+                        //   • ring tracking no longer races focus changes
+                        //     (the captured-CellView lambda fired even after
+                        //     focus moved, briefly placing the ring on stale
+                        //     cells during fast scroll)
+                        //   • zero allocation per focus change
                         focusedIndex = boundIndex;
-                        if (!reorderMode) {
-                            // Position the ring SYNCHRONOUSLY here. By the time we get
-                            // a focus-gain callback, requestFocusOnIndex has already
-                            // run ensureVisible+fillVisible+bindCell, which means
-                            // cv.layout() has been called and getLocationOnScreen()
-                            // returns the final stable coordinates. Posting the call
-                            // produced a 1-frame ring lag during fast d-pad presses
-                            // (each press hid the ring on the prior cell, so the user
-                            // saw the ring "disappear" between consecutive cells).
-                            if (isAttachedToWindow() && getWidth() > 0)
-                                positionRing(CellView.this);
-                            ensureVisible(boundIndex);
+                        if (isAttachedToWindow() && getWidth() > 0) {
+                            positionRing(CellView.this);
+                        } else {
+                            // First-frame edge case: cell hasn't been laid out
+                            // yet (e.g. on cold start, before global layout
+                            // completes). Without this retry the ring stayed
+                            // INVISIBLE until something else triggered a
+                            // re-layout — the exact symptom the user described:
+                            // "ring stopped at start, started after I uninstalled
+                            // an app".
+                            post(() -> {
+                                if (isFocused() && isAttachedToWindow() && getWidth() > 0)
+                                    positionRing(CellView.this);
+                            });
                         }
-                    } else {
-                        // Don't hide the ring on focus loss — the next cell to gain
-                        // focus will reposition it in the SAME frame. Hiding here
-                        // produced the "ring stutters across only a handful of apps
-                        // during fast scroll" artefact, because the brief INVISIBLE
-                        // state was visible to the user between every key press.
-                        // The ring is hidden explicitly when:
-                        //   • focus leaves the shelf entirely (handled by
-                        //     RecyclingShelfView.onFocusChange below)
-                        //   • the activity exits or the shelf is re-populated
-                        //   • a touch interaction begins on the shelf
+                        ensureVisible(boundIndex);
                     }
+                    // Ring is hidden by globalFocusListener when focus leaves
+                    // the shelf entirely; on cell→cell transitions the next
+                    // gain-event repositions it within the same frame, so
+                    // there's no need to hide it on focus-loss.
                 });
 
                 setOnKeyListener((v, kc, ev) -> {
@@ -1786,25 +1745,13 @@ public class LauncherActivity extends Activity {
         if (cell.getWidth() == 0) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
 
-        // Cells animate to scaleX/Y = 1.12 on focus around the center pivot.
-        // getLocationOnScreen returns the post-transform VISUAL top-left, so
-        // simply adding cell.getWidth()/2 lands ~6% off-center. The icon's
-        // visual position must be projected via the cell's scale:
-        //   visualIconCx = visualTopLeftX + cell.getWidth() * scaleX / 2
-        //   visualIconCy = visualTopLeftY + cachedIcyOffset * scaleY
-        float sx = cell.getScaleX();
-        float sy = cell.getScaleY();
-        float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() * sx / 2f;
-        float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset * sy;
-        // Keep the ring's own scale in lockstep with the cell so its radius
-        // hugs the focused (1.12x) icon — the previous fixed-size ring sat
-        // INSIDE the focused icon by ~2.5dp, which read as misalignment.
-        rv.setScaleX(sx);
-        rv.setScaleY(sy);
+        // Cells stay at scale 1.0 (no focus animation), so the ring's centre
+        // is simply the icon's centre on screen. No scale projection needed.
+        float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
+        float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset;
         float half = ringLayoutSize / 2f;
         rv.setX(cx - half); rv.setY(cy - half);
         rv.setVisibility(View.VISIBLE);
-        rv.invalidate(); // force redraw in case it was already visible at this position
     }
 
     /** Synchronously repositions the ring over the drag-target cell.
@@ -1974,9 +1921,10 @@ public class LauncherActivity extends Activity {
 
     static final class RingView extends View {
         // Premium clean ring — no shadow, no glow, single crisp stroke that
-        // hugs the icon edge with ZERO gap. The ring's inner edge sits exactly
-        // on the icon's outer edge so it reads as a halo wrapped around the
-        // icon, not a separate floating circle.
+        // hugs the icon edge with ZERO visible gap. The ring's inner edge
+        // overlaps the icon by ~1 px to absorb anti-aliasing softness on
+        // both the ring stroke and the bitmap-sampled icon edge — without
+        // the overlap a faint hairline gap is visible at FHD/4K densities.
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
         private float cx, cy, ringRadius;
 
@@ -1996,9 +1944,10 @@ public class LauncherActivity extends Activity {
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
-            // Inner edge of the stroke = icon outer edge (zero gap). Stroke is
-            // centred on the radius, so radius = iconR + strokeWidth / 2.
-            ringRadius = iconR + ring.getStrokeWidth() / 2f;
+            // Inner edge of the stroke = icon outer edge minus 1 px overlap.
+            // Subtracting 1 px from the centre-line radius pulls the inner
+            // edge inward by exactly 1 px, closing the AA seam.
+            ringRadius = iconR + ring.getStrokeWidth() / 2f - 1f;
         }
 
         @Override protected void onDraw(Canvas c) {
