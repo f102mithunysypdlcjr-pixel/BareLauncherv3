@@ -99,6 +99,10 @@ public class LauncherActivity extends Activity {
     };
     private static final ThreadLocal<byte[]> sPixelBuf = new ThreadLocal<>();
 
+    // Hoisted: avoid per-focus-event allocation. Stateless, safe to share.
+    private static final android.view.animation.OvershootInterpolator FOCUS_OVERSHOOT
+            = new android.view.animation.OvershootInterpolator(1.6f);
+
     private static final Paint sMaskPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint sSrcInPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private static final Paint sDrawPaint  = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
@@ -127,7 +131,6 @@ public class LauncherActivity extends Activity {
 
     private RecyclingShelfView shelf;
     private ImageView          wallpaperView;
-    private View               wpScrim;
     private TextView           clockView;
     private View               netBtn;
     private View               wpBtnView;
@@ -200,27 +203,7 @@ public class LauncherActivity extends Activity {
     private       float    cachedIcyOffset  = 0f;
     private final Runnable pkgReloadRunnable = this::loadApps;
 
-    // Wallpaper scrim "settle" debouncer — fades scrim back to 0 after the
-    // user stops scrolling/changing focus for a brief period.
-    private static final int SCRIM_SETTLE_MS = 260;
-    private static final float SCRIM_DIM_ALPHA = 0.42f;
-    private final Runnable scrimSettleRunnable = () -> {
-        View s = wpScrim;
-        if (s != null) s.animate().alpha(0f).setDuration(280).start();
-    };
-
-    private void onShelfActivity() {
-        View s = wpScrim;
-        if (s == null) return;
-        if (s.getAlpha() < SCRIM_DIM_ALPHA) {
-            s.animate().cancel();
-            s.animate().alpha(SCRIM_DIM_ALPHA).setDuration(120).start();
-        }
-        uiHandler.removeCallbacks(scrimSettleRunnable);
-        uiHandler.postDelayed(scrimSettleRunnable, SCRIM_SETTLE_MS);
-    }
-
-    private       FrameLayout menuOverlay   = null;
+    private FrameLayout        menuOverlay   = null;
     private       TextView    menuUninstall = null;
     private       TextView    menuMove      = null;
     private final int[]    menuCellLoc      = new int[2];
@@ -360,7 +343,6 @@ public class LauncherActivity extends Activity {
         iconInflight.clear();
         wallpaperView = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
-        wpScrim = null;
         super.onDestroy();
     }
 
@@ -444,15 +426,6 @@ public class LauncherActivity extends Activity {
         wallpaperView.setScaleType(ImageView.ScaleType.CENTER_CROP);
         wallpaperView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         root.addView(wallpaperView);
-
-        // Wallpaper scrim — fades in only while the user is actively scrolling
-        // through apps, so the focused icon reads clearly. When idle, alpha=0
-        // and the full-quality HD wallpaper is preserved unchanged.
-        wpScrim = new View(this);
-        wpScrim.setBackgroundColor(0xFF000000);
-        wpScrim.setAlpha(0f);
-        wpScrim.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
-        root.addView(wpScrim);
 
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
@@ -684,25 +657,42 @@ public class LauncherActivity extends Activity {
                 stroke.setColor(symbolColor);
                 dot.setColor(symbolColor);
                 boolean conn = netConnected;
-                float ic = r * 0.92f;
-                float sw = ic * 0.135f;                // bolder strokes — bright, readable
-                float dotR = sw * 0.95f;
-                float dotY = cy + ic * 0.24f;
-                float startAngle = 202.5f, sweep = 135f;
+
+                // Apple-TV style WiFi glyph: 3 concentric arcs + dot apex.
+                //
+                //   Geometry: arcs are centred on a virtual anchor below the
+                //   icon centre (so the dot sits low and the arcs curve up
+                //   over it like radio waves). Radii at 0.26/0.50/0.74 give
+                //   even visual spacing. Sweep is 145° centred on 270° (up),
+                //   so arcs span 197.5°→342.5°.
+                float ic   = r * 0.96f;
+                float sw   = ic * 0.115f;
+                float ay   = cy + ic * 0.20f;     // arc-anchor / dot baseline
+                float dotR = sw * 0.85f;
+                float dotY = ay + sw * 0.55f;     // small gap below smallest arc
+                float startAngle = 197.5f, sweep = 145f;
+
                 stroke.setStrokeWidth(sw);
+                stroke.setStrokeJoin(Paint.Join.ROUND);
+                stroke.setStrokeCap(Paint.Cap.ROUND);
+
                 c.drawCircle(cx, dotY, dotR, dot);
-                float r1 = ic * 0.30f;
-                oval.set(cx - r1, dotY - r1, cx + r1, dotY + r1);
-                c.drawArc(oval, startAngle, sweep, false, stroke);
-                float r2 = ic * 0.56f;
-                oval.set(cx - r2, dotY - r2, cx + r2, dotY + r2);
-                c.drawArc(oval, startAngle, sweep, false, stroke);
+
+                float[] radii = { ic * 0.26f, ic * 0.50f, ic * 0.74f };
+                for (float rr : radii) {
+                    oval.set(cx - rr, ay - rr, cx + rr, ay + rr);
+                    c.drawArc(oval, startAngle, sweep, false, stroke);
+                }
+
                 if (!conn) {
-                    // X-cross indicates "no connection". Strokes stay full bright.
-                    float xs = sw * 0.95f;
-                    float x1 = cx - xs, y1 = dotY - xs, x2 = cx + xs, y2 = dotY + xs;
-                    c.drawLine(x1, y1, x2, y2, stroke);
-                    c.drawLine(x2, y1, x1, y2, stroke);
+                    // Apple-style "wifi off" cue: clean diagonal slash from upper-right
+                    // to lower-left through the entire glyph. Reads instantly; doesn't
+                    // visually compete with the arcs the way an X-on-dot does.
+                    float slashLen = ic * 0.78f;
+                    float dx = (float)(slashLen * Math.cos(Math.toRadians(45)));
+                    float dy = (float)(slashLen * Math.sin(Math.toRadians(45)));
+                    float mx = cx, my = cy + ic * 0.04f;
+                    c.drawLine(mx - dx, my + dy, mx + dx, my - dy, stroke);
                 }
                 c.restore();
             }
@@ -1102,6 +1092,7 @@ public class LauncherActivity extends Activity {
             if (!pool.isEmpty()) {
                 CellView cv = pool.remove(pool.size() - 1);
                 cv.animate().cancel();          // cancel any in-flight scale animation
+                cv.animate().setUpdateListener(null).setListener(null); // drop captured lambdas before reuse
                 cv.setScaleX(1f); cv.setScaleY(1f); // reset scale before reuse
                 cv.setAlpha(1f);                // reset alpha
                 cv.iconBitmap = null;           // clear stale bitmap — prevents ghost icons
@@ -1136,8 +1127,6 @@ public class LauncherActivity extends Activity {
             if (newX == scrollX) return; // no-op avoids redundant work
             scrollX = newX;
             repositionAttached(); fillVisible();
-            // Any actual scroll movement → wallpaper scrim fades in briefly.
-            onShelfActivity();
             // Keep ring tracking the focused cell during programmatic scrolls
             if (!reorderMode) {
                 CellView fc = attached.get(focusedIndex);
@@ -1266,14 +1255,21 @@ public class LauncherActivity extends Activity {
                             // visible ring/icon size mismatch.
                             animate().scaleX(1.12f).scaleY(1.12f)
                                      .setDuration(200)
-                                     .setInterpolator(new android.view.animation.OvershootInterpolator(1.6f))
+                                     .setInterpolator(FOCUS_OVERSHOOT)
                                      .setUpdateListener(anim -> {
                                          if (isFocused() && isAttachedToWindow())
                                              positionRing(CellView.this);
                                      })
                                      .start();
                         } else {
-                            animate().scaleX(1f).scaleY(1f).setDuration(140).setInterpolator(null).start();
+                            // Clear the update listener so the lambda (which captures
+                            // CellView.this) doesn't persist on ViewPropertyAnimator
+                            // and fire pointlessly during the unfocus tween.
+                            animate().scaleX(1f).scaleY(1f)
+                                     .setDuration(140)
+                                     .setInterpolator(null)
+                                     .setUpdateListener(null)
+                                     .start();
                         }
                     }
                     invalidate();
@@ -1286,8 +1282,6 @@ public class LauncherActivity extends Activity {
                             // Use postOnAnimation for proper frame sync — avoids ring position race
                             postOnAnimation(() -> { if (isFocused() && isAttachedToWindow()) positionRing(CellView.this); });
                             ensureVisible(boundIndex);
-                            // Focus moved → user is navigating → dim wallpaper briefly.
-                            onShelfActivity();
                         }
                     } else {
                         if (!reorderMode) {
@@ -1386,24 +1380,32 @@ public class LauncherActivity extends Activity {
 
             void triggerUninstall() {
                 if (boundApp == null) return;
-                AppInfo appToUninstall = boundApp;
-                exitReorderMode(false);
-                Uri pkgUri = Uri.fromParts("package", appToUninstall.packageName, null);
-                // Use startActivityForResult so onActivityResult always fires and we can
-                // refresh the app list. ACTION_DELETE is preferred on Android TV — it does
-                // not require special permission and works on all API levels.
+                final AppInfo appToUninstall = boundApp;
+                final Uri pkgUri = Uri.fromParts("package", appToUninstall.packageName, null);
+
+                // ACTION_UNINSTALL_PACKAGE is the most universally supported on
+                // Android TV (handled by the system PackageInstaller). ACTION_DELETE
+                // is the modern non-deprecated equivalent but isn't always wired up
+                // on TV ROMs, so it's the fallback. We exit reorder mode only after
+                // a launch succeeds, so a failure leaves the menu open and the user
+                // can dismiss / try again instead of being silently stuck.
+                @SuppressWarnings("deprecation")
+                Intent primary = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri)
+                        .putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                if (tryUninstall(primary)) { exitReorderMode(false); return; }
+
+                Intent fallback = new Intent(Intent.ACTION_DELETE, pkgUri);
+                if (tryUninstall(fallback)) { exitReorderMode(false); return; }
+
+                showToast("Cannot uninstall " + appToUninstall.label);
+            }
+
+            private boolean tryUninstall(Intent intent) {
                 try {
-                    startActivityForResult(new Intent(Intent.ACTION_DELETE, pkgUri), REQ_UNINSTALL);
-                    return;
-                } catch (Exception e1) { /* fall through */ }
-                // Fallback: deprecated uninstall API for unusual environments.
-                try {
-                    Intent i2 = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri);
-                    i2.putExtra(Intent.EXTRA_RETURN_RESULT, true);
-                    startActivityForResult(i2, REQ_UNINSTALL);
-                } catch (Exception e2) {
-                    showToast("Cannot uninstall " + appToUninstall.label);
-                }
+                    if (intent.resolveActivity(pm) == null) return false;
+                    startActivityForResult(intent, REQ_UNINSTALL);
+                    return true;
+                } catch (Exception ignored) { return false; }
             }
 
             @Override protected void onDraw(Canvas canvas) {
