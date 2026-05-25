@@ -41,6 +41,7 @@ import android.text.TextUtils;
 import android.text.TextPaint;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
+import android.text.style.TypefaceSpan;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.DisplayMetrics;
@@ -49,9 +50,12 @@ import android.util.SparseArray;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.Outline;
+import android.view.SoundEffectConstants;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -123,6 +127,7 @@ public class LauncherActivity extends Activity {
 
     private RecyclingShelfView shelf;
     private ImageView          wallpaperView;
+    private View               wpScrim;
     private TextView           clockView;
     private View               netBtn;
     private View               wpBtnView;
@@ -137,8 +142,10 @@ public class LauncherActivity extends Activity {
     private final java.util.Calendar       clockCal   = java.util.Calendar.getInstance();
     private final char[]                   clockChars = new char[8];
     private final SpannableStringBuilder   clockSsb   = new SpannableStringBuilder();
-    private final RelativeSizeSpan         clockSpan  = new RelativeSizeSpan(0.38f);
-    private final StyleSpan                clockLight = new StyleSpan(Typeface.NORMAL);
+    // AM/PM is rendered ~38% size, light weight, slight letter-spacing — Apple-TV style.
+    private final RelativeSizeSpan         clockAmPmSize  = new RelativeSizeSpan(0.42f);
+    private final TypefaceSpan             clockAmPmFace  = new TypefaceSpan("sans-serif-thin");
+    private final StyleSpan                clockAmPmStyle = new StyleSpan(Typeface.NORMAL);
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -168,9 +175,11 @@ public class LauncherActivity extends Activity {
         clockChars[pos++] = 'M';
         clockSsb.clear(); clockSsb.clearSpans();
         clockSsb.append(String.valueOf(clockChars, 0, pos));
-        // Small thin AM/PM for premium feel
-        clockSsb.setSpan(clockSpan, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        clockSsb.setSpan(clockLight, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        // Time portion (digits) inherits the TextView's heavy base typeface.
+        // AM/PM gets thinner family + smaller size for a refined Apple-TV look.
+        clockSsb.setSpan(clockAmPmSize,  amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        clockSsb.setSpan(clockAmPmFace,  amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        clockSsb.setSpan(clockAmPmStyle, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return clockSsb;
     }
 
@@ -190,6 +199,27 @@ public class LauncherActivity extends Activity {
     private       int      ringLayoutSize   = 0;  // full view size including bleed padding
     private       float    cachedIcyOffset  = 0f;
     private final Runnable pkgReloadRunnable = this::loadApps;
+
+    // Wallpaper scrim "settle" debouncer — fades scrim back to 0 after the
+    // user stops scrolling/changing focus for a brief period.
+    private static final int SCRIM_SETTLE_MS = 260;
+    private static final float SCRIM_DIM_ALPHA = 0.42f;
+    private final Runnable scrimSettleRunnable = () -> {
+        View s = wpScrim;
+        if (s != null) s.animate().alpha(0f).setDuration(280).start();
+    };
+
+    private void onShelfActivity() {
+        View s = wpScrim;
+        if (s == null) return;
+        if (s.getAlpha() < SCRIM_DIM_ALPHA) {
+            s.animate().cancel();
+            s.animate().alpha(SCRIM_DIM_ALPHA).setDuration(120).start();
+        }
+        uiHandler.removeCallbacks(scrimSettleRunnable);
+        uiHandler.postDelayed(scrimSettleRunnable, SCRIM_SETTLE_MS);
+    }
+
     private       FrameLayout menuOverlay   = null;
     private       TextView    menuUninstall = null;
     private       TextView    menuMove      = null;
@@ -330,6 +360,7 @@ public class LauncherActivity extends Activity {
         iconInflight.clear();
         wallpaperView = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
+        wpScrim = null;
         super.onDestroy();
     }
 
@@ -414,6 +445,15 @@ public class LauncherActivity extends Activity {
         wallpaperView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         root.addView(wallpaperView);
 
+        // Wallpaper scrim — fades in only while the user is actively scrolling
+        // through apps, so the focused icon reads clearly. When idle, alpha=0
+        // and the full-quality HD wallpaper is preserved unchanged.
+        wpScrim = new View(this);
+        wpScrim.setBackgroundColor(0xFF000000);
+        wpScrim.setAlpha(0f);
+        wpScrim.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        root.addView(wpScrim);
+
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
         shelfLp.gravity = Gravity.BOTTOM;
@@ -424,7 +464,7 @@ public class LauncherActivity extends Activity {
         root.addView(shelf);
 
         clockView = new TextView(this);
-        clockView.setShadowLayer(dp(8), 0, dp(2), 0xCC000000);
+        clockView.setShadowLayer(dp(14), 0, dp(3), 0xCC000000);
         clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
         clockView.setIncludeFontPadding(false);
         clockView.setContentDescription("Current time");
@@ -436,8 +476,10 @@ public class LauncherActivity extends Activity {
         clockView.setLayoutParams(clkLp);
         clockView.setTextColor(Color.WHITE);
         clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
-        clockView.setTypeface(Typeface.create("sans-serif-thin", Typeface.NORMAL));
-        clockView.setLetterSpacing(0.04f);
+        // Heavy base typeface — time digits read thick. AM/PM is overridden
+        // back to sans-serif-thin via a TypefaceSpan in buildClock().
+        clockView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        clockView.setLetterSpacing(0.02f);
         root.addView(clockView);
 
         final int BTN_SZ  = dp(36);
@@ -467,8 +509,10 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Ring view diameter = icon + stroke padding + shadow bleed
-        int ringSize = iconPx + strokePx * 6;
+        // Ring view diameter = icon + stroke + generous bleed for soft shadow blur.
+        // Bleed must exceed BlurMaskFilter radius (~3.2*strokePx) AND account for
+        // the 1.12x focus scale, otherwise the shadow gets clipped by view bounds.
+        int ringSize = iconPx + strokePx * 12;
         cachedRingSize  = ringSize;
         ringLayoutSize  = ringSize;
         cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
@@ -607,55 +651,58 @@ public class LauncherActivity extends Activity {
 
     private View buildNetBtn(int sz) {
         View v = new View(this) {
-            private final Paint arcP   = makeBtnPaint(false);
-            private final Paint dotP   = makeBtnPaint(true);
-            private final Paint bgP    = makeBgCirclePaint();
-            private final Paint dimP   = makeBtnPaint(false);
-            private final Paint glowP1 = makeGlowPaint(0x66FFFFFF);
-            private final Paint glowP2 = makeGlowPaint(0x33FFFFFF);
-            private final Paint glowP3 = makeGlowPaint(0x18FFFFFF);
-            private final Paint selRing = makeSelRingPaint();
-            private final RectF oval   = new RectF();
-            { dimP.setAlpha(70); }
+            // Apple-TV style: dark glass when idle, frosted-white when focused;
+            // symbol inverts (white → near-black) on focus for crisp contrast.
+            private final Paint stroke    = makeBtnPaint(false);   // hairline-style strokes
+            private final Paint dot       = makeBtnPaint(true);    // solid dot
+            private final Paint bgIdle    = makeBgIdlePaint();
+            private final Paint bgFocus   = makeBgFocusPaint();
+            private final Paint glowOuter = makeGlowPaint(0x40FFFFFF);
+            private final Paint glowMid   = makeGlowPaint(0x22FFFFFF);
+            private final Paint rim       = makeRimPaint();
+            private final RectF oval      = new RectF();
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
                 boolean focused = isFocused();
-                float scale = focused ? 1f : 0.88f;
+                float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
                 if (focused) {
-                    // More dominant triple-layer glow
-                    c.drawCircle(cx, cy, r * 1.45f, glowP3);
-                    c.drawCircle(cx, cy, r * 1.30f, glowP2);
-                    c.drawCircle(cx, cy, r * 1.15f, glowP1);
-                    // Transparent selector ring
-                    c.drawCircle(cx, cy, r * 1.08f, selRing);
+                    // Soft, dominant outer halo (Apple-TV signature glow)
+                    c.drawCircle(cx, cy, r * 1.55f, glowMid);
+                    c.drawCircle(cx, cy, r * 1.32f, glowOuter);
                 }
-                c.drawCircle(cx, cy, r, bgP);
+                // Background plate — frosted white when focused, dark glass when idle
+                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
+                // Subtle 1dp inner rim — gives the glass plate a defined edge
+                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+
                 c.save();
                 c.clipPath(makeCirclePath(cx, cy, r));
+                int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
+                stroke.setColor(symbolColor);
+                dot.setColor(symbolColor);
                 boolean conn = netConnected;
-                float ic = r * 0.88f;
-                float sw = ic * 0.115f;
-                float dotR = sw * 0.9f;
+                float ic = r * 0.92f;
+                float sw = ic * 0.135f;                // bolder strokes — bright, readable
+                float dotR = sw * 0.95f;
                 float dotY = cy + ic * 0.24f;
                 float startAngle = 202.5f, sweep = 135f;
-                arcP.setStrokeWidth(sw);
-                dimP.setStrokeWidth(sw);
-                Paint ap = conn ? arcP : dimP;
-                c.drawCircle(cx, dotY, dotR, conn ? dotP : dimP);
+                stroke.setStrokeWidth(sw);
+                c.drawCircle(cx, dotY, dotR, dot);
                 float r1 = ic * 0.30f;
                 oval.set(cx - r1, dotY - r1, cx + r1, dotY + r1);
-                c.drawArc(oval, startAngle, sweep, false, ap);
+                c.drawArc(oval, startAngle, sweep, false, stroke);
                 float r2 = ic * 0.56f;
                 oval.set(cx - r2, dotY - r2, cx + r2, dotY + r2);
-                c.drawArc(oval, startAngle, sweep, false, ap);
+                c.drawArc(oval, startAngle, sweep, false, stroke);
                 if (!conn) {
-                    float xs = sw * 0.85f;
+                    // X-cross indicates "no connection". Strokes stay full bright.
+                    float xs = sw * 0.95f;
                     float x1 = cx - xs, y1 = dotY - xs, x2 = cx + xs, y2 = dotY + xs;
-                    c.drawLine(x1, y1, x2, y2, dimP);
-                    c.drawLine(x2, y1, x1, y2, dimP);
+                    c.drawLine(x1, y1, x2, y2, stroke);
+                    c.drawLine(x2, y1, x1, y2, stroke);
                 }
                 c.restore();
             }
@@ -664,20 +711,20 @@ public class LauncherActivity extends Activity {
                 _cp.rewind(); _cp.addCircle(cx, cy, r, android.graphics.Path.Direction.CW); return _cp;
             }
         };
-        v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        v.setBackground(null);  // suppress Android default square focus/press highlight
-        v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
+        applyApplePillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(120).start();
+            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(140).start();
             view.invalidate();
         });
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A: view.performClick(); return true;
+                case KeyEvent.KEYCODE_BUTTON_A:
+                    view.playSoundEffect(SoundEffectConstants.CLICK);
+                    view.performClick(); return true;
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView sd = shelf; if (sd != null) sd.requestFocusOnIndex(0); return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -694,12 +741,15 @@ public class LauncherActivity extends Activity {
 
     private View buildWpBtn(int sz) {
         View v = new View(this) {
-            private final Paint p     = makeBtnStrokePaint();
-            private final Paint bgP   = makeBgCirclePaint();
-            private final Paint glowP1 = makeGlowPaint(0x66FFFFFF);
-            private final Paint glowP2 = makeGlowPaint(0x33FFFFFF);
-            private final Paint glowP3 = makeGlowPaint(0x18FFFFFF);
-            private final Paint selRing = makeSelRingPaint();
+            // Apple-TV style: matches the network button aesthetic. The "landscape"
+            // glyph (sun + mountain) is drawn as crisp full-bright white strokes,
+            // inverting to dark on focus for the frosted-glass effect.
+            private final Paint stroke    = makeBtnStrokePaint();
+            private final Paint bgIdle    = makeBgIdlePaint();
+            private final Paint bgFocus   = makeBgFocusPaint();
+            private final Paint glowOuter = makeGlowPaint(0x40FFFFFF);
+            private final Paint glowMid   = makeGlowPaint(0x22FFFFFF);
+            private final Paint rim       = makeRimPaint();
             private final android.graphics.Path mt  = new android.graphics.Path();
             private final android.graphics.Path _cp = new android.graphics.Path();
             private int   lw = 0, lh = 0;
@@ -711,20 +761,20 @@ public class LauncherActivity extends Activity {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
                 boolean focused = isFocused();
-                float scale = focused ? 1f : 0.88f;
+                float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
                 if (focused) {
-                    // More dominant triple-layer glow
-                    c.drawCircle(cx, cy, r * 1.45f, glowP3);
-                    c.drawCircle(cx, cy, r * 1.30f, glowP2);
-                    c.drawCircle(cx, cy, r * 1.15f, glowP1);
-                    // Transparent selector ring
-                    c.drawCircle(cx, cy, r * 1.08f, selRing);
+                    c.drawCircle(cx, cy, r * 1.55f, glowMid);
+                    c.drawCircle(cx, cy, r * 1.32f, glowOuter);
                 }
-                c.drawCircle(cx, cy, r, bgP);
-                float s = r * 0.88f;
-                p.setStrokeWidth(s * 0.11f);
+                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
+                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+
+                int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
+                stroke.setColor(symbolColor);
+                float s = r * 0.92f;
+                stroke.setStrokeWidth(s * 0.13f);     // bolder strokes for crisp Apple-TV read
                 if (w != lw || h != lh || scale != ls) {
                     lw = w; lh = h; ls = scale;
                     float l = cx - s/2f, rt = cx + s/2f, t = cy - s/2f, b = cy + s/2f;
@@ -734,27 +784,27 @@ public class LauncherActivity extends Activity {
                 }
                 c.save();
                 c.clipPath(makeCirclePath(cx, cy, r));
-                // Landscape icon: outer circle frame, sun dot, mountain path — all inside circle clip
-                c.drawCircle(cx, cy, s * 0.46f, p);
-                c.drawCircle(cx + s*0.17f, cy - s*0.18f, s*0.10f, p);
-                c.drawPath(mt, p);
+                // Landscape icon: outer frame, sun dot, mountain path — full bright.
+                c.drawCircle(cx, cy, s * 0.46f, stroke);
+                c.drawCircle(cx + s*0.17f, cy - s*0.18f, s*0.10f, stroke);
+                c.drawPath(mt, stroke);
                 c.restore();
             }
         };
-        v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        v.setBackground(null);  // suppress Android default square focus/press highlight
-        v.setFocusable(true); v.setFocusableInTouchMode(true); v.setClickable(true);
+        applyApplePillStyle(v);
         v.setOnClickListener(view -> openStoragePicker());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(120).start();
+            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(140).start();
             view.invalidate();
         });
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A: view.performClick(); return true;
+                case KeyEvent.KEYCODE_BUTTON_A:
+                    view.playSoundEffect(SoundEffectConstants.CLICK);
+                    view.performClick(); return true;
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView s = shelf;
                     if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
@@ -767,6 +817,32 @@ public class LauncherActivity extends Activity {
             }
         });
         return v;
+    }
+
+    /** Common Apple-TV pill setup: round outline clip, no system focus rect,
+     *  no state list animator, hardware layer, sound effects on. */
+    private void applyApplePillStyle(View v) {
+        v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        v.setBackground(null);
+        v.setForeground(null);
+        v.setStateListAnimator(null);
+        // Kills the platform's default rectangular focus highlight that
+        // Theme.DeviceDefault paints under any focusable View on TV.
+        v.setDefaultFocusHighlightEnabled(false);
+        v.setOutlineProvider(new ViewOutlineProvider() {
+            @Override public void getOutline(View view, Outline outline) {
+                int w = view.getWidth(), h = view.getHeight();
+                int s = Math.min(w, h);
+                int x = (w - s) / 2;
+                int y = (h - s) / 2;
+                outline.setOval(x, y, x + s, y + s);
+            }
+        });
+        v.setClipToOutline(true);
+        v.setSoundEffectsEnabled(true);
+        v.setFocusable(true);
+        v.setFocusableInTouchMode(true);
+        v.setClickable(true);
     }
 
     private Paint makeBtnPaint(boolean fill) {
@@ -786,10 +862,29 @@ public class LauncherActivity extends Activity {
         return p;
     }
 
-    private Paint makeBgCirclePaint() {
+    /** Idle button background — dark glass that reads on any wallpaper. */
+    private Paint makeBgIdlePaint() {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);
-        p.setColor(0x55000000);
+        p.setColor(0x66000000);
+        return p;
+    }
+
+    /** Focused button background — frosted near-white that lifts the symbol
+     *  via inversion. This is the Apple-TV "selected pill" effect. */
+    private Paint makeBgFocusPaint() {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0xF2F4F4F6);
+        return p;
+    }
+
+    /** Hairline inner rim that defines the glass plate edge in any state. */
+    private Paint makeRimPaint() {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.STROKE);
+        p.setColor(0x33FFFFFF);
+        p.setStrokeWidth(dp(1));
         return p;
     }
 
@@ -797,14 +892,6 @@ public class LauncherActivity extends Activity {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);
         p.setColor(color);
-        return p;
-    }
-
-    private Paint makeSelRingPaint() {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setStyle(Paint.Style.STROKE);
-        p.setColor(0x55FFFFFF);
-        p.setStrokeWidth(dp(1));
         return p;
     }
 
@@ -1049,6 +1136,8 @@ public class LauncherActivity extends Activity {
             if (newX == scrollX) return; // no-op avoids redundant work
             scrollX = newX;
             repositionAttached(); fillVisible();
+            // Any actual scroll movement → wallpaper scrim fades in briefly.
+            onShelfActivity();
             // Keep ring tracking the focused cell during programmatic scrolls
             if (!reorderMode) {
                 CellView fc = attached.get(focusedIndex);
@@ -1146,6 +1235,13 @@ public class LauncherActivity extends Activity {
 
                 setFocusable(true); setFocusableInTouchMode(true);
                 setClickable(true); setWillNotDraw(false);
+                // Suppress platform default rectangular focus selector — our
+                // RingView handles focus indication exclusively.
+                setDefaultFocusHighlightEnabled(false);
+                setBackground(null);
+                setForeground(null);
+                setStateListAnimator(null);
+                setSoundEffectsEnabled(true);
 
                 setOnClickListener(v -> {
                     if (boundApp == null) return;
@@ -1163,13 +1259,21 @@ public class LauncherActivity extends Activity {
                     if (!reorderMode) {
                         animate().cancel();
                         if (f) {
-                            // Subtle bounce on focus gain using overshoot
+                            // Subtle bounce on focus gain. updateListener keeps the
+                            // RingView's scale in lockstep with the cell across every
+                            // animation frame — without it the ring sits at one scale
+                            // value while the cell is mid-animation, producing a
+                            // visible ring/icon size mismatch.
                             animate().scaleX(1.12f).scaleY(1.12f)
                                      .setDuration(200)
-                                     .setInterpolator(new android.view.animation.OvershootInterpolator(2.0f))
+                                     .setInterpolator(new android.view.animation.OvershootInterpolator(1.6f))
+                                     .setUpdateListener(anim -> {
+                                         if (isFocused() && isAttachedToWindow())
+                                             positionRing(CellView.this);
+                                     })
                                      .start();
                         } else {
-                            animate().scaleX(1f).scaleY(1f).setDuration(120).setInterpolator(null).start();
+                            animate().scaleX(1f).scaleY(1f).setDuration(140).setInterpolator(null).start();
                         }
                     }
                     invalidate();
@@ -1182,6 +1286,8 @@ public class LauncherActivity extends Activity {
                             // Use postOnAnimation for proper frame sync — avoids ring position race
                             postOnAnimation(() -> { if (isFocused() && isAttachedToWindow()) positionRing(CellView.this); });
                             ensureVisible(boundIndex);
+                            // Focus moved → user is navigating → dim wallpaper briefly.
+                            onShelfActivity();
                         }
                     } else {
                         if (!reorderMode) {
@@ -1257,7 +1363,11 @@ public class LauncherActivity extends Activity {
                             longPressArmed  = false;
                             longPressFired  = false;
                             centerKeyDownAt = 0;
-                            if (wasArmed && !reorderMode) performClick();
+                            if (wasArmed && !reorderMode) {
+                                // Play TV-style click sound on confirm. No haptics.
+                                playSoundEffect(SoundEffectConstants.CLICK);
+                                performClick();
+                            }
                             return true;
                         }
                         return false;
@@ -1527,31 +1637,46 @@ public class LauncherActivity extends Activity {
     }
 
     private boolean needsFill(Bitmap src, int sz) {
-        // Lower threshold: catch any icon with even moderate transparency for white fill
-        int q1 = sz / 4, q3 = sz * 3 / 4;
-        if (src.getConfig() == Bitmap.Config.ARGB_8888) {
-            int rowBytes = src.getRowBytes();
-            int needed   = rowBytes * src.getHeight();
-            byte[] px = sPixelBuf.get();
+        // Premium consistency rule: an icon whose CORNERS / EDGES are mostly
+        // transparent is a "logo on transparent background" — those need a
+        // white plate behind them so the launcher has a uniform look.
+        //
+        // The previous heuristic sampled only the centre quadrant. Many
+        // logo-style icons (Disney+, Spotify, etc.) have an opaque centre
+        // and transparent corners — they were silently slipping through and
+        // ending up clipped to a ragged circle. Sampling edges instead
+        // catches those reliably.
+        boolean fast = src.getConfig() == Bitmap.Config.ARGB_8888;
+        int rowBytes = src.getRowBytes();
+        byte[] px = null;
+        if (fast) {
+            int needed = rowBytes * src.getHeight();
+            px = sPixelBuf.get();
             if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
             ByteBuffer buf = ByteBuffer.wrap(px);
             buf.order(java.nio.ByteOrder.nativeOrder()).rewind();
             src.copyPixelsToBuffer(buf);
-            int step = Math.max(1, (q3 - q1) / 12), total = 0, trans = 0;
-            for (int y = q1; y < q3; y += step)
-                for (int x = q1; x < q3; x += step) {
-                    if ((px[y * rowBytes + x * 4 + 3] & 0xFF) < 30) trans++;
-                    total++;
-                }
-            return total > 0 && (float) trans / total >= 0.15f;
         }
-        int step = Math.max(1, (q3 - q1) / 12), total = 0, trans = 0;
-        for (int y = q1; y < q3; y += step)
-            for (int x = q1; x < q3; x += step) {
-                if (Color.alpha(src.getPixel(x, y)) < 30) trans++;
-                total++;
-            }
-        return total > 0 && (float) trans / total >= 0.15f;
+
+        int inset = Math.max(1, sz / 16);
+        int[][] pts = {
+            // 4 outer corners (just inside edge)
+            {inset, inset}, {sz-1-inset, inset}, {inset, sz-1-inset}, {sz-1-inset, sz-1-inset},
+            // 4 edge midpoints
+            {sz/2, inset}, {inset, sz/2}, {sz-1-inset, sz/2}, {sz/2, sz-1-inset},
+            // 4 deeper inset corners — guard against icons whose first ring of
+            // pixels is anti-aliased (alpha 0..30) but real content is just inside
+            {sz/8, sz/8}, {sz - sz/8 - 1, sz/8}, {sz/8, sz - sz/8 - 1}, {sz - sz/8 - 1, sz - sz/8 - 1}
+        };
+        int trans = 0;
+        for (int[] p : pts) {
+            int a = fast
+                ? (px[p[1] * rowBytes + p[0] * 4 + 3] & 0xFF)
+                : Color.alpha(src.getPixel(p[0], p[1]));
+            if (a < 30) trans++;
+        }
+        // 6+ of 12 transparent (50%) → icon has a transparent background → fill.
+        return trans * 2 >= pts.length;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -1592,10 +1717,22 @@ public class LauncherActivity extends Activity {
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
         if (cell.getWidth() == 0) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
-        // Icon center: horizontally centered in cell, vertically at icyOffset from cell top
-        float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() / 2f;
-        float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset;
-        // ringLayoutSize includes bleed padding on all sides; center the view on icon center
+
+        // Cells animate to scaleX/Y = 1.12 on focus around the center pivot.
+        // getLocationOnScreen returns the post-transform VISUAL top-left, so
+        // simply adding cell.getWidth()/2 lands ~6% off-center. The icon's
+        // visual position must be projected via the cell's scale:
+        //   visualIconCx = visualTopLeftX + cell.getWidth() * scaleX / 2
+        //   visualIconCy = visualTopLeftY + cachedIcyOffset * scaleY
+        float sx = cell.getScaleX();
+        float sy = cell.getScaleY();
+        float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() * sx / 2f;
+        float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset * sy;
+        // Keep the ring's own scale in lockstep with the cell so its radius
+        // hugs the focused (1.12x) icon — the previous fixed-size ring sat
+        // INSIDE the focused icon by ~2.5dp, which read as misalignment.
+        rv.setScaleX(sx);
+        rv.setScaleY(sy);
         float half = ringLayoutSize / 2f;
         rv.setX(cx - half); rv.setY(cy - half);
         rv.setVisibility(View.VISIBLE);
@@ -1831,9 +1968,10 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        // Premium ring with shadow — pre-renders shadow bitmap for GPU-layer compatibility.
+        // Premium ring with deep, soft drop shadow — pre-rendered to bitmap
+        // because BlurMaskFilter requires a software canvas.
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint bmpPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Paint shadowDrawPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
         private float cx, cy, ringRadius;
         private Bitmap shadowBmp;
 
@@ -1846,40 +1984,49 @@ public class LauncherActivity extends Activity {
             setLayerType(View.LAYER_TYPE_HARDWARE, null);
             this.iconR = iconPx / 2f;
             this.strokePx = strokePx;
-            float ws = strokePx * 0.65f;
+            float ws = strokePx * 0.75f;          // slightly heavier ring stroke
             ring.setStyle(Paint.Style.STROKE);
             ring.setColor(0xFFFFFFFF);
             ring.setStrokeWidth(ws);
-            shadowOffset = strokePx * 0.5f;
+            shadowOffset = strokePx * 0.9f;       // deeper drop
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
             float ws = ring.getStrokeWidth();
-            ringRadius = iconR + ws * 0.8f;
-            // Pre-render shadow into a bitmap (BlurMaskFilter needs SOFTWARE canvas)
+            ringRadius = iconR + ws * 0.85f;
+            // Pre-render two shadow passes into a bitmap (BlurMaskFilter needs SOFTWARE canvas).
+            // Two passes: a wide soft halo + a tighter darker drop shadow → reads as elevation.
             if (shadowBmp != null) { shadowBmp.recycle(); shadowBmp = null; }
             if (w > 0 && h > 0) {
-                shadowBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8);
+                shadowBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
                 Canvas sc = new Canvas(shadowBmp);
-                Paint sp = new Paint(Paint.ANTI_ALIAS_FLAG);
-                sp.setStyle(Paint.Style.STROKE);
-                sp.setStrokeWidth(ws + strokePx * 2f);
-                sp.setColor(Color.WHITE);
-                sp.setMaskFilter(new android.graphics.BlurMaskFilter(
-                        strokePx * 1.6f, android.graphics.BlurMaskFilter.Blur.NORMAL));
-                sc.drawCircle(cx, cy + shadowOffset, ringRadius, sp);
-                bmpPaint.setColor(0x55000000);
-                bmpPaint.setColorFilter(new android.graphics.PorterDuffColorFilter(
-                        0x55000000, PorterDuff.Mode.SRC_IN));
+
+                // Pass 1: wide ambient halo
+                Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
+                halo.setStyle(Paint.Style.STROKE);
+                halo.setStrokeWidth(ws + strokePx * 3.0f);
+                halo.setColor(0x55000000);
+                halo.setMaskFilter(new android.graphics.BlurMaskFilter(
+                        strokePx * 3.2f, android.graphics.BlurMaskFilter.Blur.NORMAL));
+                sc.drawCircle(cx, cy + shadowOffset, ringRadius, halo);
+
+                // Pass 2: tighter drop shadow
+                Paint drop = new Paint(Paint.ANTI_ALIAS_FLAG);
+                drop.setStyle(Paint.Style.STROKE);
+                drop.setStrokeWidth(ws + strokePx * 1.2f);
+                drop.setColor(0x88000000);
+                drop.setMaskFilter(new android.graphics.BlurMaskFilter(
+                        strokePx * 1.4f, android.graphics.BlurMaskFilter.Blur.NORMAL));
+                sc.drawCircle(cx, cy + shadowOffset, ringRadius, drop);
             }
         }
 
         @Override protected void onDraw(Canvas c) {
             if (ringRadius <= 0) return;
             if (shadowBmp != null && !shadowBmp.isRecycled()) {
-                c.drawBitmap(shadowBmp, 0, 0, bmpPaint);
+                c.drawBitmap(shadowBmp, 0, 0, shadowDrawPaint);
             }
             c.drawCircle(cx, cy, ringRadius, ring);
         }

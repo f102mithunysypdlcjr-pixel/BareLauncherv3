@@ -3,22 +3,18 @@
 
     <!-- PERMISSIONS -->
 
-    <!-- Wallpaper reading (Android 12 and below) -->
+    <!-- Wallpaper reading on legacy Android (12 and below). On Android 13+
+         WallpaperManager.getDrawable() is gated by the OS being the active
+         home launcher, not by a permission. -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-
-    <!-- Wallpaper reading (Android 13+) -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
     <!-- Set system wallpaper -->
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
 
     <!-- Required to enumerate installed apps for the launcher grid -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-
-    <!-- Required for uninstall intent -->
-    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <!-- HARDWARE FEATURES
          Both declared as NOT required so the APK installs on phones too
