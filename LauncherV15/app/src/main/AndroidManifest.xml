@@ -16,6 +16,11 @@
     <!-- Required to enumerate installed apps for the launcher grid -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <!-- Allows launching the system uninstall dialog reliably on Android 14+
+         and Android TV ROMs that gate ACTION_DELETE / ACTION_UNINSTALL_PACKAGE
+         behind this normal-protection-level permission. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+
     <!-- HARDWARE FEATURES
          Both declared as NOT required so the APK installs on phones too
          (useful for sideloading / testing) -->
