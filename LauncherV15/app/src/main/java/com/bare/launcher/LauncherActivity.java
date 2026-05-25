@@ -40,6 +40,7 @@ import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.TextPaint;
 import android.text.style.RelativeSizeSpan;
+import android.text.style.StyleSpan;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.DisplayMetrics;
@@ -136,7 +137,8 @@ public class LauncherActivity extends Activity {
     private final java.util.Calendar       clockCal   = java.util.Calendar.getInstance();
     private final char[]                   clockChars = new char[8];
     private final SpannableStringBuilder   clockSsb   = new SpannableStringBuilder();
-    private final RelativeSizeSpan         clockSpan  = new RelativeSizeSpan(0.55f);
+    private final RelativeSizeSpan         clockSpan  = new RelativeSizeSpan(0.38f);
+    private final StyleSpan                clockLight = new StyleSpan(Typeface.NORMAL);
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -164,11 +166,11 @@ public class LauncherActivity extends Activity {
         int amStart = pos;
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
-        // Reuse shared SSB — TextView.setText(Spannable, SPANNABLE) copies internally,
-        // so clearing and re-building clockSsb next tick does not corrupt what the TextView holds.
         clockSsb.clear(); clockSsb.clearSpans();
         clockSsb.append(String.valueOf(clockChars, 0, pos));
+        // Small thin AM/PM for premium feel
         clockSsb.setSpan(clockSpan, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        clockSsb.setSpan(clockLight, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return clockSsb;
     }
 
@@ -404,6 +406,7 @@ public class LauncherActivity extends Activity {
         root.setBackgroundColor(Color.BLACK);
         root.setClipChildren(false);
         root.setClipToPadding(false);
+        root.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
 
         wallpaperView = new ImageView(this);
         wallpaperView.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -416,20 +419,25 @@ public class LauncherActivity extends Activity {
         shelfLp.gravity = Gravity.BOTTOM;
         shelfLp.setMargins(0, 0, 0, dp(12));
         shelf.setLayoutParams(shelfLp);
+        shelf.setContentDescription("App shelf");
+        shelf.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         root.addView(shelf);
 
         clockView = new TextView(this);
-        clockView.setShadowLayer(dp(8), 0, dp(3), 0xDD000000);
+        clockView.setShadowLayer(dp(8), 0, dp(2), 0xCC000000);
         clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
         clockView.setIncludeFontPadding(false);
+        clockView.setContentDescription("Current time");
+        clockView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
         clkLp.gravity = Gravity.TOP | Gravity.START;
-        clkLp.setMargins(dp(32), dp(24), 0, 0);
+        clkLp.setMarginStart(dp(32));
+        clkLp.topMargin = dp(24);
         clockView.setLayoutParams(clkLp);
         clockView.setTextColor(Color.WHITE);
-        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 42);
-        clockView.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
-        clockView.setLetterSpacing(0.01f);
+        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
+        clockView.setTypeface(Typeface.create("sans-serif-thin", Typeface.NORMAL));
+        clockView.setLetterSpacing(0.04f);
         root.addView(clockView);
 
         final int BTN_SZ  = dp(36);
@@ -441,28 +449,34 @@ public class LauncherActivity extends Activity {
         netBtn = buildNetBtn(BTN_SZ);
         FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         netLp.gravity = Gravity.TOP | Gravity.END;
-        netLp.setMargins(0, MARG_T, MARG_E + BTN_VIEW_SZ + BTN_GAP, 0);
+        netLp.topMargin = MARG_T;
+        netLp.setMarginEnd(MARG_E + BTN_VIEW_SZ + BTN_GAP);
         netBtn.setLayoutParams(netLp);
         netBtn.setClipBounds(null);
+        netBtn.setContentDescription("Network settings");
         root.addView(netBtn);
 
         View wpLocal = buildWpBtn(BTN_SZ);
         wpBtnView = wpLocal;
         FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         wpLp.gravity = Gravity.TOP | Gravity.END;
-        wpLp.setMargins(0, MARG_T, MARG_E, 0);
+        wpLp.topMargin = MARG_T;
+        wpLp.setMarginEnd(MARG_E);
         wpLocal.setLayoutParams(wpLp);
+        wpLocal.setContentDescription("Change wallpaper");
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Ring view diameter = icon + white stroke each side + dark stroke each side + 2px gap
-        int ringSize = iconPx + strokePx * 4 + dp(2);
+        // Ring view diameter = icon + stroke padding + shadow bleed
+        int ringSize = iconPx + strokePx * 6;
         cachedRingSize  = ringSize;
         ringLayoutSize  = ringSize;
         cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
         ringView = new RingView(this, strokePx, iconPx);
-        ringView.setLayoutParams(new FrameLayout.LayoutParams(ringSize, ringSize));
+        FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(ringSize, ringSize);
+        ringView.setLayoutParams(ringLp);
         ringView.setVisibility(View.INVISIBLE);
+        ringView.setContentDescription("Selection ring");
         root.addView(ringView);
 
         menuOverlay = new FrameLayout(this) {
@@ -495,6 +509,7 @@ public class LauncherActivity extends Activity {
         menuUninstall.setPadding(dp(20), dp(12), dp(20), dp(12));
         menuUninstall.setClickable(true);
         menuUninstall.setFocusable(false);
+        menuUninstall.setContentDescription("Uninstall app");
         menuUninstall.setOnClickListener(v -> {
             RecyclingShelfView s = shelf;
             if (s != null && s.reorderMode) {
@@ -517,6 +532,7 @@ public class LauncherActivity extends Activity {
         menuMove.setPadding(dp(20), dp(12), dp(20), dp(12));
         menuMove.setClickable(true);
         menuMove.setFocusable(false);
+        menuMove.setContentDescription("Move app position");
         menuMove.setOnClickListener(v -> {
             RecyclingShelfView s = shelf;
             if (s != null && s.reorderMode) {
@@ -833,6 +849,7 @@ public class LauncherActivity extends Activity {
             stride = cellW + dp(10) * 2;
             setFocusable(false);
             setClipChildren(false);
+            setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
         }
 
         void enterReorderMode(int idx) {
@@ -1120,9 +1137,10 @@ public class LauncherActivity extends Activity {
                 labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
                 labelPaint.setColor(Color.WHITE);
                 labelPaint.setTextSize(dp(11));
-                labelPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                labelPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
                 labelPaint.setTextAlign(Paint.Align.CENTER);
-                labelPaint.setShadowLayer(dp(4), 0, dp(2), 0xDD000000);
+                labelPaint.setShadowLayer(dp(4), 0, dp(1), 0xCC000000);
+                labelPaint.setLetterSpacing(0.02f);
 
                 labelTp = new TextPaint(labelPaint);
 
@@ -1321,6 +1339,7 @@ public class LauncherActivity extends Activity {
             void bind(AppInfo app, int index) {
                 boolean labelChanged = !app.label.equals(labelStr);
                 boundApp = app; boundIndex = index; labelStr = app.label;
+                setContentDescription(app.label);
                 if (labelChanged) {
                     float maxW = dp(CELL_W_DP) - labelMaxWInset;
                     labelDisplay = labelPaint.measureText(labelStr) > maxW
@@ -1493,7 +1512,8 @@ public class LauncherActivity extends Activity {
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
         boolean fill = needsFill(raw, sz);
-        int  csz  = Math.round(sz * (fill ? 0.78f : 1.0f));
+        // Always apply white fill for transparent icons — ensures premium consistent look
+        int  csz  = Math.round(sz * (fill ? 0.72f : 1.0f));
         int  inset = (sz - csz) / 2;
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
@@ -1507,31 +1527,31 @@ public class LauncherActivity extends Activity {
     }
 
     private boolean needsFill(Bitmap src, int sz) {
+        // Lower threshold: catch any icon with even moderate transparency for white fill
         int q1 = sz / 4, q3 = sz * 3 / 4;
         if (src.getConfig() == Bitmap.Config.ARGB_8888) {
-            int rowBytes = src.getRowBytes(); // may be > sz*4 on some devices (row padding)
+            int rowBytes = src.getRowBytes();
             int needed   = rowBytes * src.getHeight();
             byte[] px = sPixelBuf.get();
             if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
             ByteBuffer buf = ByteBuffer.wrap(px);
             buf.order(java.nio.ByteOrder.nativeOrder()).rewind();
             src.copyPixelsToBuffer(buf);
-            int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
+            int step = Math.max(1, (q3 - q1) / 12), total = 0, trans = 0;
             for (int y = q1; y < q3; y += step)
                 for (int x = q1; x < q3; x += step) {
-                    // Use rowBytes (not sz*4) as row stride to handle padding correctly.
-                    if ((px[y * rowBytes + x * 4 + 3] & 0xFF) < 20) trans++;
+                    if ((px[y * rowBytes + x * 4 + 3] & 0xFF) < 30) trans++;
                     total++;
                 }
-            return total > 0 && (float) trans / total >= 0.35f;
+            return total > 0 && (float) trans / total >= 0.15f;
         }
-        int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
+        int step = Math.max(1, (q3 - q1) / 12), total = 0, trans = 0;
         for (int y = q1; y < q3; y += step)
             for (int x = q1; x < q3; x += step) {
-                if (Color.alpha(src.getPixel(x, y)) < 20) trans++;
+                if (Color.alpha(src.getPixel(x, y)) < 30) trans++;
                 total++;
             }
-        return total > 0 && (float) trans / total >= 0.35f;
+        return total > 0 && (float) trans / total >= 0.15f;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -1811,35 +1831,56 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        // Thin white ring with soft drop-shadow — clean, modern look.
-        // Uses LAYER_TYPE_SOFTWARE so setShadowLayer() works correctly.
+        // Premium ring with shadow — pre-renders shadow bitmap for GPU-layer compatibility.
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint bmpPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
         private float cx, cy, ringRadius;
+        private Bitmap shadowBmp;
 
-        private final float iconR;  // icon radius in px — ring hugs icon edge
+        private final float iconR;
+        private final int strokePx;
+        private final float shadowOffset;
 
         RingView(Context ctx, int strokePx, int iconPx) {
             super(ctx);
-            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+            setLayerType(View.LAYER_TYPE_HARDWARE, null);
             this.iconR = iconPx / 2f;
-            float ws = strokePx * 0.65f;  // thin white stroke
+            this.strokePx = strokePx;
+            float ws = strokePx * 0.65f;
             ring.setStyle(Paint.Style.STROKE);
             ring.setColor(0xFFFFFFFF);
             ring.setStrokeWidth(ws);
-            // Soft shadow behind the ring for depth
-            ring.setShadowLayer(strokePx * 1.5f, 0, strokePx * 0.4f, 0x66000000);
+            shadowOffset = strokePx * 0.5f;
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
             float ws = ring.getStrokeWidth();
-            // Ring centre sits just outside the icon edge
-            ringRadius = iconR + ws / 2f + ws * 0.3f;
+            ringRadius = iconR + ws * 0.8f;
+            // Pre-render shadow into a bitmap (BlurMaskFilter needs SOFTWARE canvas)
+            if (shadowBmp != null) { shadowBmp.recycle(); shadowBmp = null; }
+            if (w > 0 && h > 0) {
+                shadowBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8);
+                Canvas sc = new Canvas(shadowBmp);
+                Paint sp = new Paint(Paint.ANTI_ALIAS_FLAG);
+                sp.setStyle(Paint.Style.STROKE);
+                sp.setStrokeWidth(ws + strokePx * 2f);
+                sp.setColor(Color.WHITE);
+                sp.setMaskFilter(new android.graphics.BlurMaskFilter(
+                        strokePx * 1.6f, android.graphics.BlurMaskFilter.Blur.NORMAL));
+                sc.drawCircle(cx, cy + shadowOffset, ringRadius, sp);
+                bmpPaint.setColor(0x55000000);
+                bmpPaint.setColorFilter(new android.graphics.PorterDuffColorFilter(
+                        0x55000000, PorterDuff.Mode.SRC_IN));
+            }
         }
 
         @Override protected void onDraw(Canvas c) {
             if (ringRadius <= 0) return;
+            if (shadowBmp != null && !shadowBmp.isRecycled()) {
+                c.drawBitmap(shadowBmp, 0, 0, bmpPaint);
+            }
             c.drawCircle(cx, cy, ringRadius, ring);
         }
     }
