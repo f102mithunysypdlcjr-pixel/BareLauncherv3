@@ -94,10 +94,6 @@ public class LauncherActivity extends Activity {
     };
     private static final ThreadLocal<byte[]> sPixelBuf = new ThreadLocal<>();
 
-    // Hoisted: avoid per-focus-event allocation. Stateless, safe to share.
-    private static final android.view.animation.OvershootInterpolator FOCUS_OVERSHOOT
-            = new android.view.animation.OvershootInterpolator(1.6f);
-
     private static final Paint sMaskPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint sSrcInPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private static final Paint sDrawPaint  = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
@@ -490,11 +486,10 @@ public class LauncherActivity extends Activity {
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Ring view diameter = icon + gap + stroke + scale headroom.
-        // No shadow bleed needed (RingView is shadowless). The 1.12x focus
-        // scale is applied to the RingView at draw time, so the layout box
-        // must be large enough to hold the ring at full focus radius.
-        int ringSize = iconPx + dp(20);
+        // Ring view diameter = icon + headroom for the focus scale-up.
+        // Ring sits with ZERO gap on the icon edge now, so headroom is just
+        // enough to fit the scaled-up ring (icon + stroke) at focus scale.
+        int ringSize = iconPx + dp(12);
         ringLayoutSize  = ringSize;
         cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
         ringView = new RingView(this, strokePx, iconPx);
@@ -661,27 +656,29 @@ public class LauncherActivity extends Activity {
                 stroke.setColor(symbolColor);
                 dot.setColor(symbolColor);
 
-                // iOS-style WiFi fan. Bands are thicker than the previous
-                // hairline draw so the glyph reads as a solid ribbon, not
-                // a wireframe outline.
+                // Bold solid WiFi fan — matches the "after" reference: three
+                // chunky stacked arcs with FLAT ends (BUTT caps) plus a small
+                // wedge dot at the apex. No rounded caps, no wireframe feel.
                 //
                 //   ay    arc-anchor (below cell centre so dot+arcs cluster low)
-                //   sw    band thickness (~16% of icon size — solid feel)
-                //   radii 0.32 / 0.58 / 0.84 of the icon size — even spacing
-                //   sweep 160° centred on 270° (up): 190°→350°
+                //   sw    band thickness — bumped to ~20% of icon size for the
+                //         heavy-ribbon look you see in the reference image
+                //   radii 0.36 / 0.62 / 0.88 of the icon size — even spacing
+                //   sweep 150° centred on 270° (up): 195°→345°  (slightly tighter
+                //         than before so the bands taper into a fan shape)
                 float ic         = r * 0.96f;
-                float sw         = ic * 0.165f;
-                float ay         = cy + ic * 0.30f;
-                float dotR       = sw * 0.62f;
-                float dotY       = ay - sw * 0.05f;
-                float startAngle = 190f, sweep = 160f;
+                float sw         = ic * 0.20f;
+                float ay         = cy + ic * 0.34f;
+                float dotR       = sw * 0.70f;
+                float dotY       = ay - sw * 0.10f;
+                float startAngle = 195f, sweep = 150f;
 
                 stroke.setStrokeWidth(sw);
-                stroke.setStrokeJoin(Paint.Join.ROUND);
-                stroke.setStrokeCap(Paint.Cap.ROUND);
+                stroke.setStrokeJoin(Paint.Join.MITER);
+                stroke.setStrokeCap(Paint.Cap.BUTT);   // FLAT band ends — key to the bold look
 
                 c.drawCircle(cx, dotY, dotR, dot);
-                float[] radii = { ic * 0.32f, ic * 0.58f, ic * 0.84f };
+                float[] radii = { ic * 0.36f, ic * 0.62f, ic * 0.88f };
                 for (float rr : radii) {
                     oval.set(cx - rr, ay - rr, cx + rr, ay + rr);
                     c.drawArc(oval, startAngle, sweep, false, stroke);
@@ -813,7 +810,9 @@ public class LauncherActivity extends Activity {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setColor(0xFFFFFFFF);
         p.setStyle(fill ? Paint.Style.FILL : Paint.Style.STROKE);
-        p.setStrokeCap(Paint.Cap.ROUND);
+        // Default to BUTT — the WiFi glyph wants flat band ends. Per-draw
+        // calls override this for paths that need rounded caps (none right now).
+        p.setStrokeCap(Paint.Cap.BUTT);
         return p;
     }
 
@@ -1001,8 +1000,15 @@ public class LauncherActivity extends Activity {
 
         void requestFocusOnIndex(int idx) {
             if (appList.isEmpty()) return;
+            // Clamp instead of wrap. Wrapping caused a full-shelf scroll from
+            // far-right back to index 0 when the user d-padded past the last
+            // app, which read as "apps overriding each other" on the right
+            // edge as the long fling raced back across the icons. Clamping
+            // gives the standard TV-launcher behaviour: the focus simply stops
+            // at the boundary.
             int sz = appList.size();
-            idx = ((idx % sz) + sz) % sz;
+            if (idx < 0)   idx = 0;
+            if (idx >= sz) idx = sz - 1;
             focusedIndex = idx;
             // Cancel any in-flight fling to prevent scroll fighting
             scroller.abortAnimation();
@@ -1278,14 +1284,21 @@ public class LauncherActivity extends Activity {
                     if (!reorderMode) {
                         animate().cancel();
                         if (f) {
-                            // Subtle bounce on focus gain. updateListener keeps the
-                            // RingView's scale in lockstep with the cell across every
-                            // animation frame — without it the ring sits at one scale
-                            // value while the cell is mid-animation, producing a
-                            // visible ring/icon size mismatch.
-                            animate().scaleX(1.12f).scaleY(1.12f)
-                                     .setDuration(200)
-                                     .setInterpolator(FOCUS_OVERSHOOT)
+                            // Subtle, FAST focus pop. Smaller scale (1.06) + shorter
+                            // duration (120ms) + linear interpolator means:
+                            //   • adjacent cells never visually overlap during fast
+                            //     d-pad scroll (the 1.12 + overshoot combo briefly
+                            //     pushed cells past their stride boundary, which the
+                            //     user saw as "apps overriding each other on the
+                            //     right corner")
+                            //   • the ring follows every cell snappily — no slow
+                            //     bloom that gets interrupted by the next keypress,
+                            //     so it no longer looks like the ring "skips" apps
+                            // updateListener keeps the RingView's scale in lockstep
+                            // with the cell across every animation frame.
+                            animate().scaleX(1.06f).scaleY(1.06f)
+                                     .setDuration(120)
+                                     .setInterpolator(null)
                                      .setUpdateListener(anim -> {
                                          if (isFocused() && isAttachedToWindow())
                                              positionRing(CellView.this);
@@ -1296,7 +1309,7 @@ public class LauncherActivity extends Activity {
                             // CellView.this) doesn't persist on ViewPropertyAnimator
                             // and fire pointlessly during the unfocus tween.
                             animate().scaleX(1f).scaleY(1f)
-                                     .setDuration(140)
+                                     .setDuration(100)
                                      .setInterpolator(null)
                                      .setUpdateListener(null)
                                      .start();
@@ -1960,51 +1973,36 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        // Premium clean ring — no shadow, no glow. Sits clearly OUTSIDE the
-        // icon edge with a deliberate gap so the icon and ring never touch.
-        // The ring is rendered as a single crisp white stroke; an inner hint
-        // (40% alpha) is layered just inside to add depth without bloat.
-        private final Paint ring      = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint ringInner = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private float cx, cy, ringRadius, ringInnerRadius;
+        // Premium clean ring — no shadow, no glow, single crisp stroke that
+        // hugs the icon edge with ZERO gap. The ring's inner edge sits exactly
+        // on the icon's outer edge so it reads as a halo wrapped around the
+        // icon, not a separate floating circle.
+        private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float cx, cy, ringRadius;
 
         private final float iconR;
-        private final int   strokePx;
-        private final float gapPx;
 
         RingView(Context ctx, int strokePx, int iconPx) {
             super(ctx);
-            // Hardware layer is fine for solid strokes.
+            // Hardware layer is fine for a solid stroke.
             setLayerType(View.LAYER_TYPE_HARDWARE, null);
-            this.iconR    = iconPx / 2f;
-            this.strokePx = strokePx;
-            // Visible gap between icon edge and ring inner edge — 4dp reads as
-            // an intentional halo and keeps the ring CLEARLY outside the icon.
-            this.gapPx    = strokePx * 1.4f;
+            this.iconR = iconPx / 2f;
 
-            float ws = strokePx * 0.95f;        // crisp medium weight
             ring.setStyle(Paint.Style.STROKE);
             ring.setColor(0xFFFFFFFF);
-            ring.setStrokeWidth(ws);
-
-            ringInner.setStyle(Paint.Style.STROKE);
-            ringInner.setColor(0x66FFFFFF);     // soft inner accent — depth without shadow
-            ringInner.setStrokeWidth(Math.max(1f, ws * 0.45f));
+            ring.setStrokeWidth(strokePx);
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
-            float ws = ring.getStrokeWidth();
-            // Outer ring sits a clear gap OUTSIDE the icon edge.
-            ringRadius      = iconR + gapPx + ws / 2f;
-            // Inner accent ring sits just inside it for premium depth.
-            ringInnerRadius = ringRadius - ws * 0.5f - ringInner.getStrokeWidth() * 1.6f;
+            // Inner edge of the stroke = icon outer edge (zero gap). Stroke is
+            // centred on the radius, so radius = iconR + strokeWidth / 2.
+            ringRadius = iconR + ring.getStrokeWidth() / 2f;
         }
 
         @Override protected void onDraw(Canvas c) {
             if (ringRadius <= 0) return;
-            if (ringInnerRadius > 0) c.drawCircle(cx, cy, ringInnerRadius, ringInner);
             c.drawCircle(cx, cy, ringRadius, ring);
         }
     }
