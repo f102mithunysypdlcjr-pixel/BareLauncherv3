@@ -50,7 +50,7 @@ import android.util.SparseArray;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
-import android.view.Outline;
+import android.graphics.Outline;
 import android.view.SoundEffectConstants;
 import android.view.VelocityTracker;
 import android.view.View;
