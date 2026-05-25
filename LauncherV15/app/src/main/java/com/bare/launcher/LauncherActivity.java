@@ -433,20 +433,22 @@ public class LauncherActivity extends Activity {
         root.addView(clockView);
 
         final int BTN_SZ  = dp(36);
-        final int BTN_GAP = dp(10);
-        final int MARG_T  = dp(26);
-        final int MARG_E  = dp(28);
+        final int BTN_VIEW_SZ = dp(52);  // larger to accommodate glow without clipping
+        final int BTN_GAP = dp(6);
+        final int MARG_T  = dp(18);
+        final int MARG_E  = dp(20);
 
         netBtn = buildNetBtn(BTN_SZ);
-        FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
+        FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         netLp.gravity = Gravity.TOP | Gravity.END;
-        netLp.setMargins(0, MARG_T, MARG_E + BTN_SZ + BTN_GAP, 0);
+        netLp.setMargins(0, MARG_T, MARG_E + BTN_VIEW_SZ + BTN_GAP, 0);
         netBtn.setLayoutParams(netLp);
+        netBtn.setClipBounds(null);
         root.addView(netBtn);
 
         View wpLocal = buildWpBtn(BTN_SZ);
         wpBtnView = wpLocal;
-        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_SZ, BTN_SZ);
+        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         wpLp.gravity = Gravity.TOP | Gravity.END;
         wpLp.setMargins(0, MARG_T, MARG_E, 0);
         wpLocal.setLayoutParams(wpLp);
@@ -593,8 +595,10 @@ public class LauncherActivity extends Activity {
             private final Paint dotP   = makeBtnPaint(true);
             private final Paint bgP    = makeBgCirclePaint();
             private final Paint dimP   = makeBtnPaint(false);
-            private final Paint glowP1 = makeGlowPaint(0x44FFFFFF);
-            private final Paint glowP2 = makeGlowPaint(0x22FFFFFF);
+            private final Paint glowP1 = makeGlowPaint(0x66FFFFFF);
+            private final Paint glowP2 = makeGlowPaint(0x33FFFFFF);
+            private final Paint glowP3 = makeGlowPaint(0x18FFFFFF);
+            private final Paint selRing = makeSelRingPaint();
             private final RectF oval   = new RectF();
             { dimP.setAlpha(70); }
             @Override protected void onDraw(Canvas c) {
@@ -605,8 +609,12 @@ public class LauncherActivity extends Activity {
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
                 if (focused) {
-                    c.drawCircle(cx, cy, r * 1.20f, glowP1);
-                    c.drawCircle(cx, cy, r * 1.35f, glowP2);
+                    // More dominant triple-layer glow
+                    c.drawCircle(cx, cy, r * 1.45f, glowP3);
+                    c.drawCircle(cx, cy, r * 1.30f, glowP2);
+                    c.drawCircle(cx, cy, r * 1.15f, glowP1);
+                    // Transparent selector ring
+                    c.drawCircle(cx, cy, r * 1.08f, selRing);
                 }
                 c.drawCircle(cx, cy, r, bgP);
                 c.save();
@@ -672,8 +680,10 @@ public class LauncherActivity extends Activity {
         View v = new View(this) {
             private final Paint p     = makeBtnStrokePaint();
             private final Paint bgP   = makeBgCirclePaint();
-            private final Paint glowP1 = makeGlowPaint(0x44FFFFFF);
-            private final Paint glowP2 = makeGlowPaint(0x22FFFFFF);
+            private final Paint glowP1 = makeGlowPaint(0x66FFFFFF);
+            private final Paint glowP2 = makeGlowPaint(0x33FFFFFF);
+            private final Paint glowP3 = makeGlowPaint(0x18FFFFFF);
+            private final Paint selRing = makeSelRingPaint();
             private final android.graphics.Path mt  = new android.graphics.Path();
             private final android.graphics.Path _cp = new android.graphics.Path();
             private int   lw = 0, lh = 0;
@@ -689,8 +699,12 @@ public class LauncherActivity extends Activity {
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
                 if (focused) {
-                    c.drawCircle(cx, cy, r * 1.20f, glowP1);
-                    c.drawCircle(cx, cy, r * 1.35f, glowP2);
+                    // More dominant triple-layer glow
+                    c.drawCircle(cx, cy, r * 1.45f, glowP3);
+                    c.drawCircle(cx, cy, r * 1.30f, glowP2);
+                    c.drawCircle(cx, cy, r * 1.15f, glowP1);
+                    // Transparent selector ring
+                    c.drawCircle(cx, cy, r * 1.08f, selRing);
                 }
                 c.drawCircle(cx, cy, r, bgP);
                 float s = r * 0.88f;
@@ -770,6 +784,14 @@ public class LauncherActivity extends Activity {
         return p;
     }
 
+    private Paint makeSelRingPaint() {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.STROKE);
+        p.setColor(0x55FFFFFF);
+        p.setStrokeWidth(dp(1));
+        return p;
+    }
+
     private void openNetSettings() {
         String[] actions = { Settings.ACTION_WIFI_SETTINGS, Settings.ACTION_WIRELESS_SETTINGS, Settings.ACTION_SETTINGS };
         for (String a : actions) {
@@ -781,7 +803,7 @@ public class LauncherActivity extends Activity {
 
     final class RecyclingShelfView extends ViewGroup {
 
-        private static final int BUFFER = 2;
+        private static final int BUFFER = 4;
 
         private final ArrayList<CellView>   pool     = new ArrayList<>(8);
         private final SparseArray<CellView> attached = new SparseArray<>();
@@ -921,9 +943,22 @@ public class LauncherActivity extends Activity {
             int sz = appList.size();
             idx = ((idx % sz) + sz) % sz;
             focusedIndex = idx;
+            // Cancel any in-flight fling to prevent scroll fighting
+            scroller.abortAnimation();
             ensureVisible(idx);
+            // Force fillVisible after scroll to ensure the cell exists
+            fillVisible();
             CellView cv = attached.get(idx);
             if (cv != null) cv.requestFocus();
+            else {
+                // Cell not yet attached — post a retry after layout
+                final int target = idx;
+                post(() -> {
+                    fillVisible();
+                    CellView cv2 = attached.get(target);
+                    if (cv2 != null) cv2.requestFocus();
+                });
+            }
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
@@ -964,9 +999,12 @@ public class LauncherActivity extends Activity {
                 CellView cv = pool.remove(pool.size() - 1);
                 cv.animate().cancel();          // cancel any in-flight scale animation
                 cv.setScaleX(1f); cv.setScaleY(1f); // reset scale before reuse
+                cv.setAlpha(1f);                // reset alpha
                 cv.iconBitmap = null;           // clear stale bitmap — prevents ghost icons
                 cv.boundApp   = null;           // clear stale binding
+                cv.boundIndex = -1;             // clear stale index
                 cv.setVisibility(VISIBLE);
+                cv.invalidate();                // force redraw with clean state
                 return cv;
             }
             CellView cv = new CellView(getContext()); addView(cv); return cv;
@@ -977,6 +1015,7 @@ public class LauncherActivity extends Activity {
             int left = cellLeft(index), top = (getMeasuredHeight() - cellH) / 2;
             cv.bind(app, index);
             cv.layout(left, top, left + cellW, top + cellH);
+            cv.invalidate();
         }
 
         private void repositionAttached() {
@@ -989,8 +1028,15 @@ public class LauncherActivity extends Activity {
 
         private void doScrollTo(int x) {
             int max = Math.max(0, totalW - getWidth());
-            scrollX = Math.max(0, Math.min(x, max));
+            int newX = Math.max(0, Math.min(x, max));
+            if (newX == scrollX) return; // no-op avoids redundant work
+            scrollX = newX;
             repositionAttached(); fillVisible();
+            // Keep ring tracking the focused cell during programmatic scrolls
+            if (!reorderMode) {
+                CellView fc = attached.get(focusedIndex);
+                if (fc != null && fc.isFocused()) LauncherActivity.this.positionRing(fc);
+            }
         }
 
         private void ensureVisible(int idx) {
@@ -1002,12 +1048,6 @@ public class LauncherActivity extends Activity {
         @Override public void computeScroll() {
             if (scroller.computeScrollOffset()) {
                 doScrollTo(scroller.getCurrX());
-                // Reposition ring so it tracks the focused cell during fling.
-                // Only needed in normal mode (reorder mode doesn't fling).
-                if (!reorderMode) {
-                    CellView fc = attached.get(focusedIndex);
-                    if (fc != null && fc.isFocused()) LauncherActivity.this.positionRing(fc);
-                }
                 postInvalidateOnAnimation();
             }
         }
@@ -1104,7 +1144,15 @@ public class LauncherActivity extends Activity {
                 setOnFocusChangeListener((v, f) -> {
                     if (!reorderMode) {
                         animate().cancel();
-                        animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(120).start();
+                        if (f) {
+                            // Subtle bounce on focus gain using overshoot
+                            animate().scaleX(1.12f).scaleY(1.12f)
+                                     .setDuration(200)
+                                     .setInterpolator(new android.view.animation.OvershootInterpolator(2.0f))
+                                     .start();
+                        } else {
+                            animate().scaleX(1f).scaleY(1f).setDuration(120).setInterpolator(null).start();
+                        }
                     }
                     invalidate();
                     if (f) {
@@ -1113,7 +1161,8 @@ public class LauncherActivity extends Activity {
                         // which runs after ensureVisible+repositionAttached — using post() here
                         // races with the scroll and produces a 1-frame left-shift artifact.
                         if (!reorderMode) {
-                            post(() -> { if (isFocused() && isAttachedToWindow()) positionRing(CellView.this); });
+                            // Use postOnAnimation for proper frame sync — avoids ring position race
+                            postOnAnimation(() -> { if (isFocused() && isAttachedToWindow()) positionRing(CellView.this); });
                             ensureVisible(boundIndex);
                         }
                     } else {
@@ -1444,7 +1493,7 @@ public class LauncherActivity extends Activity {
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
         boolean fill = needsFill(raw, sz);
-        int  csz  = Math.round(sz * (fill ? 0.80f : 1.08f));
+        int  csz  = Math.round(sz * (fill ? 0.78f : 1.0f));
         int  inset = (sz - csz) / 2;
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
@@ -1474,7 +1523,7 @@ public class LauncherActivity extends Activity {
                     if ((px[y * rowBytes + x * 4 + 3] & 0xFF) < 20) trans++;
                     total++;
                 }
-            return total > 0 && (float) trans / total >= 0.50f;
+            return total > 0 && (float) trans / total >= 0.35f;
         }
         int step = Math.max(1, (q3 - q1) / 10), total = 0, trans = 0;
         for (int y = q1; y < q3; y += step)
@@ -1482,7 +1531,7 @@ public class LauncherActivity extends Activity {
                 if (Color.alpha(src.getPixel(x, y)) < 20) trans++;
                 total++;
             }
-        return total > 0 && (float) trans / total >= 0.50f;
+        return total > 0 && (float) trans / total >= 0.35f;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -1728,8 +1777,8 @@ public class LauncherActivity extends Activity {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
         int cores = Runtime.getRuntime().availableProcessors();
-        iconExecutor = new ThreadPoolExecutor(Math.max(1, cores - 1), cores, 30L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(64), new ThreadPoolExecutor.DiscardPolicy());
+        iconExecutor = new ThreadPoolExecutor(Math.max(2, cores - 1), cores, 30L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(128), new ThreadPoolExecutor.DiscardOldestPolicy());
         wpExecutor  = Executors.newSingleThreadExecutor();
         appExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
@@ -1762,43 +1811,36 @@ public class LauncherActivity extends Activity {
     }
 
     static final class RingView extends View {
-        // Three GPU circle strokes on LAYER_TYPE_HARDWARE — no BlurMaskFilter needed.
-        // dark-outer separator → white ring → dark-inner separator
-        // Visible on any wallpaper/icon colour. Pixel-perfect anti-aliased edges.
-        private final Paint darkOuter = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint white     = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint darkInner = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private float cx, cy, wR, outerR, innerR;
+        // Thin white ring with soft drop-shadow — clean, modern look.
+        // Uses LAYER_TYPE_SOFTWARE so setShadowLayer() works correctly.
+        private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float cx, cy, ringRadius;
 
         private final float iconR;  // icon radius in px — ring hugs icon edge
 
         RingView(Context ctx, int strokePx, int iconPx) {
             super(ctx);
-            setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             this.iconR = iconPx / 2f;
-            float ws = strokePx * 1.5f;
-            float ds = strokePx * 0.7f;
-            darkOuter.setStyle(Paint.Style.STROKE); darkOuter.setColor(0xCC000000); darkOuter.setStrokeWidth(ds);
-            white.setStyle(Paint.Style.STROKE);     white.setColor(0xFFFFFFFF);     white.setStrokeWidth(ws);
-            darkInner.setStyle(Paint.Style.STROKE); darkInner.setColor(0xCC000000); darkInner.setStrokeWidth(ds);
+            float ws = strokePx * 0.65f;  // thin white stroke
+            ring.setStyle(Paint.Style.STROKE);
+            ring.setColor(0xFFFFFFFF);
+            ring.setStrokeWidth(ws);
+            // Soft shadow behind the ring for depth
+            ring.setShadowLayer(strokePx * 1.5f, 0, strokePx * 0.4f, 0x66000000);
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
             super.onSizeChanged(w, h, ow, oh);
             cx = w / 2f; cy = h / 2f;
-            float ws = white.getStrokeWidth(), ds = darkOuter.getStrokeWidth();
-            // White ring centre sits exactly at icon radius + half white stroke width
-            // so the ring inner edge is flush with the icon boundary.
-            wR     = iconR + ws / 2f;
-            outerR = wR + ws / 2f + ds / 2f;
-            innerR = wR - ws / 2f - ds / 2f;
+            float ws = ring.getStrokeWidth();
+            // Ring centre sits just outside the icon edge
+            ringRadius = iconR + ws / 2f + ws * 0.3f;
         }
 
         @Override protected void onDraw(Canvas c) {
-            if (wR <= 0) return;
-            c.drawCircle(cx, cy, outerR, darkOuter);
-            c.drawCircle(cx, cy, wR,     white);
-            c.drawCircle(cx, cy, innerR, darkInner);
+            if (ringRadius <= 0) return;
+            c.drawCircle(cx, cy, ringRadius, ring);
         }
     }
 }
