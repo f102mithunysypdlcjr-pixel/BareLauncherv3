@@ -7,6 +7,13 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# Common env to avoid repeating the same gradle JVM tuning
+# in every job. Daemons stay off so the runner reclaims resources
+# between gradle invocations.
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
+  GRADLE_VERSION: "8.14.1"
+
 jobs:
   # ──────────────────────────────────────────────────────────────────
   # Quality gate: lint + JVM unit tests. Runs on every PR. Independent
@@ -27,27 +34,30 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4.2.1
-        with:
-          gradle-version: "8.14.1"
+      # The runner ships with a recent Gradle, but we lock to GRADLE_VERSION
+      # so reproducibility doesn't drift with image rotations. Installing
+      # via SDKMAN avoids depending on gradle/actions/setup-gradle which
+      # was failing intermittently against codeload.github.com (one of
+      # the transitive infra problems that prompted this workflow split).
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          mkdir -p "$HOME/gradle" && unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Generate Gradle wrapper
         working-directory: LauncherV15
         run: |
-          gradle wrapper --gradle-version 8.14.1
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
 
       - name: JVM unit tests
         working-directory: LauncherV15
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
 
       - name: Android lint (debug)
         working-directory: LauncherV15
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
         run: ./gradlew :app:lintDebug --no-daemon --stacktrace
 
       - name: Upload lint report
@@ -91,10 +101,12 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4.2.1
-        with:
-          gradle-version: "8.14.1"
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          mkdir -p "$HOME/gradle" && unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Decode keystore
         run: |
@@ -103,13 +115,11 @@ jobs:
       - name: Generate Gradle wrapper
         working-directory: LauncherV15
         run: |
-          gradle wrapper --gradle-version 8.14.1
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
 
       - name: Build and sign release APK
         working-directory: LauncherV15
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
         run: |
           ./gradlew :app:assembleRelease \
             -Pandroid.injected.signing.store.file=/tmp/release.jks \
