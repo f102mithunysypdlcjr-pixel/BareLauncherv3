@@ -99,6 +99,12 @@ public class LauncherActivity extends Activity {
     // dispatchKeyEvent. Saved synchronously on every config change so the
     // user never has to confirm.
     private static final String KEY_KEYMAP     = "key_map";
+    // Persisted set of packages hidden from the home shelf. Comma-separated
+    // package names. The list is "hide from shelf only" — hidden packages
+    // are still visible in the keymap picker so they can be bound to a
+    // remote-key shortcut. Loaded once at startup into hiddenApps; saved
+    // synchronously on every toggle.
+    private static final String KEY_HIDDEN     = "hidden_apps";
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
@@ -323,6 +329,10 @@ public class LauncherActivity extends Activity {
     // BACK in PICKER cancels back to SLOTS, BACK in SLOTS closes the overlay.
     private static final int            KEYMAP_MODE_SLOTS  = 0;
     private static final int            KEYMAP_MODE_PICKER = 1;
+    // Hide-manager mode: the scale-up card swaps from the slot list to a
+    // vertical, OK-toggleable list of every installed app. UP/DOWN navigate,
+    // OK toggles the hidden flag, BACK returns to slot mode.
+    private static final int            KEYMAP_MODE_HIDE   = 2;
     private int                         keymapMode          = KEYMAP_MODE_SLOTS;
     private android.widget.LinearLayout keymapPickerView    = null;  // vertical wrapper for picker
     private TextView                    keymapPickerTitle   = null;  // "Pick app for Red"
@@ -334,6 +344,34 @@ public class LauncherActivity extends Activity {
     // Picker chip strip is rebuilt only when the underlying app list
     // changes — avoids re-allocating ~N TextViews on every overlay open.
     private int                         keymapPickerBuiltSize = -1;
+
+    // ── Hide-manager state ───────────────────────────────────────────────
+    // Set of packages the user has hidden from the home shelf. Read on
+    // every loadApps() to filter the shelf list; written on every toggle
+    // inside the hide-manager mode. Iteration order doesn't matter — we
+    // never list this set directly; we only do contains() checks.
+    private final ArraySet<String>      hiddenApps        = new ArraySet<>();
+    // Manage-hidden-apps slot row: a 7th, visually-offset row at the bottom
+    // of the slot column that transitions the card to HIDE mode. Held as a
+    // field so refreshKeymapRows can paint its selection state without
+    // hunting through child indices (key rows occupy 0..5, divider 6,
+    // manage row 7).
+    private android.widget.LinearLayout keymapManageRow   = null;
+    // Hide-manager sub-view (third child of the card, sibling of the slot
+    // list and picker — visibility is swapped between the three).
+    private android.widget.LinearLayout keymapHideView    = null;
+    private TextView                    keymapHideTitle   = null;
+    private android.widget.ScrollView   keymapHideScroll  = null;
+    private android.widget.LinearLayout keymapHideList    = null;  // vertical list of toggle rows
+    private int                         keymapHideIdx     = 0;
+    private int                         keymapHideLastIdx = -1;
+    // Built-row count cached so we only rebuild the toggle rows when the
+    // app list size actually changes between opens.
+    private int                         keymapHideBuiltSize = -1;
+    // Set true on every toggle; on overlay close we re-apply the filtered
+    // list to the shelf only if anything actually changed during the
+    // session (avoids a full shelf rebuild for read-only opens).
+    private boolean                     keymapHideDirty   = false;
 
     // Third toolbar icon (next to wifi + wallpaper) that opens the keymap
     // overlay. Held as a field so focus-chain handlers and onDestroy can
@@ -366,8 +404,10 @@ public class LauncherActivity extends Activity {
             pkgChangedWhilePaused = true;
             // Invalidate cached picker chip strip — its identities can no
             // longer be trusted to match the in-memory appList after a
-            // package install / remove / replace.
+            // package install / remove / replace. Same applies to the
+            // hide-manager toggle rows.
             keymapPickerBuiltSize = -1;
+            keymapHideBuiltSize   = -1;
             RecyclingShelfView s = shelf;
             if (s == null) return;
             s.removeCallbacks(pkgReloadRunnable);
@@ -428,6 +468,7 @@ public class LauncherActivity extends Activity {
         loadWallpaper();
         loadApps();
         loadKeyMap();
+        loadHiddenApps();
         registerPkgReceiver();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -521,6 +562,9 @@ public class LauncherActivity extends Activity {
         keymapOverlay = null; keymapColumn = null; keymapCard = null;
         keymapPickerView = null; keymapPickerTitle = null;
         keymapPickerHsv = null; keymapPickerStrip = null;
+        keymapManageRow = null;
+        keymapHideView = null; keymapHideTitle = null;
+        keymapHideScroll = null; keymapHideList = null;
         super.onDestroy();
     }
 
@@ -2291,6 +2335,11 @@ public class LauncherActivity extends Activity {
                             for (AppInfo old : appList)
                                 if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
                         }
+                        // GC stale hidden-set entries before any other consumer
+                        // sees the new appList — keeps the saved set in sync
+                        // with the actually-installed packages without a
+                        // separate scheduling step.
+                        pruneHiddenApps(fresh);
                         boolean changed = fresh.size() != appList.size();
                         if (!changed) {
                             for (int i = 0; i < fresh.size(); i++) {
@@ -2309,7 +2358,7 @@ public class LauncherActivity extends Activity {
                                     s.focusedIndex = Math.min(pendingScrollIdx, fresh.size() - 1);
                                     pendingScrollIdx = -1;
                                 }
-                                s.setApps(appList);
+                                applyShelfApps(s);
                             }
                         } else if (pendingScrollIdx >= 0) {
                             // App list unchanged but a pending index is waiting —
@@ -2418,6 +2467,72 @@ public class LauncherActivity extends Activity {
         }
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit().putString(KEY_KEYMAP, sb.toString()).apply();
+    }
+
+    /** Parse the persisted hidden-apps set once at startup. Comma-separated
+     *  package names; blank tokens silently skipped. Hidden-but-uninstalled
+     *  packages get garbage-collected the next time loadApps() runs (see
+     *  pruneHiddenApps). */
+    private void loadHiddenApps() {
+        hiddenApps.clear();
+        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HIDDEN, null);
+        if (raw == null || raw.isEmpty()) return;
+        int n = raw.length(), start = 0;
+        while (start < n) {
+            int comma = raw.indexOf(',', start);
+            int end   = comma < 0 ? n : comma;
+            if (end > start) hiddenApps.add(raw.substring(start, end));
+            start = end + 1;
+        }
+    }
+
+    /** Persist the in-memory hiddenApps set. Called synchronously from
+     *  every toggle in the hide-manager so the user never has to confirm. */
+    private void saveHiddenApps() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < hiddenApps.size(); i++) {
+            if (sb.length() > 0) sb.append(',');
+            sb.append(hiddenApps.valueAt(i));
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putString(KEY_HIDDEN, sb.toString()).apply();
+    }
+
+    /** Drop hidden-set entries whose package is no longer installed.
+     *  Called from loadApps once the fresh appList is known. Cheap: most
+     *  users hide ≤ a handful of packages, so the inner loop is tiny. */
+    private void pruneHiddenApps(List<AppInfo> fresh) {
+        if (hiddenApps.isEmpty()) return;
+        boolean changed = false;
+        for (int i = hiddenApps.size() - 1; i >= 0; i--) {
+            String pkg = hiddenApps.valueAt(i);
+            boolean found = false;
+            for (int j = 0, m = fresh.size(); j < m; j++) {
+                if (fresh.get(j).packageName.equals(pkg)) { found = true; break; }
+            }
+            if (!found) { hiddenApps.removeAt(i); changed = true; }
+        }
+        if (changed) saveHiddenApps();
+    }
+
+    /** Push the (filtered) shelf list to the RecyclingShelfView.
+     *  Single point of policy: the shelf shows appList minus hiddenApps;
+     *  every other consumer (keymap picker, hide manager) iterates the
+     *  master appList directly so hidden apps remain bindable to remote
+     *  keys and toggleable in the hide manager.
+     *
+     *  Fast-paths the empty-hidden-set case to a direct reference pass —
+     *  no allocation, no scan. The list is already sorted/ordered by
+     *  loadApps so we preserve order trivially by walking it once. */
+    private void applyShelfApps(RecyclingShelfView s) {
+        if (s == null) return;
+        if (hiddenApps.isEmpty()) { s.setApps(appList); return; }
+        List<AppInfo> visible = new ArrayList<>(appList.size());
+        for (int i = 0, n = appList.size(); i < n; i++) {
+            AppInfo a = appList.get(i);
+            if (!hiddenApps.contains(a.packageName)) visible.add(a);
+        }
+        s.setApps(visible);
     }
 
     private AppInfo findAppByPackage(String pkg) {
@@ -2643,6 +2758,51 @@ public class LauncherActivity extends Activity {
             col.addView(row, rlp);
         }
 
+        // ── Divider + manage-hidden-apps row ─────────────────────────────
+        // Hairline separator that visually groups the 6 mappable keys above
+        // and the navigation-style "manage hidden apps" entry below as two
+        // distinct categories. 1 dp tall, low-opacity white, with breathing
+        // room above/below so the slot pills don't touch it.
+        View kmDivider = new View(this);
+        kmDivider.setBackgroundColor(0x1AFFFFFF);
+        android.widget.LinearLayout.LayoutParams kmDivLp =
+                new android.widget.LinearLayout.LayoutParams(MATCH, Math.max(1, dp(1) / 2));
+        kmDivLp.topMargin    = dp(4);
+        kmDivLp.bottomMargin = dp(4);
+        kmDivLp.leftMargin   = dp(6);
+        kmDivLp.rightMargin  = dp(6);
+        col.addView(kmDivider, kmDivLp);
+
+        // Manage row mirrors the slot-row geometry (so the focus pill aligns
+        // perfectly when the manage entry is selected) but only carries a
+        // single label TextView — it's an action, not a binding.
+        android.widget.LinearLayout manage = new android.widget.LinearLayout(this);
+        manage.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        manage.setGravity(Gravity.CENTER_VERTICAL);
+        manage.setPadding(dp(10), dp(7), dp(10), dp(7));
+        android.graphics.drawable.GradientDrawable manageBg =
+                new android.graphics.drawable.GradientDrawable();
+        manageBg.setCornerRadius(dp(9));
+        manageBg.setColor(Color.TRANSPARENT);
+        manage.setBackground(manageBg);
+        TextView manageLabel = new TextView(this);
+        manageLabel.setText("Manage hidden apps");
+        // Idle colour is a bit dimmer than slot-row labels (0xCCFFFFFF →
+        // 0x99FFFFFF) so the row visibly reads as a different category
+        // even before the user notices the divider. Selected colour
+        // matches the slot rows for a consistent inverted-pill highlight.
+        manageLabel.setTextColor(0x99FFFFFF);
+        manageLabel.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        manageLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        manageLabel.setSingleLine(true);
+        manage.addView(manageLabel,
+                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+        android.widget.LinearLayout.LayoutParams manageLp =
+                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+        manageLp.bottomMargin = dp(2);
+        col.addView(manage, manageLp);
+        keymapManageRow = manage;
+
         // ── App picker view ─────────────────────────────────────
         android.widget.LinearLayout picker = new android.widget.LinearLayout(this);
         picker.setOrientation(android.widget.LinearLayout.VERTICAL);
@@ -2680,8 +2840,50 @@ public class LauncherActivity extends Activity {
         hsv.setClipToPadding(false);
         hsv.addView(strip, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
+        // ── Hide-manager view ───────────────────────────────────────
+        // Vertical, scrollable, OK-toggleable list of every installed app.
+        // Same card, same scale-up animation as the picker — only the
+        // sub-view's visibility changes. Rows are built lazily on first
+        // open and only rebuilt when the underlying app list size changes
+        // (see keymapHideBuiltSize), so reopens are O(1).
+        android.widget.LinearLayout hideView = new android.widget.LinearLayout(this);
+        hideView.setOrientation(android.widget.LinearLayout.VERTICAL);
+        hideView.setVisibility(View.GONE);
+        hideView.setClipChildren(false);
+        hideView.setClipToPadding(false);
+
+        TextView hideTitle = new TextView(this);
+        hideTitle.setText("Manage hidden apps");
+        hideTitle.setTextColor(0xFFEFEFEF);
+        hideTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        hideTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        hideTitle.setLetterSpacing(0.04f);
+        hideTitle.setPadding(dp(4), dp(2), dp(4), dp(8));
+        hideView.addView(hideTitle);
+
+        // Scroller capped to ~52% of the screen height so the card never
+        // outgrows the panel on big TVs. Width matches the picker's hsv
+        // for a consistent card footprint between modes.
+        android.widget.ScrollView hsv2 = new android.widget.ScrollView(this);
+        hsv2.setVerticalScrollBarEnabled(false);
+        hsv2.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        int hideW = Math.min(dp(540), Math.round(screenW * 0.52f));
+        if (hideW < dp(300)) hideW = dp(300);
+        int hideH = Math.min(dp(360), Math.round(screenH * 0.52f));
+        if (hideH < dp(200)) hideH = dp(200);
+        android.widget.LinearLayout.LayoutParams hsv2Lp =
+                new android.widget.LinearLayout.LayoutParams(hideW, hideH);
+        hideView.addView(hsv2, hsv2Lp);
+
+        android.widget.LinearLayout hideList = new android.widget.LinearLayout(this);
+        hideList.setOrientation(android.widget.LinearLayout.VERTICAL);
+        hideList.setPadding(dp(2), dp(2), dp(2), dp(2));
+        hsv2.addView(hideList,
+                new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
+
         card.addView(col);
         card.addView(picker);
+        card.addView(hideView);
 
         // Top-right anchored. Exact margins are computed in showKeymapOverlay
         // so the card sits immediately below the mapper toolbar button and
@@ -2698,6 +2900,10 @@ public class LauncherActivity extends Activity {
         keymapPickerTitle = pickerTitle;
         keymapPickerHsv   = hsv;
         keymapPickerStrip = strip;
+        keymapHideView    = hideView;
+        keymapHideTitle   = hideTitle;
+        keymapHideScroll  = hsv2;
+        keymapHideList    = hideList;
     }
 
     private void showKeymapOverlay() {
@@ -2712,6 +2918,7 @@ public class LauncherActivity extends Activity {
         keymapMode        = KEYMAP_MODE_SLOTS;
         keymapSelectedRow = 0;
         if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
+        if (keymapHideView   != null) keymapHideView  .setVisibility(View.GONE);
         if (keymapColumn     != null) keymapColumn    .setVisibility(View.VISIBLE);
         refreshKeymapRows();
 
@@ -2775,7 +2982,15 @@ public class LauncherActivity extends Activity {
         // while picker mode was still cached as the active sub-view).
         keymapMode = KEYMAP_MODE_SLOTS;
         if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
+        if (keymapHideView   != null) keymapHideView  .setVisibility(View.GONE);
         if (keymapColumn     != null) keymapColumn    .setVisibility(View.VISIBLE);
+        // Apply any pending hide toggles to the shelf — done exactly once
+        // per overlay session, so a long editing session of N toggles
+        // triggers exactly one shelf rebuild instead of N.
+        if (keymapHideDirty) {
+            keymapHideDirty = false;
+            applyShelfApps(shelf);
+        }
         if (card != null) {
             card.animate().cancel();
             card.animate()
@@ -2814,7 +3029,12 @@ public class LauncherActivity extends Activity {
      *
      *  Selection language: bright frosted-white pill + dark text, mirroring
      *  the toolbar buttons' "idle dark / focused white-frosted" pattern.
-     *  This keeps a single visual vocabulary across the whole launcher. */
+     *  This keeps a single visual vocabulary across the whole launcher.
+     *
+     *  The manage-hidden-apps row is treated as the (rows)th selectable
+     *  entry — it lives below the key rows and a hairline divider, and
+     *  shares the same selection pill/text-inversion treatment so the
+     *  highlight reads consistently across both categories. */
     private void refreshKeymapRows() {
         android.widget.LinearLayout col = keymapColumn;
         if (col == null) return;
@@ -2862,21 +3082,43 @@ public class LauncherActivity extends Activity {
                         .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
             }
         }
+
+        // Paint the manage row separately — it's a different category
+        // (an action, not a key binding) so the styling pipeline above
+        // doesn't apply, but the selection language must match.
+        android.widget.LinearLayout mr = keymapManageRow;
+        if (mr != null) {
+            boolean sel = (keymapSelectedRow == rows);
+            View first = mr.getChildAt(0);
+            if (first instanceof TextView) {
+                ((TextView) first).setTextColor(sel ? 0xFF111114 : 0x99FFFFFF);
+            }
+            android.graphics.drawable.Drawable mrBg = mr.getBackground();
+            if (mrBg instanceof android.graphics.drawable.GradientDrawable) {
+                ((android.graphics.drawable.GradientDrawable) mrBg)
+                        .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
+            }
+        }
+
         // Equalise row widths to the widest row so the menu is exactly as
         // wide as it needs to be (no dead space) AND the selection pill
-        // aligns across all rows. Cheap: 6 measure() passes on tiny rows.
+        // aligns across all rows. Cheap: 7 measure() passes on tiny rows.
         equalizeKeymapRowWidths(col, rows);
     }
 
-    /** Measure every slot row and snap them all to the widest measured width.
-     *  Called from refreshKeymapRows() after every binding/text change so
-     *  the menu auto-fits the longest app label currently shown. */
+    /** Measure every selectable row in the slot column and snap them all to
+     *  the widest measured width. Iterates every LinearLayout child (the
+     *  6 key rows + the manage row) and skips non-LinearLayout children
+     *  like the hairline divider — so the divider is never counted as a
+     *  measurable row. Called from refreshKeymapRows() after every
+     *  binding/text change so the menu auto-fits the longest app label. */
     private void equalizeKeymapRowWidths(android.widget.LinearLayout col, int rows) {
         int spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        int n = col.getChildCount();
         int max = 0;
-        for (int i = 0; i < rows; i++) {
+        for (int i = 0; i < n; i++) {
             View child = col.getChildAt(i);
-            if (child == null) continue;
+            if (!(child instanceof android.widget.LinearLayout)) continue;
             // Force measurement against current content. We pass UNSPECIFIED
             // on width so each row reports its natural intrinsic width.
             ViewGroup.LayoutParams clp = child.getLayoutParams();
@@ -2894,9 +3136,9 @@ public class LauncherActivity extends Activity {
             }
         }
         if (max <= 0) return;
-        for (int i = 0; i < rows; i++) {
+        for (int i = 0; i < n; i++) {
             View child = col.getChildAt(i);
-            if (child == null) continue;
+            if (!(child instanceof android.widget.LinearLayout)) continue;
             ViewGroup.LayoutParams clp = child.getLayoutParams();
             if (clp == null || clp.width == max) continue;
             clp.width = max;
@@ -3145,11 +3387,13 @@ public class LauncherActivity extends Activity {
         if (ev.getAction() != KeyEvent.ACTION_DOWN) return true;  // eat KEY_UP for handled keys
         int kc = ev.getKeyCode();
         if (keymapMode == KEYMAP_MODE_PICKER) return handleKeymapPickerKey(kc);
+        if (keymapMode == KEYMAP_MODE_HIDE)   return handleKeymapHideKey(kc);
         return handleKeymapSlotsKey(kc);
     }
 
     private boolean handleKeymapSlotsKey(int kc) {
-        int rows = SHORTCUT_LABELS.length;
+        // 6 key bindings + 1 manage-hidden-apps action row.
+        int rows = SHORTCUT_LABELS.length + 1;
         switch (kc) {
             case KeyEvent.KEYCODE_DPAD_UP:
                 keymapSelectedRow = (keymapSelectedRow - 1 + rows) % rows;
@@ -3160,7 +3404,9 @@ public class LauncherActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
-                enterAppPicker(keymapSelectedRow); return true;
+                if (keymapSelectedRow == SHORTCUT_LABELS.length) enterHideManager();
+                else                                            enterAppPicker(keymapSelectedRow);
+                return true;
             case KeyEvent.KEYCODE_BACK:
             case KeyEvent.KEYCODE_ESCAPE:
                 hideKeymapOverlay(); return true;
@@ -3186,6 +3432,263 @@ public class LauncherActivity extends Activity {
             case KeyEvent.KEYCODE_BACK:
             case KeyEvent.KEYCODE_ESCAPE:
                 exitAppPicker(); return true;
+        }
+        // Swallow everything else — see handleKeymapOverlayKey javadoc.
+        return true;
+    }
+
+    // ── Hide-manager mode ────────────────────────────────────────────────
+    //
+    // Vertical, OK-toggleable list of every installed app inside the same
+    // card that hosts the slot list and picker. Rows are built once per
+    // appList-size change (see keymapHideBuiltSize) and reused across
+    // opens. Toggling repaints only the check mark of the affected row;
+    // the shelf is re-filtered exactly once when the overlay is closed
+    // (see hideKeymapOverlay) so a heavy session of multiple toggles
+    // doesn't trigger N shelf rebuilds.
+
+    /** Enter hide mode — swap the slot list for the hide list, rebuild
+     *  rows on first open / after a package change, and pre-select the
+     *  first row. Mirrors enterAppPicker's structure so the UX feels
+     *  identical between the two card sub-modes. */
+    private void enterHideManager() {
+        if (keymapColumn == null || keymapHideView == null) return;
+        if (keymapHideBuiltSize != appList.size()) {
+            buildHideRows();
+            keymapHideBuiltSize = appList.size();
+        }
+        int n = appList.size();
+        keymapHideIdx     = n > 0 ? 0 : -1;
+        keymapHideLastIdx = -1;       // force a full repaint on first refresh
+        keymapMode        = KEYMAP_MODE_HIDE;
+        keymapColumn   .setVisibility(View.GONE);
+        if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
+        keymapHideView .setVisibility(View.VISIBLE);
+        refreshHideList();
+        // Initial scroll happens after layout — post() so getTop() of the
+        // selected row is non-zero.
+        final android.widget.ScrollView sv = keymapHideScroll;
+        if (sv != null) sv.post(this::scrollHideToSelection);
+    }
+
+    /** Cancel the hide manager and return to slot mode. The shelf is
+     *  re-filtered only on overlay close (see hideKeymapOverlay) so
+     *  exiting hide mode without closing the overlay leaves the shelf
+     *  alone — cheap, and avoids a flicker behind the dim. */
+    private void exitHideManager() {
+        keymapMode = KEYMAP_MODE_SLOTS;
+        if (keymapHideView != null) keymapHideView.setVisibility(View.GONE);
+        if (keymapColumn   != null) keymapColumn  .setVisibility(View.VISIBLE);
+        // Land focus back on the manage-row entry the user came from so
+        // a reopen of the manager (or another action) is one keypress away.
+        keymapSelectedRow = SHORTCUT_LABELS.length;
+        refreshKeymapRows();
+    }
+
+    /** Rebuild the toggle rows from the current appList. Called only when
+     *  the app list size has changed since the last build. Each row is a
+     *  small horizontal LinearLayout with [icon][label][check]. The check
+     *  is a single Unicode ✓ TextView whose colour we toggle between
+     *  bright green (hidden) and transparent (visible) — zero drawables,
+     *  zero state branching at paint time. */
+    private void buildHideRows() {
+        android.widget.LinearLayout list = keymapHideList;
+        if (list == null) return;
+        list.removeAllViews();
+        for (int i = 0; i < appList.size(); i++) {
+            AppInfo a = appList.get(i);
+            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(10), dp(7), dp(10), dp(7));
+            android.graphics.drawable.GradientDrawable rbg =
+                    new android.graphics.drawable.GradientDrawable();
+            rbg.setCornerRadius(dp(9));
+            rbg.setColor(Color.TRANSPARENT);
+            row.setBackground(rbg);
+
+            // [0] app icon (uses the same iconCache the shelf uses; if not
+            //     yet resident we leave the slot empty — no spinner, no
+            //     placeholder, just the next-frame paint).
+            ImageView iv = new ImageView(this);
+            Bitmap bmp = (iconCache != null) ? iconCache.get(a.packageName) : null;
+            if (bmp != null) iv.setImageBitmap(bmp);
+            android.widget.LinearLayout.LayoutParams ivLp =
+                    new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
+            ivLp.setMarginEnd(dp(10));
+            row.addView(iv, ivLp);
+
+            // [1] app label — flex grows to fill the remaining width so the
+            //     check mark stays right-aligned across all rows.
+            TextView name = new TextView(this);
+            name.setText(a.label);
+            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+            name.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            android.widget.LinearLayout.LayoutParams nameLp =
+                    new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
+            nameLp.setMarginEnd(dp(8));
+            row.addView(name, nameLp);
+
+            // [2] hidden-state check mark (Unicode ✓). Always present so
+            //     row width is stable; colour-keyed to encode state with
+            //     zero drawables and zero allocations.
+            TextView check = new TextView(this);
+            check.setText("\u2713");
+            check.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
+            check.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+            row.addView(check,
+                    new android.widget.LinearLayout.LayoutParams(dp(18), WRAP));
+
+            android.widget.LinearLayout.LayoutParams rowLp =
+                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
+            rowLp.bottomMargin = dp(1);
+            list.addView(row, rowLp);
+        }
+    }
+
+    /** Repaint the hide list to reflect the current selection + hidden
+     *  state. Same two-mode pattern as refreshKeymapPicker:
+     *
+     *    • prev < 0 → first paint after entering hide mode. Full sweep:
+     *      paint every row's check + selection state. This also covers
+     *      the case where buildHideRows just rebuilt the rows (their
+     *      check colours start at default and need a sync).
+     *    • prev ≥ 0 → in-session navigation. Only the two rows that
+     *      changed selection are repainted. The toggled row's check is
+     *      already updated separately by toggleSelectedHide. */
+    private void refreshHideList() {
+        android.widget.LinearLayout list = keymapHideList;
+        if (list == null) return;
+        int n = list.getChildCount();
+        if (n == 0) return;
+        int prev = keymapHideLastIdx;
+        int curr = keymapHideIdx;
+        if (prev < 0) {
+            // Full sweep — paint every row's check + selection state.
+            for (int i = 0; i < n; i++) {
+                paintHideRow(list.getChildAt(i),
+                        i < appList.size() && hiddenApps.contains(appList.get(i).packageName),
+                        i == curr);
+            }
+        } else if (prev != curr) {
+            if (prev < n) {
+                paintHideRow(list.getChildAt(prev),
+                        prev < appList.size() && hiddenApps.contains(appList.get(prev).packageName),
+                        false);
+            }
+            if (curr >= 0 && curr < n) {
+                paintHideRow(list.getChildAt(curr),
+                        curr < appList.size() && hiddenApps.contains(appList.get(curr).packageName),
+                        true);
+            }
+        }
+        keymapHideLastIdx = curr;
+        scrollHideToSelection();
+    }
+
+    /** Single source of truth for a hide-row's visual state. Three signals:
+     *    • selected → bright frosted-white pill + dark text
+     *    • idle     → transparent pill + light text
+     *    • hidden   → bright green check; on the selected row we shift to
+     *                 a darker green so it stays readable against the white
+     *                 pill (otherwise the green-on-white contrast is poor).
+     *    • visible  → transparent check (same Unicode glyph, alpha = 0). */
+    private void paintHideRow(View row, boolean hidden, boolean sel) {
+        if (!(row instanceof android.widget.LinearLayout)) return;
+        android.widget.LinearLayout ll = (android.widget.LinearLayout) row;
+        android.graphics.drawable.Drawable bg = ll.getBackground();
+        if (bg instanceof android.graphics.drawable.GradientDrawable) {
+            ((android.graphics.drawable.GradientDrawable) bg)
+                    .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
+        }
+        View nameV = ll.getChildAt(1);
+        if (nameV instanceof TextView) {
+            ((TextView) nameV).setTextColor(sel ? 0xFF111114 : 0xC0FFFFFF);
+        }
+        View checkV = ll.getChildAt(2);
+        if (checkV instanceof TextView) {
+            int color;
+            if (hidden) color = sel ? 0xFF1A7F4F : 0xFF30A46C;  // green
+            else        color = 0x00000000;                     // transparent
+            ((TextView) checkV).setTextColor(color);
+        }
+    }
+
+    /** Toggle the hidden flag for the currently-selected row. Saves the
+     *  pref synchronously, repaints just the check mark of the affected
+     *  row (no full sweep), and marks the shelf as dirty so it gets
+     *  re-filtered when the overlay closes. */
+    private void toggleSelectedHide() {
+        android.widget.LinearLayout list = keymapHideList;
+        if (list == null) return;
+        int idx = keymapHideIdx;
+        if (idx < 0 || idx >= appList.size()) return;
+        String pkg = appList.get(idx).packageName;
+        boolean nowHidden;
+        if (hiddenApps.contains(pkg)) { hiddenApps.remove(pkg); nowHidden = false; }
+        else                          { hiddenApps.add(pkg);    nowHidden = true;  }
+        saveHiddenApps();
+        keymapHideDirty = true;
+        // Cheap repaint: only the affected row, and only its check colour
+        // (selection / label colour didn't change, so we don't even need
+        // the full paintHideRow path).
+        if (idx < list.getChildCount()) {
+            View row = list.getChildAt(idx);
+            if (row instanceof android.widget.LinearLayout) {
+                View checkV = ((android.widget.LinearLayout) row).getChildAt(2);
+                if (checkV instanceof TextView) {
+                    ((TextView) checkV).setTextColor(
+                            nowHidden ? 0xFF1A7F4F : 0x00000000);
+                }
+            }
+        }
+    }
+
+    /** Auto-scroll the vertical list so the selected row stays in view
+     *  with a small margin. */
+    private void scrollHideToSelection() {
+        android.widget.ScrollView sv = keymapHideScroll;
+        android.widget.LinearLayout list = keymapHideList;
+        if (sv == null || list == null) return;
+        if (keymapHideIdx < 0 || keymapHideIdx >= list.getChildCount()) return;
+        View row = list.getChildAt(keymapHideIdx);
+        if (row == null) return;
+        if (row.getHeight() == 0) {
+            sv.post(this::scrollHideToSelection);
+            return;
+        }
+        int rowTop    = row.getTop();
+        int rowBottom = row.getBottom();
+        int viewTop   = sv.getScrollY();
+        int viewH     = sv.getHeight();
+        int viewBot   = viewTop + viewH;
+        int margin    = dp(28);
+        if (rowTop < viewTop + margin) {
+            sv.smoothScrollTo(0, Math.max(0, rowTop - margin));
+        } else if (rowBottom > viewBot - margin) {
+            sv.smoothScrollTo(0, rowBottom - viewH + margin);
+        }
+    }
+
+    private boolean handleKeymapHideKey(int kc) {
+        android.widget.LinearLayout list = keymapHideList;
+        int n = list == null ? 0 : list.getChildCount();
+        switch (kc) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (n > 0) keymapHideIdx = Math.max(0, keymapHideIdx - 1);
+                refreshHideList(); return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (n > 0) keymapHideIdx = Math.min(n - 1, keymapHideIdx + 1);
+                refreshHideList(); return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+                toggleSelectedHide(); return true;
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+                exitHideManager(); return true;
         }
         // Swallow everything else — see handleKeymapOverlayKey javadoc.
         return true;
