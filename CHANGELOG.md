@@ -5,6 +5,91 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+# Changelog
+
+All notable changes to BareLauncher land here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.1.1] — 2026-05-26
+
+Public-release polish pass. Bug fixes triaged from a focused audit of
+`LauncherActivity` plus a license change to reserve future commercial
+edition rights.
+
+### Fixed
+
+- **Volume / power / media keys now pass through while the keymap
+  overlay is open.** `handleKeymapOverlayKey` previously returned `true`
+  for every keycode, swallowing `KEYCODE_VOLUME_*`, `KEYCODE_POWER`,
+  `KEYCODE_HOME`, and the media-transport keys. Users could not adjust
+  volume or sleep the device while configuring shortcuts. New
+  `isLetThroughKey` allow-list lets these keys reach the platform via
+  `super.dispatchKeyEvent`.
+- **Predictive-back (Android 13+) now closes the keymap overlay and the
+  context menu.** The previous `OnBackInvokedCallback` only handled
+  reorder mode; on devices that route BACK through the platform
+  dispatcher (instead of `dispatchKeyEvent`) the overlay was un-closable
+  by gesture. The callback now mirrors the legacy back-priority chain:
+  picker → hide-manager → slot list → reorder mode → no-op.
+- **Stranded `appsLoading=true` when an exception fires inside
+  `loadApps`.** `queryApps` and `applyStoredOrder` are now wrapped in a
+  `try / catch (Throwable)` that always resets the flag. A single
+  PackageManager binder fault could previously freeze the shelf-refresh
+  path for the lifetime of the activity (every package install /
+  uninstall broadcast became a silent no-op).
+- **Null `queryIntentActivities` result handled.** `addApps` now
+  early-returns on `null`. `PackageManager.queryIntentActivities` is
+  documented non-null but several real-world ROMs (Fire TV in
+  particular) have been observed returning `null` after a system
+  process restart or a SELinux denial.
+- **Toast leak on activity destroy.** `currentToast.cancel()` is now
+  called in `onDestroy`. A long toast in flight when the activity tears
+  down used to keep the activity context alive for ~3.5 s on older
+  ROMs.
+- **`globalFocusListener` no longer registers twice on rapid
+  `onResume → onResume` paths.** Same dedupe pattern that
+  `focusRestoreListener` already uses.
+- **`OnBackInvokedCallback` is now unregistered on destroy.** Held as a
+  field so a partial-recreate path cannot leave a stale callback
+  registered against the prior activity instance.
+- **`loadApps` runOnUiThread lambda has a `destroyed` guard.** Stops
+  spurious `pruneHiddenApps` SharedPreferences writes after the
+  activity is gone.
+
+### Performance
+
+- **Shelf scroll avoids a full `View.layout()` per attached cell every
+  frame.** `repositionAttached` now uses `offsetLeftAndRight` for
+  position-only updates and only falls back to `cv.layout(...)` when the
+  cell width / height drifted (defensive — should never happen with the
+  recycler). `View.layout` triggers `onSizeChanged` plumbing and a
+  `requestLayout` chain even when sizes are unchanged; skipping it
+  visibly reduces dropped frames during fast flings on cheap TV ROMs.
+- **`dispatchKeyEvent` short-circuits the `keyMap.get` lookup when no
+  shortcuts are bound.** A 1-line guard avoids a `SparseArray.get` on
+  the system-wide UI key path during gameplay-style remote use.
+
+### Changed
+
+- **License: MIT → PolyForm Noncommercial 1.0.0.** Source remains
+  available; non-commercial use (personal, hobby, education, charity)
+  is unchanged. Commercial use (reselling, bundling into a paid product,
+  shipping pre-installed on hardware sold for profit, paid service
+  integration) now requires a separate written licence from the
+  copyright holder. See [`NOTICE.md`](./NOTICE.md) for details and
+  commercial-licensing enquiries.
+- **`README.md`** rewritten with practical install / build / contribute
+  / license sections instead of marketing prose only.
+- **`versionCode` 2 → 3, `versionName` 1.1.0 → 1.1.1.**
+
+### Added
+
+- **`NOTICE.md`** — explains the licensing posture, contribution terms
+  (contributors agree to allow commercial relicensing by the maintainer),
+  and the trademark carve-out for "BareLauncher" name and icon.
+
 ## [1.1.0] — 2026-05-26
 
 First public-release-ready cut. Production-readiness pass: SDK 36, real
@@ -95,8 +180,8 @@ sink, and a hardened release pipeline.
 
 - **Public-release polish at the repository root.** Added `README.md`
   (sideload install / make-default / build-from-source / release
-  process) and `LICENSE` (MIT) so the project is legally and
-  practically distributable.
+  process) and `LICENSE` (MIT — superseded by PolyForm Noncommercial in
+  1.1.1) so the project is legally and practically distributable.
 - **ABI cap** for the shipped APK: `armeabi-v7a` + `arm64-v8a`.
   The launcher is pure Java with zero native dependencies, so the
   produced APK has no `lib/` folder and a single binary already
