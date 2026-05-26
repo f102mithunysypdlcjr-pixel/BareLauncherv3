@@ -280,23 +280,27 @@ public class LauncherActivity extends Activity {
 
     // ── Remote-key → app shortcut state ──────────────────────────────────
     // Curated list of TV-remote keycodes that are safe to remap. Order = row
-    // order in the config overlay. The four colour keys plus three named
-    // shortcut keys cover every TV remote we ship for; KEYCODE_MENU is
-    // intentionally included even though some remotes also surface it as a
-    // launcher-affordance — we trade that affordance for user-controlled
-    // remapping (the launcher itself does not consume MENU).
+    // order in the config overlay. The four colour keys cover every TV remote
+    // we ship for; KEYCODE_MENU is included even though some remotes also
+    // surface it as a launcher-affordance — we trade that affordance for
+    // user-controlled remapping (the launcher itself does not consume MENU).
+    // KEYCODE_CAPTIONS is the standard subtitle / CC button on Android TV.
+    // GUIDE and SEARCH were removed at user request — neither is widely
+    // useful on the TV side and removing them keeps the overlay compact.
     private static final int[]    SHORTCUT_KEYCODES = {
             KeyEvent.KEYCODE_PROG_RED,
             KeyEvent.KEYCODE_PROG_GREEN,
             KeyEvent.KEYCODE_PROG_YELLOW,
             KeyEvent.KEYCODE_PROG_BLUE,
             KeyEvent.KEYCODE_MENU,
-            KeyEvent.KEYCODE_GUIDE,
-            KeyEvent.KEYCODE_SEARCH,
+            KeyEvent.KEYCODE_CAPTIONS,
     };
     private static final String[] SHORTCUT_LABELS   = {
-            "Red",   "Green", "Yellow", "Blue",
-            "Menu",  "Guide", "Search"
+            "Red", "Green", "Yellow", "Blue", "Menu", "Subtitle",
+    };
+    // Color tag drawn next to each row label. ARGB. 0 = no tag (Menu/Subtitle).
+    private static final int[]    SHORTCUT_TAGS     = {
+            0xFFE5484D, 0xFF30A46C, 0xFFF5C518, 0xFF3E63DD, 0, 0,
     };
     // Keyed by raw keycode → package name. SparseArray fits the small,
     // dense-int-key access pattern with zero autoboxing on every key press.
@@ -321,7 +325,11 @@ public class LauncherActivity extends Activity {
     private android.widget.HorizontalScrollView keymapPickerHsv = null;
     private android.widget.LinearLayout keymapPickerStrip   = null;  // horizontal app chips
     private int                         keymapPickerIdx     = 0;     // 0 = "None" sentinel, 1..N = appList[i-1]
+    private int                         keymapPickerLastIdx = -1;    // tracks last-painted selection so refresh only animates the two chips that changed
     private int                         keymapPickerSlotRow = 0;     // which slot row triggered the picker
+    // Picker chip strip is rebuilt only when the underlying app list
+    // changes — avoids re-allocating ~N TextViews on every overlay open.
+    private int                         keymapPickerBuiltSize = -1;
 
     // Third toolbar icon (next to wifi + wallpaper) that opens the keymap
     // overlay. Held as a field so focus-chain handlers and onDestroy can
@@ -352,6 +360,10 @@ public class LauncherActivity extends Activity {
                 }
             }
             pkgChangedWhilePaused = true;
+            // Invalidate cached picker chip strip — its identities can no
+            // longer be trusted to match the in-memory appList after a
+            // package install / remove / replace.
+            keymapPickerBuiltSize = -1;
             RecyclingShelfView s = shelf;
             if (s == null) return;
             s.removeCallbacks(pkgReloadRunnable);
@@ -2299,11 +2311,16 @@ public class LauncherActivity extends Activity {
     /** Parse the persisted keymap once at startup. Format: "kc=pkg,kc=pkg".
      *  Malformed entries are silently dropped (forward-compat: a future
      *  version could write extra fields after the package name and an old
-     *  build will still recover the keycode mapping). */
+     *  build will still recover the keycode mapping).
+     *  Bindings for keycodes no longer in {@link #SHORTCUT_KEYCODES} are
+     *  also dropped so removed slots (Guide/Search) auto-clean on next
+     *  cold-start. If anything was filtered, we rewrite prefs immediately
+     *  so the on-disk format converges to the new shape. */
     private void loadKeyMap() {
         keyMap.clear();
         String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_KEYMAP, null);
         if (raw == null || raw.isEmpty()) return;
+        boolean dropped = false;
         int n = raw.length(), start = 0;
         while (start < n) {
             int comma = raw.indexOf(',', start);
@@ -2313,11 +2330,20 @@ public class LauncherActivity extends Activity {
                 try {
                     int kc = Integer.parseInt(raw, start, eq, 10);
                     String pkg = raw.substring(eq + 1, end);
-                    if (!pkg.isEmpty()) keyMap.put(kc, pkg);
-                } catch (NumberFormatException ignored) {}
+                    if (!pkg.isEmpty()) {
+                        if (isCuratedShortcutKey(kc)) keyMap.put(kc, pkg);
+                        else                          dropped = true;
+                    }
+                } catch (NumberFormatException ignored) { dropped = true; }
             }
             start = end + 1;
         }
+        if (dropped) saveKeyMap();
+    }
+
+    private static boolean isCuratedShortcutKey(int kc) {
+        for (int k : SHORTCUT_KEYCODES) if (k == kc) return true;
+        return false;
     }
 
     /** Write the keymap back to SharedPreferences. Called on every
@@ -2416,8 +2442,13 @@ public class LauncherActivity extends Activity {
     // built programmatically and reused across opens.
 
     /** Build the overlay lazily on first open. Reused for every subsequent
-     *  open — keeping it inflated is cheap (one FrameLayout + ~20 TextViews
-     *  + a HorizontalScrollView) and avoids the inflate cost on every reopen. */
+     *  open — keeping it inflated is cheap (one FrameLayout + ~20 child views)
+     *  and avoids the inflate cost on every reopen.
+     *
+     *  Visual style: compact centred card, soft 18 dp corners, dim
+     *  translucent backdrop, two-column slot rows (label · value) with a
+     *  subtle rounded highlight on the focused row. Apple-TV-ish without
+     *  the cost of a real blur. */
     private void buildKeymapOverlay() {
         FrameLayout r = root; if (r == null) return;
         FrameLayout ov = new FrameLayout(this) {
@@ -2433,92 +2464,150 @@ public class LauncherActivity extends Activity {
         ov.setFocusableInTouchMode(true);
         ov.setVisibility(View.GONE);
 
-        // Centred card holds both sub-views. Sized to wrap-content so the
-        // card grows when the picker (which is wider) is shown.
+        // Centred card holds both sub-views. Wrap-content height; slot list
+        // and picker swap visibility inside it (no second card needed).
         android.widget.LinearLayout card = new android.widget.LinearLayout(this);
         card.setOrientation(android.widget.LinearLayout.VERTICAL);
         android.graphics.drawable.GradientDrawable cardBg =
                 new android.graphics.drawable.GradientDrawable();
-        cardBg.setColor(0xEE111111);
-        cardBg.setCornerRadius(dp(14));
+        cardBg.setColor(0xE61C1C1F);             // soft warm-black, 90% opacity
+        cardBg.setCornerRadius(dp(18));
+        cardBg.setStroke(1, 0x22FFFFFF);         // 1px hairline rim
         card.setBackground(cardBg);
-        card.setPadding(dp(22), dp(20), dp(22), dp(18));
+        card.setPadding(dp(20), dp(18), dp(20), dp(16));
+        card.setElevation(dp(8));
 
         // ── Slot list view (default) ──────────────────────────────
         android.widget.LinearLayout col = new android.widget.LinearLayout(this);
         col.setOrientation(android.widget.LinearLayout.VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("Remote Shortcuts");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setText("Remote Buttons");
+        title.setTextColor(0xFFEFEFEF);
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setLetterSpacing(0.02f);
-        title.setPadding(0, 0, 0, dp(10));
+        title.setLetterSpacing(0.04f);
+        title.setPadding(dp(4), 0, dp(4), dp(10));
         col.addView(title);
 
-        // One TextView per slot — cheaper than per-row LinearLayout, and
-        // the two-column look is achieved with a fixed-width pad.
+        // Each row is a tiny horizontal LinearLayout: [color tag][name] [icon][app]
+        // Two columns with a flex spacer in between — proper layout, no
+        // hand-padded ASCII-art. Selected row gets a 0x22 white rounded fill.
+        final int rowW = dp(360);
         for (int i = 0; i < SHORTCUT_LABELS.length; i++) {
-            TextView row = new TextView(this);
-            row.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
-            row.setPadding(dp(12), dp(9), dp(12), dp(9));
-            row.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-            row.setTextColor(0xCCFFFFFF);
-            row.setSingleLine(true);
-            row.setEllipsize(TextUtils.TruncateAt.END);
+            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(12), dp(8), dp(12), dp(8));
+            android.graphics.drawable.GradientDrawable rowBg =
+                    new android.graphics.drawable.GradientDrawable();
+            rowBg.setCornerRadius(dp(10));
+            rowBg.setColor(Color.TRANSPARENT);
+            row.setBackground(rowBg);
+
+            // [0] color tag (small dot for the four colour keys, hidden otherwise)
+            View tag = new View(this);
+            android.graphics.drawable.GradientDrawable tagBg =
+                    new android.graphics.drawable.GradientDrawable();
+            tagBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            tagBg.setColor(SHORTCUT_TAGS[i] == 0 ? Color.TRANSPARENT : SHORTCUT_TAGS[i]);
+            tag.setBackground(tagBg);
+            android.widget.LinearLayout.LayoutParams tagLp =
+                    new android.widget.LinearLayout.LayoutParams(dp(8), dp(8));
+            tagLp.setMarginEnd(dp(10));
+            row.addView(tag, tagLp);
+
+            // [1] button name (fixed-width left column)
+            TextView name = new TextView(this);
+            name.setText(SHORTCUT_LABELS[i]);
+            name.setTextColor(0xCCFFFFFF);
+            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+            name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            name.setSingleLine(true);
+            android.widget.LinearLayout.LayoutParams nameLp =
+                    new android.widget.LinearLayout.LayoutParams(dp(80), WRAP);
+            row.addView(name, nameLp);
+
+            // [2] flex spacer
+            View spacer = new View(this);
+            row.addView(spacer, new android.widget.LinearLayout.LayoutParams(0, 1, 1f));
+
+            // [3] app icon (visible only when assigned and cached)
+            ImageView icon = new ImageView(this);
+            icon.setVisibility(View.GONE);
+            android.widget.LinearLayout.LayoutParams iconLp =
+                    new android.widget.LinearLayout.LayoutParams(dp(22), dp(22));
+            iconLp.setMarginEnd(dp(8));
+            row.addView(icon, iconLp);
+
+            // [4] right column: app label or "Not assigned"
+            TextView val = new TextView(this);
+            val.setTextColor(0x88FFFFFF);
+            val.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+            val.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            val.setSingleLine(true);
+            val.setEllipsize(TextUtils.TruncateAt.END);
+            val.setMaxWidth(dp(180));
+            val.setGravity(Gravity.END);
+            row.addView(val, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+
             android.widget.LinearLayout.LayoutParams rlp =
-                    new android.widget.LinearLayout.LayoutParams(dp(380), WRAP);
+                    new android.widget.LinearLayout.LayoutParams(rowW, WRAP);
             rlp.bottomMargin = dp(2);
             col.addView(row, rlp);
         }
 
         TextView slotsHint = new TextView(this);
-        slotsHint.setText("\u2191\u2193 select  \u00B7  OK to assign  \u00B7  Back to close");
-        slotsHint.setTextColor(0x88FFFFFF);
-        slotsHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
-        slotsHint.setPadding(0, dp(12), 0, 0);
+        slotsHint.setText("OK to assign  \u00B7  Back to close");
+        slotsHint.setTextColor(0x66FFFFFF);
+        slotsHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+        slotsHint.setLetterSpacing(0.05f);
+        slotsHint.setPadding(0, dp(10), 0, dp(2));
         slotsHint.setGravity(Gravity.CENTER);
         col.addView(slotsHint);
 
-        // ── App picker view (entered when user OK's a slot) ──────
+        // ── App picker view ─────────────────────────────────────
         android.widget.LinearLayout picker = new android.widget.LinearLayout(this);
         picker.setOrientation(android.widget.LinearLayout.VERTICAL);
         picker.setVisibility(View.GONE);
 
         TextView pickerTitle = new TextView(this);
-        pickerTitle.setTextColor(Color.WHITE);
-        pickerTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+        pickerTitle.setTextColor(0xFFEFEFEF);
+        pickerTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16);
         pickerTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        pickerTitle.setLetterSpacing(0.02f);
-        pickerTitle.setPadding(0, 0, 0, dp(10));
+        pickerTitle.setLetterSpacing(0.04f);
+        pickerTitle.setPadding(dp(4), 0, dp(4), dp(10));
         picker.addView(pickerTitle);
 
-        // Horizontal scroller — d-pad LEFT/RIGHT moves the highlighted
-        // chip and refreshKeymapPicker auto-scrolls the strip so the
-        // selection stays in view.
+        // Horizontal scroller. Cap viewport at ~62% of screen with a hard
+        // ceiling of 620 dp — prevents the card from spanning the screen
+        // on 1080p TVs while still showing 4–5 chips at a time.
         android.widget.HorizontalScrollView hsv =
                 new android.widget.HorizontalScrollView(this);
         hsv.setHorizontalScrollBarEnabled(false);
         hsv.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        // Cap card width at ~78% of screen so the scroller has a stable
-        // viewport on any TV size. Height is wrap-content (chip height).
-        int hsvW = Math.max(dp(420), Math.round(screenW * 0.78f));
+        int hsvW = Math.min(dp(620), Math.round(screenW * 0.62f));
+        if (hsvW < dp(360)) hsvW = dp(360);
         android.widget.LinearLayout.LayoutParams hsvLp =
                 new android.widget.LinearLayout.LayoutParams(hsvW, WRAP);
-        hsvLp.topMargin = dp(2);
         picker.addView(hsv, hsvLp);
 
         android.widget.LinearLayout strip = new android.widget.LinearLayout(this);
         strip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        strip.setPadding(dp(2), dp(4), dp(2), dp(4));
+        strip.setPadding(dp(2), dp(6), dp(2), dp(6));
+        // Allow chip scale-up to draw outside the strip's logical bounds.
+        strip.setClipChildren(false);
+        strip.setClipToPadding(false);
+        hsv.setClipChildren(false);
+        hsv.setClipToPadding(false);
         hsv.addView(strip, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
         TextView pickerHint = new TextView(this);
-        pickerHint.setText("\u2190\u2192 choose  \u00B7  OK to assign  \u00B7  Back to cancel");
-        pickerHint.setTextColor(0x88FFFFFF);
-        pickerHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
-        pickerHint.setPadding(0, dp(12), 0, 0);
+        pickerHint.setText("OK to assign  \u00B7  Back to cancel");
+        pickerHint.setTextColor(0x66FFFFFF);
+        pickerHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+        pickerHint.setLetterSpacing(0.05f);
+        pickerHint.setPadding(0, dp(10), 0, dp(2));
         pickerHint.setGravity(Gravity.CENTER);
         picker.addView(pickerHint);
 
@@ -2578,46 +2667,57 @@ public class LauncherActivity extends Activity {
 
     /** Repaint every slot row to reflect the current keyMap state and
      *  selection. Called on every navigation event in slot mode and on
-     *  every commit from picker mode. Cheap — each row is one TextView. */
+     *  every commit from picker mode. Cheap — each row is a tiny
+     *  LinearLayout with at most 5 children, all looked up by index. */
     private void refreshKeymapRows() {
         android.widget.LinearLayout col = keymapColumn;
         if (col == null) return;
         // Children: title (0), N rows, hint at end.
         int rows = SHORTCUT_LABELS.length;
         for (int i = 0; i < rows; i++) {
-            TextView row = (TextView) col.getChildAt(1 + i);
-            if (row == null) continue;
+            View child = col.getChildAt(1 + i);
+            if (!(child instanceof android.widget.LinearLayout)) continue;
+            android.widget.LinearLayout row = (android.widget.LinearLayout) child;
             boolean sel = (i == keymapSelectedRow);
             int kc = SHORTCUT_KEYCODES[i];
             String pkg = keyMap.get(kc);
-            String appLabel;
+
+            // Children inside row: tag(0), name(1), spacer(2), icon(3), val(4)
+            TextView name  = (TextView)  row.getChildAt(1);
+            ImageView icon = (ImageView) row.getChildAt(3);
+            TextView val   = (TextView)  row.getChildAt(4);
+
             if (pkg == null) {
-                appLabel = "\u2014";   // em-dash = no assignment
+                val.setText("Not assigned");
+                val.setTextColor(sel ? 0xCCFFFFFF : 0x66FFFFFF);
+                icon.setVisibility(View.GONE);
+                icon.setImageDrawable(null);
             } else {
                 AppInfo a = findAppByPackage(pkg);
-                appLabel = (a != null) ? a.label : pkg;
+                val.setText(a != null ? a.label : pkg);
+                val.setTextColor(sel ? 0xFFFFFFFF : 0xC0FFFFFF);
+                Bitmap bmp = (iconCache != null) ? iconCache.get(pkg) : null;
+                if (bmp != null) { icon.setImageBitmap(bmp); icon.setVisibility(View.VISIBLE); }
+                else             { icon.setImageDrawable(null); icon.setVisibility(View.GONE); }
             }
-            // Two-column layout via a single padded label string — keeps
-            // the row to one TextView. Pad-right to 11 chars so the
-            // proportional-font drift across the column stays minimal.
-            String left = SHORTCUT_LABELS[i];
-            int pad = 11 - left.length();
-            StringBuilder sb = new StringBuilder(48);
-            sb.append(left);
-            for (int p = 0; p < pad; p++) sb.append(' ');
-            sb.append("   ");
-            sb.append(appLabel);
-            row.setText(sb);
-            row.setBackgroundColor(sel ? 0x33FFFFFF : Color.TRANSPARENT);
-            row.setTextColor(sel ? Color.WHITE : 0xAAFFFFFF);
+            name.setTextColor(sel ? 0xFFFFFFFF : 0xCCFFFFFF);
+
+            android.graphics.drawable.Drawable rbg = row.getBackground();
+            if (rbg instanceof android.graphics.drawable.GradientDrawable) {
+                ((android.graphics.drawable.GradientDrawable) rbg)
+                        .setColor(sel ? 0x22FFFFFF : Color.TRANSPARENT);
+            }
         }
     }
 
     // ── App picker mode ──────────────────────────────────────────
 
     /** Enter picker mode for the slot at rowIdx. Hides the slot list,
-     *  rebuilds the chip strip from the current appList, and selects the
-     *  chip matching the current binding (or "None" if unassigned). */
+     *  rebuilds the chip strip from the current appList (only when its
+     *  size has changed since the last build — chips are cheap but
+     *  rebuilding ~50 of them on every reopen is needless GC pressure),
+     *  and selects the chip matching the current binding (or "None" if
+     *  unassigned). */
     private void enterAppPicker(int rowIdx) {
         if (keymapColumn == null || keymapPickerView == null) return;
         keymapPickerSlotRow = rowIdx;
@@ -2625,7 +2725,10 @@ public class LauncherActivity extends Activity {
         if (pt != null) {
             pt.setText("Pick app for " + SHORTCUT_LABELS[rowIdx]);
         }
-        rebuildPickerChips();
+        if (keymapPickerBuiltSize != appList.size()) {
+            rebuildPickerChips();
+            keymapPickerBuiltSize = appList.size();
+        }
         // Pre-select the chip matching the current binding so left/right
         // navigates from where the user is, not always from the start.
         int kc = SHORTCUT_KEYCODES[rowIdx];
@@ -2636,8 +2739,9 @@ public class LauncherActivity extends Activity {
                 if (appList.get(i).packageName.equals(pkg)) { idx = i + 1; break; }
             }
         }
-        keymapPickerIdx = idx;
-        keymapMode      = KEYMAP_MODE_PICKER;
+        keymapPickerIdx     = idx;
+        keymapPickerLastIdx = -1;   // force a full repaint on first refresh
+        keymapMode          = KEYMAP_MODE_PICKER;
         keymapColumn.setVisibility(View.GONE);
         keymapPickerView.setVisibility(View.VISIBLE);
         refreshKeymapPicker();
@@ -2672,67 +2776,107 @@ public class LauncherActivity extends Activity {
         exitAppPicker();
     }
 
-    /** Rebuild the chip strip from the current appList. Called every time
-     *  the user enters picker mode so the list always reflects the
-     *  currently-installed apps (a package install/remove between opens
-     *  would otherwise leave stale chips). Each chip is a single TextView. */
+    /** Rebuild the chip strip from the current appList. Called only when
+     *  the app list size has changed since the last build (see enterAppPicker),
+     *  not on every reopen. Each chip is a small horizontal LinearLayout
+     *  with an optional icon and a label. */
     private void rebuildPickerChips() {
         android.widget.LinearLayout strip = keymapPickerStrip;
         if (strip == null) return;
         strip.removeAllViews();
-        // First chip is the "None" sentinel — always present so the user
-        // can clear a binding from the picker without a separate gesture.
-        addPickerChip(strip, "\u2014  None", true);
+        // First chip is the "Not assigned" sentinel — always present so the
+        // user can clear a binding from the picker without a separate gesture.
+        addPickerChip(strip, "Not assigned", null, true);
         for (int i = 0; i < appList.size(); i++) {
-            addPickerChip(strip, appList.get(i).label, false);
+            AppInfo a = appList.get(i);
+            Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
+            addPickerChip(strip, a.label, b, false);
         }
     }
 
-    private void addPickerChip(android.widget.LinearLayout strip, String label, boolean isNone) {
-        TextView chip = new TextView(this);
-        chip.setText(label);
-        chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
-        chip.setTypeface(Typeface.create(isNone ? "sans-serif" : "sans-serif-medium",
-                Typeface.NORMAL));
-        chip.setTextColor(0xAAFFFFFF);
-        chip.setSingleLine(true);
-        chip.setEllipsize(TextUtils.TruncateAt.END);
-        chip.setGravity(Gravity.CENTER);
-        chip.setPadding(dp(14), dp(8), dp(14), dp(8));
-        chip.setMaxWidth(dp(180));
-        // Rounded chip background — uses the same gradient drawable as
-        // every other rounded-rect surface in the launcher.
+    private void addPickerChip(android.widget.LinearLayout strip,
+                               String label, Bitmap icon, boolean isNone) {
+        android.widget.LinearLayout chip = new android.widget.LinearLayout(this);
+        chip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        chip.setGravity(Gravity.CENTER_VERTICAL);
+        chip.setPadding(dp(10), dp(7), dp(12), dp(7));
         android.graphics.drawable.GradientDrawable bg =
                 new android.graphics.drawable.GradientDrawable();
         bg.setColor(Color.TRANSPARENT);
-        bg.setCornerRadius(dp(8));
+        bg.setCornerRadius(dp(10));
         chip.setBackground(bg);
+
+        // Icon slot: present for app chips (even if the bitmap isn't cached
+        // yet, keeping a hidden ImageView keeps chip widths consistent).
+        if (!isNone) {
+            ImageView iv = new ImageView(this);
+            if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
+            else              { iv.setVisibility(View.GONE); }
+            android.widget.LinearLayout.LayoutParams ivLp =
+                    new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
+            ivLp.setMarginEnd(dp(7));
+            chip.addView(iv, ivLp);
+        }
+
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        tv.setTypeface(Typeface.create(isNone ? "sans-serif" : "sans-serif-medium",
+                Typeface.NORMAL));
+        tv.setTextColor(0x99FFFFFF);
+        tv.setSingleLine(true);
+        tv.setEllipsize(TextUtils.TruncateAt.END);
+        tv.setMaxWidth(dp(150));
+        chip.addView(tv);
+
         android.widget.LinearLayout.LayoutParams clp =
                 new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
-        clp.setMarginEnd(dp(8));
+        clp.setMarginEnd(dp(7));
         strip.addView(chip, clp);
     }
 
     /** Repaint chip styles to reflect the current selection and scroll the
-     *  selected chip into the viewport. */
+     *  selected chip into the viewport. Optimised: only the previously-
+     *  selected and newly-selected chips are mutated, not the whole strip. */
     private void refreshKeymapPicker() {
         android.widget.LinearLayout strip = keymapPickerStrip;
         if (strip == null) return;
         int n = strip.getChildCount();
-        for (int i = 0; i < n; i++) {
-            TextView chip = (TextView) strip.getChildAt(i);
-            if (chip == null) continue;
-            boolean sel = (i == keymapPickerIdx);
-            // Selected chip gets a lit background + bright text. Unselected
-            // chips stay transparent and dim, matching the slot-list style.
-            android.graphics.drawable.Drawable bgd = chip.getBackground();
-            if (bgd instanceof android.graphics.drawable.GradientDrawable) {
-                ((android.graphics.drawable.GradientDrawable) bgd)
-                        .setColor(sel ? 0x33FFFFFF : Color.TRANSPARENT);
-            }
-            chip.setTextColor(sel ? Color.WHITE : 0xAAFFFFFF);
+        if (n == 0) return;
+        int prev = keymapPickerLastIdx;
+        int curr = keymapPickerIdx;
+        if (prev == curr) {
+            // First paint after enterAppPicker resets prev to -1, so we
+            // still need to style the current chip the first time.
+            paintPickerChip(strip.getChildAt(curr), true);
+        } else {
+            if (prev >= 0 && prev < n) paintPickerChip(strip.getChildAt(prev), false);
+            if (curr >= 0 && curr < n) paintPickerChip(strip.getChildAt(curr), true);
         }
+        keymapPickerLastIdx = curr;
         scrollPickerToSelection();
+    }
+
+    private void paintPickerChip(View chip, boolean sel) {
+        if (chip == null) return;
+        android.graphics.drawable.Drawable bgd = chip.getBackground();
+        if (bgd instanceof android.graphics.drawable.GradientDrawable) {
+            ((android.graphics.drawable.GradientDrawable) bgd)
+                    .setColor(sel ? 0x33FFFFFF : Color.TRANSPARENT);
+        }
+        if (chip instanceof android.widget.LinearLayout) {
+            android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+            View last = cl.getChildAt(cl.getChildCount() - 1);
+            if (last instanceof TextView) {
+                ((TextView) last).setTextColor(sel ? Color.WHITE : 0x99FFFFFF);
+            }
+        }
+        chip.animate().cancel();
+        chip.animate()
+                .scaleX(sel ? 1.05f : 1f).scaleY(sel ? 1.05f : 1f)
+                .setDuration(140)
+                .setInterpolator(FOCUS_EASE)
+                .start();
     }
 
     /** Auto-scroll the horizontal strip so the selected chip is visible
