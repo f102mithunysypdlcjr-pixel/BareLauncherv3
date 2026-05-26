@@ -95,13 +95,13 @@ public class LauncherActivity extends Activity {
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
 
-    // Apple-TV style focus scale — slightly larger pop than before for the
-    // premium "lift" feel, paired with a subtle Y translation so the focused
-    // app appears to rise off the shelf rather than just inflate in place.
-    private static final float  FOCUS_SCALE    = 1.10f;
-    private static final int    FOCUS_LIFT_DP  = 3;
-    private static final int    FOCUS_DUR_MS   = 220;
-    private static final int    UNFOCUS_DUR_MS = 160;
+    // Subtle focus pop — animations toned down for performance / stability.
+    // No vertical lift (saves a frame of layout work and removes a class of
+    // visual jitter on slow TV ROMs). Scale is small enough to read as
+    // "selected" without dominating the shelf.
+    private static final float  FOCUS_SCALE    = 1.06f;
+    private static final int    FOCUS_DUR_MS   = 130;
+    private static final int    UNFOCUS_DUR_MS = 100;
 
     // Easing curves. Defined once, reused everywhere — no per-animation alloc.
     //   FOCUS_EASE   — decelerate-out, the canonical "press / lift" curve
@@ -147,9 +147,11 @@ public class LauncherActivity extends Activity {
     private PackageManager      pm;
 
     private RecyclingShelfView shelf;
-    // Cross-fade pair. wallpaperFront is whatever the user currently sees;
-    // wallpaperBack is the staging slot for the next wallpaper. After every
-    // fade the two roles swap so we never recreate views.
+    // Wallpaper rendering uses two stacked ImageViews. wallpaperFront is on
+    // top (always visible to the user); wallpaperBack sits below and is the
+    // staging slot used during a fade. Roles do NOT swap — that previously
+    // led to a bringToFront() bug which moved the wallpaper above the
+    // shelf/clock/buttons and hid the home screen.
     private ImageView          wallpaperFront;
     private ImageView          wallpaperBack;
     private TextView           clockView;
@@ -188,42 +190,16 @@ public class LauncherActivity extends Activity {
         }
     };
 
-    /** Refresh the clock TextView. Triggers a soft alpha cross-fade only on
-     *  the minute boundary so the digit change reads as a smooth tween. */
+    /** Refresh the clock TextView. Updates the digits on the minute boundary
+     *  with no fade animation — simpler and stabler. */
     private void tickClock(long now) {
         TextView cv = clockView;
         if (cv == null) return;
         clockCal.setTimeInMillis(now);
         int currentMinute = clockCal.get(java.util.Calendar.MINUTE);
         if (currentMinute == lastShownMinute) return; // no visible change
-        boolean firstRender = lastShownMinute < 0;
         lastShownMinute = currentMinute;
-        if (firstRender) {
-            // Cold render — no fade, just paint the time.
-            cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
-            return;
-        }
-        // Soft cross-fade. We don't fully fade to 0 — dropping to 0.45 keeps
-        // the clock a continuous presence on screen. The text swap happens
-        // at the dip so the user perceives a single smooth pulse rather than
-        // a fade-out / pop-in.
-        final TextView fcv = cv;
-        fcv.animate().cancel();
-        fcv.animate()
-                .alpha(0.45f)
-                .setDuration(180)
-                .setInterpolator(FOCUS_EASE)
-                .withEndAction(() -> {
-                    if (destroyed || fcv != clockView) return;
-                    fcv.setText(buildClock(System.currentTimeMillis()),
-                            TextView.BufferType.SPANNABLE);
-                    fcv.animate()
-                            .alpha(1f)
-                            .setDuration(220)
-                            .setInterpolator(FOCUS_EASE)
-                            .start();
-                })
-                .start();
+        cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
     }
 
     private CharSequence buildClock(long ms) {
@@ -514,6 +490,9 @@ public class LauncherActivity extends Activity {
     public void onBackPressed() {
         RecyclingShelfView s = shelf;
         if (s != null && s.reorderMode) { s.exitReorderMode(false); return; }
+        // No-op for HOME launcher: back from the home screen should stay home.
+        // Calling super would let the platform finish() the activity which on
+        // some TV ROMs flashes the system home picker.
     }
 
     @Override
@@ -529,10 +508,9 @@ public class LauncherActivity extends Activity {
         screenH = dm.heightPixels;
         TextView cv = clockView;
         if (cv != null) {
-            // Bypass the per-minute fade — config change is rare and an
-            // immediate re-render is cheaper / less surprising. Resetting
-            // lastShownMinute drives tickClock down the firstRender path
-            // which sets the text without animating.
+            // Force-refresh: lastShownMinute is reset so tickClock paints
+            // unconditionally (the per-minute idempotency guard would
+            // otherwise skip the redraw).
             lastShownMinute = -1;
             cv.setAlpha(1f);
             tickClock(System.currentTimeMillis());
@@ -710,8 +688,25 @@ public class LauncherActivity extends Activity {
         cell.getLocationOnScreen(menuCellLoc);
         FrameLayout r = root; if (r == null) return;
         r.getLocationOnScreen(menuRootLoc);
-        int cellCx    = (menuCellLoc[0] - menuRootLoc[0]) + cell.getWidth() / 2;
-        int cellRelY  = (menuCellLoc[1] - menuRootLoc[1]);   // cell top in root coords
+        // Anchor to the cell's LAYOUT centre (where it ends up after the
+        // reorder-swap slide), not its current visual centre. The slide sets
+        // translationX = slidePx and animates back to 0 — getLocationOnScreen
+        // returns the post-translation visual position. If we anchored there,
+        // the menu would stick at the OLD cell position while the cell slides
+        // into the NEW one, ending up offset to one side of the moving icon.
+        // By subtracting translationX we anchor to the destination so the
+        // cell glides INTO the menu and they remain aligned.
+        // Scale is also applied around the centre pivot, so the layout centre
+        // = visual_top_left + width * scaleX / 2 (positionRing uses the same
+        // formula for the focus halo).
+        float sx = cell.getScaleX();
+        float tx = cell.getTranslationX();
+        float ty = cell.getTranslationY();
+        int cellCx    = (menuCellLoc[0] - menuRootLoc[0])
+                      + Math.round(cell.getWidth() * sx / 2f)
+                      - Math.round(tx);
+        int cellRelY  = (menuCellLoc[1] - menuRootLoc[1])
+                      - Math.round(ty);   // cell visual top in root coords, un-translated
 
         int rW = r.getWidth()  > 0 ? r.getWidth()  : screenW;
         int rH = r.getHeight() > 0 ? r.getHeight() : screenH;
@@ -759,12 +754,12 @@ public class LauncherActivity extends Activity {
         menuOverlay.setVisibility(View.VISIBLE);
         if (!wasVisible) {
             menuOverlay.setAlpha(0f);
-            menuOverlay.setScaleX(0.84f);
-            menuOverlay.setScaleY(0.84f);
+            menuOverlay.setScaleX(0.9f);
+            menuOverlay.setScaleY(0.9f);
             menuOverlay.animate()
                     .alpha(1f)
                     .scaleX(1f).scaleY(1f)
-                    .setDuration(190)
+                    .setDuration(130)
                     .setInterpolator(MENU_IN)
                     .start();
         } else {
@@ -784,8 +779,8 @@ public class LauncherActivity extends Activity {
         fm.animate().cancel();
         fm.animate()
                 .alpha(0f)
-                .scaleX(0.84f).scaleY(0.84f)
-                .setDuration(140)
+                .scaleX(0.9f).scaleY(0.9f)
+                .setDuration(90)
                 .setInterpolator(MENU_OUT)
                 .withEndAction(() -> {
                     if (fm != menuOverlay) return;
@@ -856,9 +851,9 @@ public class LauncherActivity extends Activity {
                 //         radiates upward from a low source point
                 //   radii 0.40 / 0.66 / 0.92 — slightly wider outer ring than
                 //         before so the largest bar reads as a confident band
-                //   sweep 110° centred on top (235°→345°) — narrower fan than
-                //         the previous 150° so the arcs taper into a tight,
-                //         logo-like silhouette
+                //   sweep 110° centred on top (215°→325°) — symmetric around
+                //         270° (straight up) so the fan reads as upright,
+                //         not tilted to one side
                 //   apex  small solid wedge (filled circle) anchored just above
                 //         the inner-most band's endpoints
                 float ic         = r * 0.96f;
@@ -866,7 +861,7 @@ public class LauncherActivity extends Activity {
                 float ay         = cy + ic * 0.36f;
                 float dotR       = sw * 0.55f;
                 float dotY       = ay - sw * 0.05f;
-                float startAngle = 235f, sweep = 110f;
+                float startAngle = 215f, sweep = 110f;
 
                 stroke.setStrokeWidth(sw);
                 stroke.setStrokeJoin(Paint.Join.ROUND);
@@ -884,8 +879,8 @@ public class LauncherActivity extends Activity {
         v.setOnClickListener(view -> openNetSettings());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f)
-                    .setDuration(160).setInterpolator(FOCUS_EASE).start();
+            view.animate().scaleX(f ? 1.06f : 1f).scaleY(f ? 1.06f : 1f)
+                    .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
         v.setOnKeyListener((view, kc, ev) -> {
@@ -952,8 +947,8 @@ public class LauncherActivity extends Activity {
         v.setOnClickListener(view -> openStoragePicker());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f)
-                    .setDuration(160).setInterpolator(FOCUS_EASE).start();
+            view.animate().scaleX(f ? 1.06f : 1f).scaleY(f ? 1.06f : 1f)
+                    .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
         v.setOnKeyListener((view, kc, ev) -> {
@@ -1156,7 +1151,7 @@ public class LauncherActivity extends Activity {
                 movedCell.setTranslationX(slidePx);
                 movedCell.animate()
                         .translationX(0f)
-                        .setDuration(220)
+                        .setDuration(140)
                         .setInterpolator(REORDER_EASE)
                         // Per-frame ring track: the dragged cell carries the
                         // selection ring, so the halo follows the slide.
@@ -1171,7 +1166,7 @@ public class LauncherActivity extends Activity {
                 neighbourCell.setTranslationX(-slidePx);
                 neighbourCell.animate()
                         .translationX(0f)
-                        .setDuration(220)
+                        .setDuration(140)
                         .setInterpolator(REORDER_EASE)
                         .setUpdateListener(null)
                         .start();
@@ -1241,26 +1236,26 @@ public class LauncherActivity extends Activity {
 
         void requestFocusOnIndex(int idx) {
             if (appList.isEmpty()) return;
-            // Clamp instead of wrap. Wrapping caused a full-shelf scroll from
-            // far-right back to index 0 when the user d-padded past the last
-            // app, which read as "apps overriding each other" on the right
-            // edge as the long fling raced back across the icons. Clamping
-            // gives the standard TV-launcher behaviour: the focus simply stops
-            // at the boundary.
+            // Cyclic wrap: stepping past the last app rolls around to the
+            // first, and vice versa. To avoid the "shelf flies across all
+            // apps" artefact when wrapping, we SNAP the scroll on a wrap
+            // (idx came in out-of-range) instead of animating across the
+            // entire list.
             int sz = appList.size();
-            if (idx < 0)   idx = 0;
-            if (idx >= sz) idx = sz - 1;
-            focusedIndex = idx;
+            int wrapped = ((idx % sz) + sz) % sz;
+            boolean isWrap = (idx != wrapped);
+            focusedIndex = wrapped;
             // Cancel any in-flight fling to prevent scroll fighting
             scroller.abortAnimation();
-            ensureVisible(idx);
+            if (isWrap) ensureVisibleSync(wrapped);
+            else        ensureVisible(wrapped);
             // Force fillVisible after scroll to ensure the cell exists
             fillVisible();
-            CellView cv = attached.get(idx);
+            CellView cv = attached.get(wrapped);
             if (cv != null) cv.requestFocus();
             else {
                 // Cell not yet attached — post a retry after layout
-                final int target = idx;
+                final int target = wrapped;
                 post(() -> {
                     fillVisible();
                     CellView cv2 = attached.get(target);
@@ -1309,7 +1304,7 @@ public class LauncherActivity extends Activity {
                 cv.animate().setUpdateListener(null).setListener(null); // drop captured lambdas before reuse
                 cv.setScaleX(1f); cv.setScaleY(1f); // reset scale before reuse
                 cv.setTranslationX(0f);         // reorder slide leftover
-                cv.setTranslationY(0f);         // focus-lift leftover
+                cv.setTranslationY(0f);         // safety reset (no current Y animation)
                 cv.setAlpha(1f);                // reset alpha
                 cv.iconBitmap = null;           // clear stale bitmap — prevents ghost icons
                 cv.boundApp   = null;           // clear stale binding
@@ -1361,10 +1356,10 @@ public class LauncherActivity extends Activity {
             if (dx == 0) return;
             scroller.abortAnimation();
             // Duration scales gently with distance — short hops feel snappy
-            // (180 ms) while long jumps still complete in under ~350 ms so
-            // they never feel sluggish.
+            // (120 ms) while long jumps still complete in under ~240 ms so
+            // they never feel sluggish. Lower than before for performance.
             int dist = Math.abs(dx);
-            int dur  = Math.max(180, Math.min(360, 180 + dist / 6));
+            int dur  = Math.max(120, Math.min(240, 120 + dist / 8));
             scroller.startScroll(scrollX, 0, dx, 0, dur);
             postInvalidateOnAnimation();
         }
@@ -1559,24 +1554,12 @@ public class LauncherActivity extends Activity {
                     if (!reorderMode) {
                         animate().cancel();
                         if (f) {
-                            // Premium Apple-TV-style focus lift:
-                            //   • scale 1.10 — confident pop, still well within
-                            //     the 110dp stride so adjacent cells never
-                            //     visually overlap during fast d-pad scroll
-                            //   • translationY -3dp — subtle "rise off the
-                            //     shelf" feel; combined with the existing
-                            //     label drop-shadow it reads as a soft lift
-                            //   • decelerate easing (FOCUS_EASE) — smooth
-                            //     out-curve, no overshoot wobble that briefly
-                            //     pushed cells past their stride boundary
-                            //   • 220 ms — generous enough for the curve to
-                            //     read as "lift" rather than "snap" but short
-                            //     enough that fast d-pad never lags
-                            // updateListener keeps the RingView's translation
-                            // and scale in lockstep with the cell across every
-                            // animation frame so the halo hugs the icon.
+                            // Toned-down focus pop: scale only, no lift,
+                            // 130 ms decelerate. Reads as "selected" without
+                            // dominating the shelf or stressing slow GPUs.
+                            // updateListener keeps the RingView in lockstep
+                            // with the cell across every animation frame.
                             animate().scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
-                                     .translationY(-dp(FOCUS_LIFT_DP))
                                      .setDuration(FOCUS_DUR_MS)
                                      .setInterpolator(FOCUS_EASE)
                                      .setUpdateListener(anim -> {
@@ -1589,7 +1572,6 @@ public class LauncherActivity extends Activity {
                             // CellView.this) doesn't persist on ViewPropertyAnimator
                             // and fire pointlessly during the unfocus tween.
                             animate().scaleX(1f).scaleY(1f)
-                                     .translationY(0f)
                                      .setDuration(UNFOCUS_DUR_MS)
                                      .setInterpolator(FOCUS_EASE)
                                      .setUpdateListener(null)
@@ -2116,11 +2098,11 @@ public class LauncherActivity extends Activity {
         if (cell.getWidth() == 0) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
 
-        // Cells animate to scaleX/Y = FOCUS_SCALE on focus around the center
-        // pivot AND translate up by FOCUS_LIFT_DP. getLocationOnScreen returns
-        // the post-transform VISUAL top-left, which already includes both
-        // translation and scale offsets. We just project the icon centre via
-        // the cell's scale to find the visual icon centre:
+        // Cells animate to scaleX/Y = FOCUS_SCALE on focus around the centre
+        // pivot. getLocationOnScreen returns the post-transform VISUAL
+        // top-left, which already includes the scale-induced offset. We
+        // project the icon centre via the cell's scale to find the visual
+        // icon centre:
         //   visualIconCx = visualTopLeftX + cell.getWidth() * scaleX / 2
         //   visualIconCy = visualTopLeftY + cachedIcyOffset * scaleY
         float sx = cell.getScaleX();
@@ -2205,11 +2187,18 @@ public class LauncherActivity extends Activity {
 
     /** Cross-fade a new wallpaper bitmap onto the screen.
      *
-     *  Uses two stacked ImageViews. The new bitmap is set on the BACK view
-     *  (alpha 0) then animated to alpha 1 over 360 ms. When the fade ends we
-     *  swap the FRONT/BACK references, hand the old bitmap to the new BACK
-     *  for GC, and reset alphas. The first call (no prior wallpaper) skips
-     *  the fade — we don't want a black-to-image fade on app launch. */
+     *  The wallpaper sits in two stacked ImageViews PERMANENTLY at the bottom
+     *  of the root z-order (added before any UI). We never touch z-order to
+     *  avoid the bug where bringToFront() lifted a wallpaper ImageView ABOVE
+     *  the shelf/clock/buttons and hid the home screen.
+     *
+     *  How the fade works without z-swaps:
+     *    • wallpaperFront is on top (always), wallpaperBack is below it.
+     *    • To show a new bitmap we put it on BACK (already there, alpha 1)
+     *      then fade FRONT out — the user sees the new image revealed
+     *      beneath. Once the fade ends we copy the bitmap up to FRONT,
+     *      restore FRONT alpha to 1, and clear BACK. Roles never swap so
+     *      shelf/clock/buttons are never hidden. */
     private void crossfadeWallpaper(Bitmap fb) {
         ImageView front = wallpaperFront, back = wallpaperBack;
         if (front == null || back == null || fb == null) return;
@@ -2220,28 +2209,26 @@ public class LauncherActivity extends Activity {
             return;
         }
         // Cancel any in-flight fade so rapid wallpaper changes don't leave
-        // a half-faded back view stuck on screen.
+        // a half-faded view on screen.
+        front.animate().cancel();
         back.animate().cancel();
         back.setImageBitmap(fb);
-        back.setAlpha(0f);
-        back.animate()
-                .alpha(1f)
-                .setDuration(360)
+        back.setAlpha(1f);
+        final ImageView fFront = front;
+        final ImageView fBack  = back;
+        final Bitmap    fNew   = fb;
+        front.animate()
+                .alpha(0f)
+                .setDuration(200)
                 .setInterpolator(FOCUS_EASE)
                 .withEndAction(() -> {
                     if (destroyed) return;
-                    // Promote BACK to FRONT, demote old FRONT to BACK with its
-                    // drawable cleared (next change will populate it).
-                    ImageView newFront = back;
-                    ImageView newBack  = front;
-                    newBack.setImageDrawable(null);
-                    newBack.setAlpha(0f);
-                    // Bring new front to top of z-order so subsequent fades
-                    // composite correctly. bringToFront() invalidates the
-                    // parent so this is enough.
-                    newFront.bringToFront();
-                    wallpaperFront = newFront;
-                    wallpaperBack  = newBack;
+                    // Promote the new bitmap up to FRONT. Role/z-order
+                    // unchanged: front is still on top, back is still below.
+                    fFront.setImageBitmap(fNew);
+                    fFront.setAlpha(1f);
+                    fBack.setImageDrawable(null);
+                    fBack.setAlpha(1f);
                 })
                 .start();
     }
