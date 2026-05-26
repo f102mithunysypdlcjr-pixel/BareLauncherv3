@@ -46,4 +46,13 @@
          for app developers, not platform-style components. -->
     <issue id="CustomViewStyleable" severity="ignore" />
 
+    <!-- WallpaperManager.getDrawable / WallpaperManager.getInstance.
+         Lint reports MissingPermission and demands READ_WALLPAPER_INTERNAL
+         (signature-only) or MANAGE_EXTERNAL_STORAGE. Neither is appropriate
+         for a 3rd-party HOME launcher: Android grants the active home app
+         implicit access to the system wallpaper, and that's the supported
+         path. The actual manifest declares READ_EXTERNAL_STORAGE for legacy
+         devices (≤ API 32) and SET_WALLPAPER for write access. -->
+    <issue id="MissingPermission" severity="ignore" />
+
 </lint>

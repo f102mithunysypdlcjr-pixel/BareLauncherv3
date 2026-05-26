@@ -60,6 +60,22 @@ jobs:
         working-directory: LauncherV15
         run: ./gradlew :app:lintDebug --no-daemon --stacktrace
 
+      - name: Print lint report on failure
+        # When lint fails, dump the full text report inline so the failure
+        # is debuggable from the GH Actions log without downloading artifacts.
+        # The HTML/XML reports are still uploaded as artifacts below.
+        if: failure()
+        working-directory: LauncherV15
+        run: |
+          if [ -f app/build/reports/lint-results-debug.txt ]; then
+            echo "── lint-results-debug.txt ──────────────────────────────"
+            cat app/build/reports/lint-results-debug.txt
+            echo "── end lint report ─────────────────────────────────────"
+          else
+            echo "No lint text report at app/build/reports/lint-results-debug.txt"
+            find app/build -name 'lint-results*.txt' -print -exec cat {} \;
+          fi
+
       - name: Upload lint report
         # Always upload the report even on failure so the developer can
         # see exactly which issues lint flagged without re-running CI.
