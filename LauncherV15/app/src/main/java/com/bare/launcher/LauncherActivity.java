@@ -92,6 +92,13 @@ public class LauncherActivity extends Activity {
     private static final String KEY_WP_URI     = "wp_uri";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
     private static final String KEY_APP_ORDER  = "app_order";
+    // Persisted remote-key→app shortcut map. Format: "kc=pkg,kc=pkg,...".
+    // Keys are raw Android keycode integers (e.g. 183 = KEYCODE_PROG_RED).
+    // Loaded once at startup into the in-memory keyMap SparseArray; every
+    // mapped key press anywhere on the home screen launches its app via
+    // dispatchKeyEvent. Saved synchronously on every config change so the
+    // user never has to confirm.
+    private static final String KEY_KEYMAP     = "key_map";
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
@@ -271,6 +278,36 @@ public class LauncherActivity extends Activity {
     private final int[]    menuRootLoc      = new int[2];
     private final int[]    menuOverlayLoc   = new int[2];
 
+    // ── Remote-key → app shortcut state ──────────────────────────────────
+    // Curated list of TV-remote keycodes that are safe to remap. These are
+    // dedicated shortcut buttons on most TV remotes (colour buttons, guide,
+    // info, etc.) and never collide with launcher navigation. Order = row
+    // order in the config overlay.
+    private static final int[]    SHORTCUT_KEYCODES = {
+            KeyEvent.KEYCODE_PROG_RED,
+            KeyEvent.KEYCODE_PROG_GREEN,
+            KeyEvent.KEYCODE_PROG_YELLOW,
+            KeyEvent.KEYCODE_PROG_BLUE,
+            KeyEvent.KEYCODE_GUIDE,
+            KeyEvent.KEYCODE_INFO,
+            KeyEvent.KEYCODE_CAPTIONS,
+            KeyEvent.KEYCODE_BOOKMARK,
+            KeyEvent.KEYCODE_SETTINGS,
+            KeyEvent.KEYCODE_TV,
+            KeyEvent.KEYCODE_TV_INPUT,
+    };
+    private static final String[] SHORTCUT_LABELS   = {
+            "Red",      "Green",    "Yellow",    "Blue",
+            "Guide",    "Info",     "Captions",
+            "Bookmark", "Settings", "TV",        "TV Input"
+    };
+    // Keyed by raw keycode → package name. SparseArray fits the small,
+    // dense-int-key access pattern with zero autoboxing on every key press.
+    private final SparseArray<String> keyMap            = new SparseArray<>();
+    private FrameLayout               keymapOverlay     = null;
+    private android.widget.LinearLayout keymapColumn    = null;
+    private int                       keymapSelectedRow = 0;
+
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
      *  Single source of truth for "ring should not be visible right now". */
     private final ViewTreeObserver.OnGlobalFocusChangeListener globalFocusListener =
@@ -354,6 +391,7 @@ public class LauncherActivity extends Activity {
         hideSystemUI();
         loadWallpaper();
         loadApps();
+        loadKeyMap();
         registerPkgReceiver();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -443,6 +481,7 @@ public class LauncherActivity extends Activity {
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
         menuOverlay = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
+        keymapOverlay = null; keymapColumn = null;
         super.onDestroy();
     }
 
@@ -988,28 +1027,75 @@ public class LauncherActivity extends Activity {
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openStoragePicker());
+        v.setOnLongClickListener(view -> {
+            // Long-press the wallpaper button → open the remote-key
+            // shortcut configuration overlay. Single source of truth for
+            // launcher settings — no separate Activity, no menu, just an
+            // overlay over the home screen as specified.
+            view.playSoundEffect(SoundEffectConstants.CLICK);
+            showKeymapOverlay();
+            return true;
+        });
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
             view.animate().scaleX(f ? 1.06f : 1f).scaleY(f ? 1.06f : 1f)
                     .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
-        v.setOnKeyListener((view, kc, ev) -> {
-            if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
-            switch (kc) {
-                case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A:
-                    view.playSoundEffect(SoundEffectConstants.CLICK);
-                    view.performClick(); return true;
-                case KeyEvent.KEYCODE_DPAD_DOWN:
-                    RecyclingShelfView s = shelf;
-                    if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
-                    return true;
-                case KeyEvent.KEYCODE_DPAD_LEFT:
-                    View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
-                case KeyEvent.KEYCODE_DPAD_RIGHT:
-                    RecyclingShelfView sr = shelf; if (sr != null) sr.requestFocusOnIndex(0); return true;
-                default: return false;
+        v.setOnKeyListener(new View.OnKeyListener() {
+            // Long-press detection mirrors CellView: arm on first KEY_DOWN,
+            // fire on the first repeat after the 600 ms threshold, suppress
+            // the trailing click so we don't open the wallpaper picker right
+            // after the overlay opens. Done as an anonymous class so the
+            // three pieces of state (down-time / armed / fired) live with
+            // the listener instead of leaking onto the View.
+            long downAt = 0;
+            boolean longArmed = false;
+            boolean longFired = false;
+            @Override public boolean onKey(View view, int kc, KeyEvent ev) {
+                boolean isCenter = kc == KeyEvent.KEYCODE_DPAD_CENTER
+                        || kc == KeyEvent.KEYCODE_ENTER
+                        || kc == KeyEvent.KEYCODE_BUTTON_A;
+                if (isCenter) {
+                    if (ev.getAction() == KeyEvent.ACTION_DOWN) {
+                        if (ev.getRepeatCount() == 0) {
+                            downAt = System.currentTimeMillis();
+                            longArmed = true;
+                            longFired = false;
+                        } else if (longArmed && !longFired
+                                && System.currentTimeMillis() - downAt >= 600) {
+                            longFired = true;
+                            longArmed = false;
+                            view.playSoundEffect(SoundEffectConstants.CLICK);
+                            showKeymapOverlay();
+                        }
+                        return true;
+                    }
+                    if (ev.getAction() == KeyEvent.ACTION_UP) {
+                        boolean wasArmed = longArmed;
+                        longArmed = false;
+                        longFired = false;
+                        downAt = 0;
+                        if (wasArmed) {
+                            view.playSoundEffect(SoundEffectConstants.CLICK);
+                            view.performClick();
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+                if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+                switch (kc) {
+                    case KeyEvent.KEYCODE_DPAD_DOWN:
+                        RecyclingShelfView s = shelf;
+                        if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
+                        return true;
+                    case KeyEvent.KEYCODE_DPAD_LEFT:
+                        View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
+                    case KeyEvent.KEYCODE_DPAD_RIGHT:
+                        RecyclingShelfView sr = shelf; if (sr != null) sr.requestFocusOnIndex(0); return true;
+                    default: return false;
+                }
             }
         });
         return v;
@@ -1305,18 +1391,32 @@ public class LauncherActivity extends Activity {
          *
          *  Boundary behaviour:
          *    • snap = false (single press) → CYCLIC. Stepping past the last
-         *      cell wraps to the first and vice versa. The wrap uses
-         *      ensureVisibleSync (instant scroll) instead of the smooth
-         *      glide path so the shelf doesn't visibly fly across all
-         *      cells from one end to the other — that was the old
-         *      "auto-scroll back to start" jolt. The destination cell
-         *      still gets the full bounce animation (fastNav stays false
-         *      on a wrap), so the user clearly perceives the new selection.
+         *      cell wraps to the first and vice versa.
          *    • snap = true (held key) → CLAMP at first / last. Cyclic wrap
          *      mid-key-repeat would teleport the shelf under the user's
          *      fingers, which reads as "fast scroll is broken". Clamping
          *      gives a stable edge for fast nav. Releasing and pressing
-         *      again gets the cyclic single-press behaviour back. */
+         *      again gets the cyclic single-press behaviour back.
+         *
+         *  Wrap-around mechanics (the part that used to land focus on the
+         *  wrong cell — "third app from left" / "second from right"):
+         *    A wrap is a giant scroll jump. ensureVisibleSync runs
+         *    doScrollTo, which inside fillVisible recycles the currently-
+         *    focused cell via setVisibility(GONE). That synchronously
+         *    transfers focus to a still-attached intermediate cell, whose
+         *    onFocusChange listener kicks off its own ensureVisible →
+         *    smoothScrollTo back toward where it sits. By the time we
+         *    finally cv.requestFocus() on the wrap target, the destination
+         *    smoothScrollTo(0) short-circuits with dx==0 and never aborts
+         *    the competing animation — so the shelf glides past the target
+         *    and focus settles 2-3 cells in.
+         *
+         *    Fix: keep fastNav=true through the entire wrap path so every
+         *    intermediate focus event short-circuits the listener's
+         *    ensureVisible. The destination cell is then focused cleanly
+         *    and we run a manual focus-bounce so wrap navigation still has
+         *    its visual cue (the bounce that previously rode on the focus
+         *    listener path). */
         void requestFocusOnIndex(int idx, boolean snap) {
             if (appList.isEmpty()) return;
             int sz = appList.size();
@@ -1333,35 +1433,58 @@ public class LauncherActivity extends Activity {
             focusedIndex = idx;
             // Cancel any in-flight fling to prevent scroll fighting
             scroller.abortAnimation();
-            // Snap-scroll on held-key OR on wrap-around (avoids the long
-            // "shelf flies across" tween). Smooth glide for every other
-            // single-step press so the ordinary case still feels polished.
-            if (snap || wrapped) ensureVisibleSync(idx);
-            else                 ensureVisible(idx);
-            // Force fillVisible after scroll to ensure the cell exists
-            fillVisible();
-            CellView cv = attached.get(idx);
-            if (cv != null) {
-                // fastNav skips the bounce animator on the destination
-                // cell. Held-key path takes that shortcut so the held-key
-                // visual stays calm. Wrap path does NOT — landing on the
-                // wrapped cell with a clean bounce is the cue that tells
-                // the user "you're now at the other end".
-                boolean prev = fastNav;
-                fastNav = snap;
-                try { cv.requestFocus(); }
-                finally { fastNav = prev; }
-            } else {
-                // Cell not yet attached — post a retry after layout.
-                // Snap-mode flag is not propagated through the post: the
-                // cell will animate normally on the deferred path, which
-                // is rare and fine.
-                final int target = idx;
-                post(() -> {
-                    fillVisible();
-                    CellView cv2 = attached.get(target);
-                    if (cv2 != null) cv2.requestFocus();
-                });
+
+            // bigJump = any path where the destination is far enough that
+            // fillVisible will recycle the currently-focused cell. Both
+            // wrap and held-key paths qualify; only the smooth single-step
+            // press is safe to leave the focus listener unguarded.
+            boolean bigJump = snap || wrapped;
+
+            boolean prevFast = fastNav;
+            if (bigJump) fastNav = true;
+            try {
+                if (bigJump) ensureVisibleSync(idx);
+                else         ensureVisible(idx);
+                // Force fillVisible after scroll to ensure the cell exists
+                fillVisible();
+                CellView cv = attached.get(idx);
+                if (cv != null) {
+                    cv.requestFocus();
+                } else {
+                    // Cell not yet attached — post a retry after layout.
+                    final int target = idx;
+                    final boolean fastDeferred = bigJump;
+                    post(() -> {
+                        fillVisible();
+                        CellView cv2 = attached.get(target);
+                        if (cv2 != null) {
+                            boolean p = fastNav;
+                            fastNav = fastDeferred;
+                            try { cv2.requestFocus(); }
+                            finally { fastNav = p; }
+                        }
+                    });
+                }
+            } finally {
+                fastNav = prevFast;
+            }
+
+            // Wrap deserves the focus bounce so the user clearly perceives
+            // they jumped to the other end. Held-key (snap) skips it — fast
+            // nav wants a calm visual. Bounce is run manually because the
+            // bigJump path suppressed the focus-listener animator.
+            if (wrapped) {
+                CellView cvBounce = attached.get(idx);
+                if (cvBounce != null && cvBounce.isFocused()) {
+                    cvBounce.animate().cancel();
+                    cvBounce.setScaleX(1f); cvBounce.setScaleY(1f);
+                    cvBounce.animate()
+                            .scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
+                            .setDuration(FOCUS_DUR_MS)
+                            .setInterpolator(FOCUS_IN_BOUNCE)
+                            .setUpdateListener(cvBounce.focusUpdateListener)
+                            .start();
+                }
             }
         }
 
@@ -1474,8 +1597,14 @@ public class LauncherActivity extends Activity {
             int max = scrollXMax();
             int target = Math.max(0, Math.min(x, max));
             int dx = target - scrollX;
-            if (dx == 0) return;
+            // Always abort any in-flight scroll first, even on a no-op call.
+            // Otherwise a stale animation from earlier could keep gliding
+            // under us — the focus-listener path used to call this with
+            // dx==0 right after a wrap and the early-return left a leftover
+            // scroller alive, which is exactly how the cyclic-wrap focus
+            // landed several cells past the edge.
             scroller.abortAnimation();
+            if (dx == 0) return;
             // Duration scales gently with distance — short hops feel snappy
             // (90 ms) while long jumps still complete in under ~190 ms so
             // they never feel sluggish. Held D-pad bypasses this path
@@ -2071,6 +2200,304 @@ public class LauncherActivity extends Activity {
             d.setComponent(app.component); d.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(d);
         } catch (Exception e) { showToast("App not available"); }
+    }
+
+    // ── Remote-key → app shortcut routing ────────────────────────────────
+
+    /** Parse the persisted keymap once at startup. Format: "kc=pkg,kc=pkg".
+     *  Malformed entries are silently dropped (forward-compat: a future
+     *  version could write extra fields after the package name and an old
+     *  build will still recover the keycode mapping). */
+    private void loadKeyMap() {
+        keyMap.clear();
+        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_KEYMAP, null);
+        if (raw == null || raw.isEmpty()) return;
+        int n = raw.length(), start = 0;
+        while (start < n) {
+            int comma = raw.indexOf(',', start);
+            int end   = comma < 0 ? n : comma;
+            int eq    = raw.indexOf('=', start);
+            if (eq > start && eq < end - 1) {
+                try {
+                    int kc = Integer.parseInt(raw, start, eq, 10);
+                    String pkg = raw.substring(eq + 1, end);
+                    if (!pkg.isEmpty()) keyMap.put(kc, pkg);
+                } catch (NumberFormatException ignored) {}
+            }
+            start = end + 1;
+        }
+    }
+
+    /** Write the keymap back to SharedPreferences. Called on every
+     *  configuration change (left/right cycle in the overlay) — the user
+     *  spec requires assignments to be saved instantly with no confirm. */
+    private void saveKeyMap() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < keyMap.size(); i++) {
+            if (sb.length() > 0) sb.append(',');
+            sb.append(keyMap.keyAt(i)).append('=').append(keyMap.valueAt(i));
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putString(KEY_KEYMAP, sb.toString()).apply();
+    }
+
+    private AppInfo findAppByPackage(String pkg) {
+        for (int i = 0; i < appList.size(); i++) {
+            AppInfo a = appList.get(i);
+            if (a.packageName.equals(pkg)) return a;
+        }
+        return null;
+    }
+
+    /** Keys the launcher must always handle itself — d-pad, confirm,
+     *  back/home/menu, volume, power. Mapping any of these is silently
+     *  ignored so a misconfiguration can never lock the user out of
+     *  navigation. */
+    private static boolean isCoreNavKey(int kc) {
+        switch (kc) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+            case KeyEvent.KEYCODE_BUTTON_B:
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_HOME:
+            case KeyEvent.KEYCODE_MENU:
+            case KeyEvent.KEYCODE_ESCAPE:
+            case KeyEvent.KEYCODE_VOLUME_UP:
+            case KeyEvent.KEYCODE_VOLUME_DOWN:
+            case KeyEvent.KEYCODE_VOLUME_MUTE:
+            case KeyEvent.KEYCODE_POWER:
+                return true;
+            default: return false;
+        }
+    }
+
+    /** Activity-level key dispatch. Two responsibilities:
+     *    1. While the keymap overlay is visible, swallow every key into
+     *       the overlay's own d-pad navigator. Stops mapped shortcuts
+     *       from firing while the user is configuring them, and stops
+     *       stray keys from bleeding through to the shelf underneath.
+     *    2. Otherwise, look up the keycode in the in-memory keyMap.
+     *       Match → launch the assigned app and consume. Lookup runs only
+     *       on the first ACTION_DOWN (repeatCount == 0) to avoid relaunch
+     *       storms on a held key. */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        FrameLayout ko = keymapOverlay;
+        if (ko != null && ko.getVisibility() == View.VISIBLE) {
+            if (handleKeymapOverlayKey(event)) return true;
+            return super.dispatchKeyEvent(event);
+        }
+        if (event.getAction() == KeyEvent.ACTION_DOWN
+                && event.getRepeatCount() == 0
+                && !isCoreNavKey(event.getKeyCode())) {
+            String pkg = keyMap.get(event.getKeyCode());
+            if (pkg != null) {
+                AppInfo app = findAppByPackage(pkg);
+                if (app != null) { launchApp(app); return true; }
+                // Mapped to an uninstalled package — clean up so the slot
+                // becomes free again on next config open.
+                keyMap.delete(event.getKeyCode());
+                saveKeyMap();
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    // ── Keymap configuration overlay ─────────────────────────────────────
+
+    /** Build the overlay lazily on first long-press. Reused for every
+     *  subsequent open — keeping it inflated is cheap (one FrameLayout +
+     *  N TextViews) and avoids the inflate cost on every reopen. */
+    private void buildKeymapOverlay() {
+        FrameLayout r = root; if (r == null) return;
+        FrameLayout ov = new FrameLayout(this) {
+            @Override public boolean onTouchEvent(MotionEvent ev) {
+                // Backdrop swallows taps so they don't reach the shelf.
+                return true;
+            }
+        };
+        ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        ov.setBackgroundColor(0xCC000000);   // 80% black backdrop
+        ov.setClickable(true);
+        ov.setFocusable(true);
+        ov.setFocusableInTouchMode(true);
+        ov.setVisibility(View.GONE);
+
+        android.widget.LinearLayout col = new android.widget.LinearLayout(this);
+        col.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xEE111111);
+        bg.setCornerRadius(dp(14));
+        col.setBackground(bg);
+        col.setPadding(dp(22), dp(20), dp(22), dp(18));
+
+        TextView title = new TextView(this);
+        title.setText("Remote Shortcuts");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setLetterSpacing(0.02f);
+        title.setPadding(0, 0, 0, dp(10));
+        col.addView(title);
+
+        // One TextView per slot — cheaper than per-row LinearLayout, and
+        // the two-column look is achieved with a rendered tab span.
+        for (int i = 0; i < SHORTCUT_LABELS.length; i++) {
+            TextView row = new TextView(this);
+            row.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
+            row.setPadding(dp(12), dp(9), dp(12), dp(9));
+            row.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            row.setTextColor(0xCCFFFFFF);
+            row.setSingleLine(true);
+            row.setEllipsize(TextUtils.TruncateAt.END);
+            android.widget.LinearLayout.LayoutParams rlp =
+                    new android.widget.LinearLayout.LayoutParams(dp(380), WRAP);
+            rlp.bottomMargin = dp(2);
+            col.addView(row, rlp);
+        }
+
+        TextView hint = new TextView(this);
+        hint.setText("\u2191\u2193 select  \u00B7  \u2190 \u2192 change app  \u00B7  OK / Back to close");
+        hint.setTextColor(0x88FFFFFF);
+        hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+        hint.setPadding(0, dp(12), 0, 0);
+        hint.setGravity(Gravity.CENTER);
+        col.addView(hint);
+
+        FrameLayout.LayoutParams colLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        colLp.gravity = Gravity.CENTER;
+        ov.addView(col, colLp);
+
+        r.addView(ov);
+        keymapOverlay = ov;
+        keymapColumn  = col;
+    }
+
+    private void showKeymapOverlay() {
+        if (keymapOverlay == null) buildKeymapOverlay();
+        FrameLayout ko = keymapOverlay;
+        if (ko == null) return;
+        // Hide the focus ring — it belongs to the shelf, which is now
+        // logically behind the overlay.
+        RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+        keymapSelectedRow = 0;
+        refreshKeymapRows();
+        ko.setVisibility(View.VISIBLE);
+        ko.bringToFront();
+        ko.requestFocus();
+    }
+
+    private void hideKeymapOverlay() {
+        FrameLayout ko = keymapOverlay;
+        if (ko == null) return;
+        ko.setVisibility(View.GONE);
+        // Restore focus to the wallpaper button so the user lands back
+        // where they triggered the overlay.
+        View wb = wpBtnView;
+        if (wb != null) wb.requestFocus();
+    }
+
+    /** Repaint every row to reflect the current keyMap state and selection.
+     *  Called on every navigation event — cheap because each row is a
+     *  single TextView whose content changes are coalesced by the next
+     *  draw pass. */
+    private void refreshKeymapRows() {
+        android.widget.LinearLayout col = keymapColumn;
+        if (col == null) return;
+        // Children: title (0), N rows, hint at end.
+        int rows = SHORTCUT_LABELS.length;
+        for (int i = 0; i < rows; i++) {
+            TextView row = (TextView) col.getChildAt(1 + i);
+            if (row == null) continue;
+            boolean sel = (i == keymapSelectedRow);
+            int kc = SHORTCUT_KEYCODES[i];
+            String pkg = keyMap.get(kc);
+            String appLabel;
+            if (pkg == null) {
+                appLabel = "\u2014";   // em-dash = no assignment
+            } else {
+                AppInfo a = findAppByPackage(pkg);
+                appLabel = (a != null) ? a.label : pkg;
+            }
+            // Two-column layout via a single padded label string — keeps
+            // the row to one TextView. Width rendering is fine because we
+            // pad the left column to a fixed character count.
+            String left = SHORTCUT_LABELS[i];
+            // Pad-right to 11 chars; the labels are short and ASCII so
+            // proportional-font drift across the column stays minimal.
+            int pad = 11 - left.length();
+            StringBuilder sb = new StringBuilder(48);
+            sb.append(left);
+            for (int p = 0; p < pad; p++) sb.append(' ');
+            sb.append("   ");
+            if (sel) sb.append("\u25C0  ");
+            sb.append(appLabel);
+            if (sel) sb.append("  \u25B6");
+            row.setText(sb);
+            row.setBackgroundColor(sel ? 0x33FFFFFF : Color.TRANSPARENT);
+            row.setTextColor(sel ? Color.WHITE : 0xAAFFFFFF);
+        }
+    }
+
+    /** Cycle the assigned app for a row. dir = +1 right, -1 left. The
+     *  cycle includes a "no assignment" sentinel (-1) before app[0] and
+     *  after app[n-1] so the user can always clear a binding without a
+     *  separate gesture. */
+    private void cycleKeymapApp(int rowIdx, int dir) {
+        int n = appList.size();
+        if (n == 0) { showToast("No apps installed"); return; }
+        int kc = SHORTCUT_KEYCODES[rowIdx];
+        String pkg = keyMap.get(kc);
+        int cur = -1;   // -1 sentinel = no assignment
+        if (pkg != null) {
+            for (int i = 0; i < n; i++)
+                if (appList.get(i).packageName.equals(pkg)) { cur = i; break; }
+        }
+        int nxt = cur + dir;
+        if (nxt < -1) nxt = n - 1;
+        if (nxt >= n) nxt = -1;
+        if (nxt < 0) keyMap.delete(kc);
+        else         keyMap.put(kc, appList.get(nxt).packageName);
+        saveKeyMap();
+        refreshKeymapRows();
+    }
+
+    /** D-pad navigation inside the overlay. Returns true if the event is
+     *  consumed (the activity-level dispatchKeyEvent then returns true).
+     *  Up/down moves between slots, left/right cycles the slot's app, OK
+     *  closes (saves are automatic on every cycle), Back closes. */
+    private boolean handleKeymapOverlayKey(KeyEvent ev) {
+        if (ev.getAction() != KeyEvent.ACTION_DOWN) return true;  // eat KEY_UP for handled keys
+        int kc = ev.getKeyCode();
+        int rows = SHORTCUT_LABELS.length;
+        switch (kc) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                keymapSelectedRow = (keymapSelectedRow - 1 + rows) % rows;
+                refreshKeymapRows(); return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                keymapSelectedRow = (keymapSelectedRow + 1) % rows;
+                refreshKeymapRows(); return true;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                cycleKeymapApp(keymapSelectedRow, -1); return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                cycleKeymapApp(keymapSelectedRow, +1); return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+                hideKeymapOverlay(); return true;
+        }
+        // Swallow everything else so unmapped remote buttons don't bleed
+        // through and trigger their (potentially mapped) shortcut while
+        // the user is configuring shortcuts.
+        return true;
     }
 
     private void preWarmIcon(AppInfo app) {
