@@ -101,21 +101,26 @@ public class LauncherActivity extends Activity {
     // visual jitter on slow TV ROMs). Scale is small enough to read as
     // "selected" without dominating the shelf.
     private static final float  FOCUS_SCALE    = 1.06f;
-    private static final int    FOCUS_DUR_MS   = 130;
+    // Bumped 130 -> 150 ms so the bounce has enough frames to be perceived
+    // (at 130 ms the spring barely registered on 60 Hz panels). Still well
+    // under the 200 ms threshold where animations start to feel sluggish.
+    private static final int    FOCUS_DUR_MS   = 150;
     private static final int    UNFOCUS_DUR_MS = 100;
 
     // Easing curves. Defined once, reused everywhere — no per-animation alloc.
     //   FOCUS_EASE      — decelerate-out, the canonical "press / lift" curve
-    //   FOCUS_IN_BOUNCE — subtle overshoot for focus-IN only. Tension is kept
-    //                     small (~2.0) so the cell ticks slightly past
-    //                     FOCUS_SCALE before settling — reads as a tiny
-    //                     "tap" of life on selection without dominating the
-    //                     shelf or stressing slow GPUs.
+    //   FOCUS_IN_BOUNCE — subtle overshoot for focus-IN only. Tension 2.8
+    //                     gives a slightly springier "pop" than the previous
+    //                     2.0 — the cell ticks ~7% past FOCUS_SCALE before
+    //                     settling. Higher tension is a math-only change
+    //                     with zero CPU / GPU cost. Peak visible width
+    //                     (cellW * 1.073) still fits inside the cell stride,
+    //                     so neighbours never overlap during the bounce.
     //   SCROLL_EASE     — Material standard ease-in-out for shelf scrolling
     //   REORDER_EASE    — quick decelerate for the swap slide
     //   MENU_IN         — gentle overshoot-free pop-in for the context menu
     private static final Interpolator FOCUS_EASE      = new DecelerateInterpolator(1.6f);
-    private static final Interpolator FOCUS_IN_BOUNCE = new OvershootInterpolator(2.0f);
+    private static final Interpolator FOCUS_IN_BOUNCE = new OvershootInterpolator(2.8f);
     private static final Interpolator SCROLL_EASE     = new PathInterpolator(0.33f, 0f, 0.2f, 1f);
     private static final Interpolator REORDER_EASE    = new PathInterpolator(0.25f, 0.1f, 0.2f, 1f);
     private static final Interpolator MENU_IN         = new PathInterpolator(0.18f, 0.7f, 0.25f, 1f);
@@ -1103,7 +1108,11 @@ public class LauncherActivity extends Activity {
         private int   totalW      = 0;
         private int   centerX     = 0;
         private boolean needsRefill = false;
-        private final int cellW, cellH, stride;
+        // sidePad — half-stride gutter on each side of every cell (cellW + 2*sidePad = stride)
+        // edgePad — buffer kept between the focused cell and the viewport edge
+        //           when ensureVisible scrolls. Pre-computed once per shelf
+        //           instead of dp(10) / dp(48) every scroll frame & focus event.
+        private final int cellW, cellH, stride, sidePad, edgePad;
         int focusedIndex = 0;
 
         boolean reorderMode   = false;
@@ -1134,9 +1143,11 @@ public class LauncherActivity extends Activity {
             // exactly the right split: programmatic d-pad scrolls feel
             // premium, touch-fling keeps native physics.
             scroller = new OverScroller(ctx, SCROLL_EASE);
-            cellW  = dp(CELL_W_DP);
-            cellH  = dp(CELL_H_DP);
-            stride = cellW + dp(10) * 2;
+            cellW   = dp(CELL_W_DP);
+            cellH   = dp(CELL_H_DP);
+            sidePad = dp(10);
+            edgePad = dp(48);
+            stride  = cellW + sidePad * 2;
             setFocusable(false);
             setClipChildren(false);
             setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
@@ -1287,30 +1298,55 @@ public class LauncherActivity extends Activity {
         void requestFocusOnIndex(int idx) { requestFocusOnIndex(idx, false); }
 
         /** Programmatic focus jump.
-         *  @param snap  true → no smooth-scroll animation (used for held D-pad
-         *               navigation so fast scroll actually feels fast — the
-         *               smooth path was queueing 120-240 ms tweens that each
-         *               cancelled the previous, producing the "slow drift"
-         *               artefact users perceive as broken fast scroll).
-         *  Boundaries CLAMP rather than wrap. The previous cyclic-wrap
-         *  behaviour produced an "auto-scroll back to start" jolt at the end
-         *  of the shelf which read as the launcher scrolling on its own. */
+         *  @param snap  true → no smooth-scroll animation. Used for held
+         *               D-pad navigation (key-repeat) so fast-scroll feels
+         *               actually fast — the smooth path was queueing
+         *               120-240 ms tweens that each cancelled the previous.
+         *
+         *  Boundary behaviour:
+         *    • snap = false (single press) → CYCLIC. Stepping past the last
+         *      cell wraps to the first and vice versa. The wrap uses
+         *      ensureVisibleSync (instant scroll) instead of the smooth
+         *      glide path so the shelf doesn't visibly fly across all
+         *      cells from one end to the other — that was the old
+         *      "auto-scroll back to start" jolt. The destination cell
+         *      still gets the full bounce animation (fastNav stays false
+         *      on a wrap), so the user clearly perceives the new selection.
+         *    • snap = true (held key) → CLAMP at first / last. Cyclic wrap
+         *      mid-key-repeat would teleport the shelf under the user's
+         *      fingers, which reads as "fast scroll is broken". Clamping
+         *      gives a stable edge for fast nav. Releasing and pressing
+         *      again gets the cyclic single-press behaviour back. */
         void requestFocusOnIndex(int idx, boolean snap) {
             if (appList.isEmpty()) return;
             int sz = appList.size();
-            if (idx < 0)   idx = 0;
-            if (idx >= sz) idx = sz - 1;
+            boolean wrapped = false;
+            if (snap) {
+                // Held D-pad → clamp.
+                if (idx < 0)   idx = 0;
+                if (idx >= sz) idx = sz - 1;
+            } else {
+                // Single press → cyclic wrap.
+                if      (idx < 0)   { idx = sz - 1; wrapped = true; }
+                else if (idx >= sz) { idx = 0;      wrapped = true; }
+            }
             focusedIndex = idx;
             // Cancel any in-flight fling to prevent scroll fighting
             scroller.abortAnimation();
-            if (snap) ensureVisibleSync(idx);
-            else      ensureVisible(idx);
+            // Snap-scroll on held-key OR on wrap-around (avoids the long
+            // "shelf flies across" tween). Smooth glide for every other
+            // single-step press so the ordinary case still feels polished.
+            if (snap || wrapped) ensureVisibleSync(idx);
+            else                 ensureVisible(idx);
             // Force fillVisible after scroll to ensure the cell exists
             fillVisible();
             CellView cv = attached.get(idx);
             if (cv != null) {
-                // Tag the focus callback that fires inside requestFocus() so
-                // the cell can short-circuit its bounce animation.
+                // fastNav skips the bounce animator on the destination
+                // cell. Held-key path takes that shortcut so the held-key
+                // visual stays calm. Wrap path does NOT — landing on the
+                // wrapped cell with a clean bounce is the cue that tells
+                // the user "you're now at the other end".
                 boolean prev = fastNav;
                 fastNav = snap;
                 try { cv.requestFocus(); }
@@ -1335,7 +1371,27 @@ public class LauncherActivity extends Activity {
             repositionAttached(); fillVisible();
         }
 
-        private int cellLeft(int i) { return centerX + i * stride + dp(10) - scrollX; }
+        private int cellLeft(int i) { return centerX + i * stride + sidePad - scrollX; }
+
+        /** Maximum legal scrollX. Includes symmetric end-padding equal to
+         *  centerX (= dp(24) when content overflows) so the LAST cell on the
+         *  right is always rendered with the same gutter as the first cell
+         *  on the left. The previous formula `totalW - getWidth()` ignored
+         *  the right gutter and clipped the trailing cell by ~dp(14) — the
+         *  "last app gets cropped on the right side" bug.
+         *
+         *  Math (overflow case, centerX = dp(24), sidePad = dp(10)):
+         *    last_right_in_world = centerX + (n-1)*stride + sidePad + cellW
+         *                        = centerX + n*stride - sidePad
+         *                        = centerX + totalW - sidePad
+         *    we want: scrollXMax + getWidth() ≥ last_right_in_world + centerX
+         *    →        scrollXMax = totalW + 2*centerX - sidePad - getWidth()
+         *
+         *  Fits-case (centerX = (w - totalW)/2): the formula evaluates to
+         *  -sidePad which clamps to 0 — no scroll allowed when content fits. */
+        private int scrollXMax() {
+            return Math.max(0, totalW + 2 * centerX - sidePad - getWidth());
+        }
 
         private void fillVisible() {
             int w = getWidth();
@@ -1398,7 +1454,7 @@ public class LauncherActivity extends Activity {
         }
 
         private void doScrollTo(int x) {
-            int max = Math.max(0, totalW - getWidth());
+            int max = scrollXMax();
             int newX = Math.max(0, Math.min(x, max));
             if (newX == scrollX) return; // no-op avoids redundant work
             scrollX = newX;
@@ -1415,7 +1471,7 @@ public class LauncherActivity extends Activity {
          *  computeScrollOffset path delivers per-frame updates which we route
          *  through doScrollTo, so the ring naturally tracks the moving cells. */
         private void smoothScrollTo(int x) {
-            int max = Math.max(0, totalW - getWidth());
+            int max = scrollXMax();
             int target = Math.max(0, Math.min(x, max));
             int dx = target - scrollX;
             if (dx == 0) return;
@@ -1431,22 +1487,22 @@ public class LauncherActivity extends Activity {
         }
 
         private void ensureVisible(int idx) {
-            int left = centerX + idx * stride + dp(10), right = left + cellW, pad = dp(48);
+            int left = centerX + idx * stride + sidePad, right = left + cellW;
             // Use animated scroll for d-pad navigation so the shelf glides
             // smoothly. Touch fling continues to use the scroller's own path
             // via onTouchEvent, and cell-attachment scrolls during reorder
             // use doScrollTo synchronously to avoid mid-swap visual races.
-            if      (left  - pad < scrollX)               smoothScrollTo(Math.max(0, left - pad));
-            else if (right + pad > scrollX + getWidth())  smoothScrollTo(right + pad - getWidth());
+            if      (left  - edgePad < scrollX)               smoothScrollTo(Math.max(0, left - edgePad));
+            else if (right + edgePad > scrollX + getWidth())  smoothScrollTo(right + edgePad - getWidth());
         }
 
         /** Synchronous variant used by reorder flow — there we need the cells
          *  laid out at their final positions BEFORE running the swap-slide
          *  animation, so we can't tolerate an in-flight scroll animation. */
         private void ensureVisibleSync(int idx) {
-            int left = centerX + idx * stride + dp(10), right = left + cellW, pad = dp(48);
-            if      (left  - pad < scrollX)               doScrollTo(Math.max(0, left - pad));
-            else if (right + pad > scrollX + getWidth())  doScrollTo(right + pad - getWidth());
+            int left = centerX + idx * stride + sidePad, right = left + cellW;
+            if      (left  - edgePad < scrollX)               doScrollTo(Math.max(0, left - edgePad));
+            else if (right + edgePad > scrollX + getWidth())  doScrollTo(right + edgePad - getWidth());
         }
 
         // True from ACTION_DOWN until the fling settles. While set, the ring is
@@ -1519,7 +1575,7 @@ public class LauncherActivity extends Activity {
                     velTracker.computeCurrentVelocity(1000);
                     int vx = (int) velTracker.getXVelocity();
                     scroller.fling(scrollX, 0, -vx, 0,
-                            0, Math.max(0, totalW - getWidth()), 0, 0);
+                            0, scrollXMax(), 0, 0);
                     velTracker.recycle(); velTracker = null;
                     if (scroller.isFinished()) {
                         // Zero-velocity release: settle handler in computeScroll
