@@ -1,4 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Bare Launcher</string>
+
+    <!-- Accessibility / TalkBack content descriptions for non-text UI -->
+    <string name="cd_app_shelf">App shelf</string>
+    <string name="cd_clock">Current time</string>
+    <string name="cd_network_settings">Network settings</string>
+    <string name="cd_remap_remote">Remap remote buttons</string>
+    <string name="cd_change_wallpaper">Change wallpaper</string>
+    <string name="cd_selection_ring">Selection ring</string>
+    <string name="cd_uninstall_app">Uninstall app</string>
+    <string name="cd_open_app_info">Open app info in system settings</string>
+    <string name="cd_move_app_position">Move app position</string>
+
+    <!-- Context menu items shown over a focused shelf icon. The leading
+         glyph is a Unicode symbol (cross / info / left-right arrows) drawn
+         inline with the label as part of the visible text. -->
+    <string name="menu_uninstall">\u2715  Uninstall</string>
+    <string name="menu_app_info">\u24D8  App Info</string>
+    <string name="menu_move">\u21D4  Move</string>
+
+    <!-- Keymap overlay -->
+    <string name="keymap_manage_hidden">Manage hidden apps</string>
+    <string name="keymap_not_assigned">Not assigned</string>
+    <!-- Picker title; %1$s is the human-readable label of the remote key
+         being bound (Red, Green, Menu, etc.) -->
+    <string name="keymap_pick_app_for">Pick app for %1$s</string>
+
+    <!-- Remote key shortcut labels. Order must match SHORTCUT_KEYCODES. -->
+    <string name="key_red">Red</string>
+    <string name="key_green">Green</string>
+    <string name="key_yellow">Yellow</string>
+    <string name="key_blue">Blue</string>
+    <string name="key_menu">Menu</string>
+    <string name="key_subtitle">Subtitle</string>
+
+    <!-- Toasts -->
+    <string name="toast_no_network_settings">Cannot open network settings</string>
+    <string name="toast_no_app_info">Cannot open app info</string>
+    <string name="toast_app_unavailable">App not available</string>
+    <string name="toast_no_file_picker">No file picker available</string>
+    <string name="toast_wallpaper_load_failed">Could not load wallpaper</string>
+    <string name="toast_wallpaper_no_permission">Could not get permission for this image</string>
+    <!-- %1$s is the user-visible label of the app being uninstalled. -->
+    <string name="toast_cannot_uninstall">Cannot uninstall %1$s</string>
 </resources>

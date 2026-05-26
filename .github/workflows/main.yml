@@ -1,13 +1,27 @@
-name: Build BareLauncher Release APK
+name: Build BareLauncher
 
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
+# Common env to avoid repeating the same gradle JVM tuning
+# in every job. Daemons stay off so the runner reclaims resources
+# between gradle invocations.
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
+  GRADLE_VERSION: "8.14.1"
+
 jobs:
-  build:
-    name: Build and Sign Release APK
+  # ──────────────────────────────────────────────────────────────────
+  # Quality gate: lint + JVM unit tests. Runs on every PR. Independent
+  # of the signing / release pipeline so a broken keystore secret on a
+  # fork PR can't block lint feedback.
+  # ──────────────────────────────────────────────────────────────────
+  quality:
+    name: Lint and unit tests
     runs-on: ubuntu-24.04
 
     steps:
@@ -15,15 +29,100 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v4.5.0
         with:
           distribution: temurin
           java-version: 21
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      # The runner ships with a recent Gradle, but we lock to GRADLE_VERSION
+      # so reproducibility doesn't drift with image rotations. Installing
+      # via SDKMAN avoids depending on gradle/actions/setup-gradle which
+      # was failing intermittently against codeload.github.com (one of
+      # the transitive infra problems that prompted this workflow split).
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          mkdir -p "$HOME/gradle" && unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Gradle wrapper
+        working-directory: LauncherV15
+        run: |
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
+          chmod +x gradlew
+
+      - name: JVM unit tests
+        working-directory: LauncherV15
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Android lint (debug)
+        working-directory: LauncherV15
+        run: ./gradlew :app:lintDebug --no-daemon --stacktrace
+
+      - name: Print lint report on failure
+        # When lint fails, dump the full text report inline so the failure
+        # is debuggable from the GH Actions log without downloading artifacts.
+        # The HTML/XML reports are still uploaded as artifacts below.
+        if: failure()
+        working-directory: LauncherV15
+        run: |
+          if [ -f app/build/reports/lint-results-debug.txt ]; then
+            echo "── lint-results-debug.txt ──────────────────────────────"
+            cat app/build/reports/lint-results-debug.txt
+            echo "── end lint report ─────────────────────────────────────"
+          else
+            echo "No lint text report at app/build/reports/lint-results-debug.txt"
+            find app/build -name 'lint-results*.txt' -print -exec cat {} \;
+          fi
+
+      - name: Upload lint report
+        # Always upload the report even on failure so the developer can
+        # see exactly which issues lint flagged without re-running CI.
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          gradle-version: "8.14.1"
+          name: lint-report
+          path: |
+            LauncherV15/app/build/reports/lint-results-debug.html
+            LauncherV15/app/build/reports/lint-results-debug.xml
+          retention-days: 14
+
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: LauncherV15/app/build/reports/tests/testDebugUnitTest
+          retention-days: 14
+
+  # ──────────────────────────────────────────────────────────────────
+  # Release pipeline: assemble + sign the production APK. Runs on every
+  # main push and on workflow_dispatch. Skipped on PRs (no keystore
+  # secret access from forks) — lint+tests above catch breakage there.
+  # ──────────────────────────────────────────────────────────────────
+  build:
+    name: Build and Sign Release APK
+    runs-on: ubuntu-24.04
+    needs: quality
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4.5.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          mkdir -p "$HOME/gradle" && unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Decode keystore
         run: |
@@ -32,13 +131,11 @@ jobs:
       - name: Generate Gradle wrapper
         working-directory: LauncherV15
         run: |
-          gradle wrapper --gradle-version 8.14.1
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
 
       - name: Build and sign release APK
         working-directory: LauncherV15
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
         run: |
           ./gradlew :app:assembleRelease \
             -Pandroid.injected.signing.store.file=/tmp/release.jks \
