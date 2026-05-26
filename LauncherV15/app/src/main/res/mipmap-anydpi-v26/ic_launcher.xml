@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon (API 26+). minSdk is 30 so this is the icon every
+  device actually renders; the per-density PNGs in mipmap-{m,h,xh,
+  xxh,xxxh}dpi/ exist only as belt-and-braces fallbacks for any
+  oddball OEM launcher that ignores adaptive icons.
+
+  Foreground = ic_launcher_foreground.xml (vector — tile + ring).
+  Background = solid deep-ink colour resource.
+
+  The system applies the launcher's chosen mask (circle / squircle /
+  rounded-square / teardrop / OEM-custom) over both layers; we
+  designed the foreground to fit inside the 66dp central safety
+  circle so it survives every mask without clipping.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

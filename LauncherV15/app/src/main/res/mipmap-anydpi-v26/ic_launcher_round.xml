@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Round-icon variant (declared via android:roundIcon in the manifest).
+  Identical adaptive-icon definition to ic_launcher.xml — Android
+  picks between the two based on the launcher's mask preference, but
+  the underlying composition (tile + ring on deep ink) is the same.
+  Two files instead of one symlink because Android resource resolution
+  treats them as distinct resource IDs.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
