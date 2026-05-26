@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Launcher-icon background. Deep ink, near-black but warmer than
+      pure #000 so it doesn't disappear into AMOLED voids and so the
+      sky-cyan focus ring on top retains contrast without screaming.
+
+      Used as the `<background>` of the adaptive icon (see
+      mipmap-anydpi-v26/ic_launcher.xml). Not referenced from app
+      code — there is intentionally only ONE colour resource in this
+      project so the launcher's "zero theming surface" identity stays
+      intact.
+    -->
+    <color name="ic_launcher_background">#FF0E1116</color>
+</resources>

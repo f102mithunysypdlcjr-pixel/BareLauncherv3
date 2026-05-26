@@ -1,0 +1,50 @@
+<!--
+  Adaptive launcher-icon foreground.
+
+  Design moto: the launcher whose only job is to keep your focus on
+  one app. So the icon is exactly that gesture — a single rounded-
+  square "app tile" with the focus ring drawn around it, mirroring
+  what RingView paints around the highlighted shelf cell at runtime.
+
+  Geometry (units are the 108-unit adaptive-icon viewport; safe zone
+  is the central 66-unit circle, i.e. radius 33 around (54,54)):
+
+    Tile: 36 x 36 rounded square, 8u corner radius, centred at
+          (54,54). Spans (36,36) -> (72,72). Off-white fill.
+    Ring: stroke-only circle, centre (54,54), radius 30, stroke 2.5u.
+          Sky-cyan stroke. Sits ~7-12u outside the tile.
+
+  All visual content lives inside the 66u central safe circle (the
+  ring's outer edge is at 30u + half-stroke ≈ 31.25u from centre,
+  comfortably inside the 33u safe radius), so every Android launcher
+  mask (circle, squircle, rounded-square, teardrop) crops to the
+  same composition without clipping the ring.
+
+  Foreground only — no background fill. The deep-ink background is
+  declared separately as `@color/ic_launcher_background` and
+  composited by the adaptive-icon system.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- App tile: rounded square, warm off-white. Built from line
+         segments + 90-degree elliptical arcs so the corner radius is
+         exact and the path stays a single closed shape (cleaner R8
+         output than two stacked rects). -->
+    <path
+        android:fillColor="#F5F5F4"
+        android:pathData="M44,36 L64,36 A8,8 0 0 1 72,44 L72,64 A8,8 0 0 1 64,72 L44,72 A8,8 0 0 1 36,64 L36,44 A8,8 0 0 1 44,36 Z" />
+
+    <!-- Focus ring: stroke-only circle, sky cyan. Two 180-degree arcs
+         with sweep-flag=1 trace the full circumference; fillColor is
+         transparent so only the stroke renders. -->
+    <path
+        android:strokeColor="#7DD3FC"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M84,54 A30,30 0 0 1 24,54 A30,30 0 0 1 84,54 Z" />
+
+</vector>
