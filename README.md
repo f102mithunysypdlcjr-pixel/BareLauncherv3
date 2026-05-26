@@ -1,146 +1,190 @@
-# BareLauncher
+# ⚡ BareLauncher
 
-A minimal, zero-dependency Android HOME launcher built for both phones and
-Android TV. One activity, pure Android SDK, no third-party runtime
-dependencies in the shipped APK.
+> The launcher Android TV deserves.
 
-![BareLauncher banner](LauncherV15/app/src/main/res/drawable/banner.png)
+BareLauncher is built for one purpose:
 
-## Highlights
+## 🚀 Maximum Speed. Minimum Nonsense.
 
-- **Recycling app shelf** with focus ring, reorder mode, and a context
-  menu (move / app info / uninstall).
-- **Remote-key shortcuts** — Red, Green, Yellow, Blue, Menu, and
-  Subtitle keys can each be bound to launch any installed app.
-- **Hide-apps manager** — keep clutter off the shelf without
-  uninstalling.
-- **Wallpaper picker** — system wallpaper or a user-selected image,
-  with a cross-fade transition.
-- **Built-in crash logger** — uncaught exceptions are written to
-  `<internalFiles>/crash.log` (rotated at 32 KB) so issues can be
-  triaged from a remote device without a third-party crash service.
-- **Zero runtime dependencies** — the production APK ships only
-  Android SDK code; no AndroidX, no Kotlin runtime, no Material.
+No ads.  
+No telemetry.  
+No trackers.  
+No recommendations.  
+No bloated UI.  
+No unnecessary animations.  
+No premium lock.  
 
-## Compatibility
+Just a pure, performance-oriented Android TV launcher.
 
-| | |
-|---|---|
-| **Min Android** | 11 (API 30) |
-| **Target Android** | 16 (API 36) |
-| **Form factors** | Phone, tablet, Android TV / Leanback |
-| **ABIs** | Universal APK, runs on `arm64-v8a` and `armeabi-v7a` |
+---
 
-The launcher is pure Java, so a single APK runs on every supported ABI.
+# ✨ Why BareLauncher?
 
-## Install (sideload)
+Most Android TV launchers are overloaded with:
 
-1. Download `BareLauncher-<version>.apk` from the
-   [latest release](https://github.com/f102mithunysypdlcjr-pixel/laughing-engine-9-3rd/releases/latest).
-2. Transfer the APK to your device. On Android TV the simplest path is
-   `adb install BareLauncher-<version>.apk` from a host PC.
-3. On the device, allow installation from your transfer source if
-   prompted.
-4. Open the installed app once so Android registers it as a launcher
-   candidate.
+- Ads
+- Recommendations
+- Telemetry
+- Analytics
+- Heavy animations
+- Background services
+- Unnecessary features
 
-### Make BareLauncher the default HOME
+BareLauncher removes all of that and focuses only on:
 
-- **Phone / tablet:** Settings → Apps → Default apps → Home app →
-  Bare Launcher.
-- **Android TV (Google TV):** Settings → Apps → See all apps →
-  Bare Launcher → Open. The first time you press the Home button after
-  that, Android prompts to pick a default — choose Bare Launcher.
-- **Stock Android TV (Leanback):** Settings → Device Preferences →
-  Home screen → choose Bare Launcher. On ROMs without that menu, use
-  `adb shell cmd package set-home-activity com.bare.launcher/.LauncherActivity`.
+- ⚡ Speed
+- 🧠 Low memory usage
+- 🎯 Smooth navigation
+- 📺 Instant app access
+- 🔋 Lightweight performance
+- 🛡️ Privacy
 
-To revert, repeat the same flow and pick the original launcher.
+Designed especially for:
+- Low-end Android TV devices
+- Older TVs
+- Fire TV Stick
+- Performance-focused users
 
-## Build from source
+---
 
-Requirements:
+# 🔥 Features
 
-- JDK 21
-- Gradle 8.14.1 (or use the wrapper generated on first run)
-- Android SDK with platforms `android-30` and `android-36`
+## 🧩 Core Features
 
-```bash
-git clone https://github.com/f102mithunysypdlcjr-pixel/laughing-engine-9-3rd.git
-cd laughing-engine-9-3rd/LauncherV15
-gradle wrapper --gradle-version 8.14.1
-./gradlew :app:assembleDebug
-```
+- Ultra lightweight launcher
+- Extremely fast performance
+- Minimal clean UI
+- Smooth D-pad navigation
+- Optimized scrolling
+- Fast app launching
 
-The unsigned debug APK lands at
-`LauncherV15/app/build/outputs/apk/debug/app-debug.apk`.
+---
 
-### Release build (signed)
+## 📦 App Management
 
-Drop your release keystore at `LauncherV15/app/release.jks` and pass the
-signing credentials as Gradle properties:
+- Hide apps
+- Reorder apps
+- App info shortcut
+- Uninstall shortcut
 
-```bash
-./gradlew :app:assembleRelease \
-  -Pandroid.injected.signing.store.file=$PWD/app/release.jks \
-  -Pandroid.injected.signing.store.password=<storePassword> \
-  -Pandroid.injected.signing.key.alias=<alias> \
-  -Pandroid.injected.signing.key.password=<keyPassword> \
-  -Pandroid.injected.signing.store.type=JKS
-```
+---
 
-The signed, R8-minified, resource-shrunk APK lands at
-`LauncherV15/app/build/outputs/apk/release/`.
+## ⌨️ Button Mapper
 
-CI does the same thing on every push to `main`; tagged commits also
-publish a GitHub Release. See `.github/workflows/main.yml`.
+- No Accessibility Service required
+- Limited buttons support
+- Works only on home screen
+- Lightweight implementation
 
-### Tests
+---
 
-```bash
-./gradlew :app:testDebugUnitTest          # JVM unit tests
-./gradlew :app:lintDebug                  # Android lint
-./gradlew :app:connectedDebugAndroidTest  # instrumentation (needs emulator/device)
-```
+## 🕒 Minimal UI
 
-## Releasing a new version
+- Small minimal clock
+- Clean interface
+- No distractions
 
-1. Bump `versionCode` and `versionName` in
-   `LauncherV15/app/build.gradle.kts`.
-2. Add a `## [<version>] — <date>` section to `CHANGELOG.md`.
-3. Merge to `main`. The CI quality gate (lint + unit tests +
-   instrumentation smoke test) runs automatically.
-4. Tag the merge commit and push:
+---
 
-   ```bash
-   git tag v<version>
-   git push origin v<version>
-   ```
+# 🛡️ Privacy First
 
-5. The release workflow assembles the signed APK, renames it to
-   `BareLauncher-<version>.apk`, and attaches it to a new GitHub
-   Release whose body is the matching `CHANGELOG.md` section.
+BareLauncher contains:
 
-## Project layout
+- ❌ No ads
+- ❌ No telemetry
+- ❌ No trackers
+- ❌ No analytics SDKs
+- ❌ No background spying
+- ❌ No unnecessary services
 
-```
-LauncherV15/
-  app/
-    src/main/java/com/bare/launcher/   # production sources
-    src/test/java/...                  # JVM unit tests
-    src/androidTest/java/...           # instrumentation smoke test
-    src/main/res/                      # drawables, strings, theme
-    proguard-rules.pro                 # R8 keep / strip rules
-    lint.xml                           # lint quality gate config
-.github/workflows/main.yml             # quality gate + release pipeline
-CHANGELOG.md
-LICENSE
-```
+Just a launcher.
 
-## License
+---
 
-[MIT](LICENSE).
+# ⚙️ Setting BareLauncher as Default
 
-## Changelog
+BareLauncher does **NOT** use Accessibility Services to override the stock launcher.
 
-See [CHANGELOG.md](CHANGELOG.md).
+To set BareLauncher as default launcher, use:
+
+## 📌 Launcher Manager (XDA)
+
+Available for:
+- Google TV
+- Android TV
+- Fire TV Stick
+
+---
+
+# 🎯 Philosophy
+
+BareLauncher is intentionally minimal.
+
+The goal is NOT to add hundreds of features.
+
+The goal is to keep the launcher:
+
+- Fast
+- Stable
+- Lightweight
+- Responsive
+- Distraction-free
+
+Every unnecessary feature adds:
+- RAM usage
+- CPU usage
+- Background load
+- Bugs
+- Lag
+
+BareLauncher avoids all of that.
+
+---
+
+# 🚀 Performance Focus
+
+BareLauncher is made for:
+
+- Instant navigation
+- Fast rendering
+- Low RAM usage
+- Smooth scrolling
+- Long-term stability
+
+No hidden background activity.  
+No heavy processes running all the time.  
+
+Pure launcher experience.
+
+---
+
+# ☕ Support Development
+
+BareLauncher is completely free.
+
+If you enjoy the project and want to support development:
+
+## ☕ Buy Me a Coffee
+
+Your support helps improve the launcher while keeping it:
+- Free
+- Lightweight
+- Privacy-friendly
+
+---
+
+# ⚠️ Disclaimer
+
+Button mapper functionality is intentionally limited to keep the launcher lightweight and fast without Accessibility Services.
+
+Some functionality may vary depending on:
+- Android TV version
+- Fire OS restrictions
+- OEM firmware
+- Manufacturer modifications
+
+---
+
+# 🏁 Goal
+
+> Create the fastest and cleanest Android TV launcher possible.
