@@ -91,6 +91,27 @@ sink, and a hardened release pipeline.
   bump and CI changes; will land in 1.2.0 with the same
   performance-preservation contract.
 
+### Release engineering
+
+- **Public-release polish at the repository root.** Added `README.md`
+  (sideload install / make-default / build-from-source / release
+  process) and `LICENSE` (MIT) so the project is legally and
+  practically distributable.
+- **ABI cap** for the shipped APK: `armeabi-v7a` + `arm64-v8a`.
+  The launcher is pure Java with zero native dependencies, so the
+  produced APK has no `lib/` folder and a single binary already
+  runs on every Android ABI; the new `ndk.abiFilters` block is a
+  defensive cap so any future transitive native dependency cannot
+  silently bloat the APK with x86 / x86_64 binaries we do not test
+  against.
+- **Tag-triggered GitHub Release pipeline.** Pushing a `v<semver>` tag
+  (e.g. `v1.1.0`) now runs the full quality gate (lint + unit tests
+  + emulator smoke test), assembles and signs the release APK,
+  renames it to `BareLauncher-<version>.apk`, and creates a GitHub
+  Release whose body is the matching `CHANGELOG.md` section. Uses
+  the `gh` CLI preinstalled on the runner — no third-party
+  "create-release" action, no extra supply-chain surface.
+
 ## [1.0.0] — initial public revision
 
 - Single-activity, zero-runtime-dependency Android TV / phone HOME

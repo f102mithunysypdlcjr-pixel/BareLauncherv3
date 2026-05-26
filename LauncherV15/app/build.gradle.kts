@@ -29,6 +29,21 @@ android {
         // (and any local emulator run) can find and execute the smoke test
         // under src/androidTest. JUnit 4 runner shipped with androidx.test.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // ABI cap for the shipped APK.
+        //
+        // Today the launcher is pure Java with zero native dependencies, so
+        // the produced APK has no `lib/` folder and a single binary already
+        // runs on every Android ABI. This `abiFilters` block is therefore a
+        // no-op against the current dependency set — but it is a defensive
+        // cap: if a future transitive dependency ever brings in a native
+        // library, R8 / AGP will package only `armeabi-v7a` (32-bit ARM,
+        // legacy Android TV boxes) and `arm64-v8a` (every modern phone /
+        // tablet / TV). x86 and x86_64 binaries — which we do not test
+        // against — can never bloat the APK without an explicit edit here.
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
     }
 
     compileOptions {
