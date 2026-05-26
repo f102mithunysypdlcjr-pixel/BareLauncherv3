@@ -71,6 +71,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -301,9 +302,12 @@ public class LauncherActivity extends Activity {
             KeyEvent.KEYCODE_MENU,
             KeyEvent.KEYCODE_CAPTIONS,
     };
-    private static final String[] SHORTCUT_LABELS   = {
-            "Red", "Green", "Yellow", "Blue", "Menu", "Subtitle",
-    };
+    // Populated in onCreate() from string resources (see initShortcutLabels).
+    // Kept as an instance String[] so existing index-based accesses
+    // (SHORTCUT_LABELS.length, SHORTCUT_LABELS[i]) keep working without
+    // touching every callsite. Length and index order MUST stay locked to
+    // SHORTCUT_KEYCODES — they're parallel arrays.
+    private final String[] SHORTCUT_LABELS = new String[SHORTCUT_KEYCODES.length];
     // Color tag drawn next to each row label. ARGB. 0 = no tag (Menu/Subtitle).
     private static final int[]    SHORTCUT_TAGS     = {
             0xFFE5484D, 0xFF30A46C, 0xFFF5C518, 0xFF3E63DD, 0, 0,
@@ -427,10 +431,8 @@ public class LauncherActivity extends Activity {
 
     private void applyStoredOrder(List<AppInfo> apps) {
         String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_APP_ORDER, null);
-        if (raw == null || raw.isEmpty()) return;
-        String[] order = raw.split(",", -1);
-        ArrayMap<String, Integer> rank = new ArrayMap<>(order.length);
-        for (int i = 0; i < order.length; i++) rank.put(order[i], i);
+        Map<String, Integer> rank = AppOrder.parse(raw);
+        if (rank.isEmpty()) return;
         Collections.sort(apps, (a, b) -> {
             Integer ra = rank.get(a.packageName), rb = rank.get(b.packageName);
             if (ra != null && rb != null) return ra - rb;
@@ -447,12 +449,10 @@ public class LauncherActivity extends Activity {
 
     private void saveOrder() {
         if (appList.isEmpty()) return;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < appList.size(); i++) {
-            if (i > 0) sb.append(',');
-            sb.append(appList.get(i).packageName);
-        }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_APP_ORDER, sb.toString()).apply();
+        ArrayList<String> pkgs = new ArrayList<>(appList.size());
+        for (int i = 0; i < appList.size(); i++) pkgs.add(appList.get(i).packageName);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(KEY_APP_ORDER, AppOrder.serialize(pkgs)).apply();
     }
 
     @Override
@@ -462,6 +462,7 @@ public class LauncherActivity extends Activity {
         DisplayMetrics dm = getResources().getDisplayMetrics();
         density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels;
         pm = getPackageManager();
+        initShortcutLabels();
         initCaches();
         setContentView(buildLayout());
         hideSystemUI();
@@ -555,6 +556,12 @@ public class LauncherActivity extends Activity {
         shutdown(iconExecutor); shutdown(wpExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
+        // Explicitly drop the Drawable references on the wallpaper
+        // ImageViews. The view is being detached so GC reclaims them
+        // eventually, but holding the bitmap until the next GC pass is
+        // wasteful when we already know the activity is finishing.
+        if (wallpaperFront != null) wallpaperFront.setImageDrawable(null);
+        if (wallpaperBack  != null) wallpaperBack .setImageDrawable(null);
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
@@ -682,7 +689,7 @@ public class LauncherActivity extends Activity {
         shelfLp.gravity = Gravity.BOTTOM;
         shelfLp.setMargins(0, 0, 0, dp(12));
         shelf.setLayoutParams(shelfLp);
-        shelf.setContentDescription("App shelf");
+        shelf.setContentDescription(getString(R.string.cd_app_shelf));
         shelf.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         root.addView(shelf);
 
@@ -690,7 +697,7 @@ public class LauncherActivity extends Activity {
         clockView.setShadowLayer(dp(14), 0, dp(3), 0xCC000000);
         clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
         clockView.setIncludeFontPadding(false);
-        clockView.setContentDescription("Current time");
+        clockView.setContentDescription(getString(R.string.cd_clock));
         clockView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
         clkLp.gravity = Gravity.TOP | Gravity.START;
@@ -725,7 +732,7 @@ public class LauncherActivity extends Activity {
         netLp.setMarginEnd(MARG_E + BTN_VIEW_SZ + BTN_GAP);
         netBtn.setLayoutParams(netLp);
         netBtn.setClipBounds(null);
-        netBtn.setContentDescription("Network settings");
+        netBtn.setContentDescription(getString(R.string.cd_network_settings));
         root.addView(netBtn);
 
         View mpLocal = buildMapperBtn(BTN_SZ);
@@ -736,7 +743,7 @@ public class LauncherActivity extends Activity {
         // Leftmost of the three: 2 stride steps from the right edge.
         mpLp.setMarginEnd(MARG_E + 2 * (BTN_VIEW_SZ + BTN_GAP));
         mpLocal.setLayoutParams(mpLp);
-        mpLocal.setContentDescription("Remap remote buttons");
+        mpLocal.setContentDescription(getString(R.string.cd_remap_remote));
         root.addView(mpLocal);
 
         View wpLocal = buildWpBtn(BTN_SZ);
@@ -746,7 +753,7 @@ public class LauncherActivity extends Activity {
         wpLp.topMargin = MARG_T;
         wpLp.setMarginEnd(MARG_E);
         wpLocal.setLayoutParams(wpLp);
-        wpLocal.setContentDescription("Change wallpaper");
+        wpLocal.setContentDescription(getString(R.string.cd_change_wallpaper));
         root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
@@ -760,7 +767,7 @@ public class LauncherActivity extends Activity {
         FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(ringSize, ringSize);
         ringView.setLayoutParams(ringLp);
         ringView.setVisibility(View.INVISIBLE);
-        ringView.setContentDescription("Selection ring");
+        ringView.setContentDescription(getString(R.string.cd_selection_ring));
         root.addView(ringView);
 
         menuOverlay = new FrameLayout(this) {
@@ -803,7 +810,7 @@ public class LauncherActivity extends Activity {
         final int itemRadius = dp(8);
 
         menuUninstall = new TextView(this);
-        menuUninstall.setText("✕  Uninstall");
+        menuUninstall.setText(R.string.menu_uninstall);
         menuUninstall.setTextColor(0xFFFF6B6B);
         menuUninstall.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         menuUninstall.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -811,7 +818,7 @@ public class LauncherActivity extends Activity {
         menuUninstall.setPadding(dp(20), dp(11), dp(20), dp(11));
         menuUninstall.setClickable(true);
         menuUninstall.setFocusable(false);
-        menuUninstall.setContentDescription("Uninstall app");
+        menuUninstall.setContentDescription(getString(R.string.cd_uninstall_app));
         android.graphics.drawable.GradientDrawable uBg =
                 new android.graphics.drawable.GradientDrawable();
         uBg.setCornerRadius(itemRadius);
@@ -828,7 +835,7 @@ public class LauncherActivity extends Activity {
         });
 
         menuAppInfo = new TextView(this);
-        menuAppInfo.setText("ⓘ  App Info");
+        menuAppInfo.setText(R.string.menu_app_info);
         menuAppInfo.setTextColor(Color.WHITE);
         menuAppInfo.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         menuAppInfo.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -836,7 +843,7 @@ public class LauncherActivity extends Activity {
         menuAppInfo.setPadding(dp(20), dp(11), dp(20), dp(11));
         menuAppInfo.setClickable(true);
         menuAppInfo.setFocusable(false);
-        menuAppInfo.setContentDescription("Open app info in system settings");
+        menuAppInfo.setContentDescription(getString(R.string.cd_open_app_info));
         android.graphics.drawable.GradientDrawable iBg =
                 new android.graphics.drawable.GradientDrawable();
         iBg.setCornerRadius(itemRadius);
@@ -853,7 +860,7 @@ public class LauncherActivity extends Activity {
         });
 
         menuMove = new TextView(this);
-        menuMove.setText("⇔  Move");
+        menuMove.setText(R.string.menu_move);
         menuMove.setTextColor(Color.WHITE);
         menuMove.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         menuMove.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -861,7 +868,7 @@ public class LauncherActivity extends Activity {
         menuMove.setPadding(dp(20), dp(11), dp(20), dp(11));
         menuMove.setClickable(true);
         menuMove.setFocusable(false);
-        menuMove.setContentDescription("Move app position");
+        menuMove.setContentDescription(getString(R.string.cd_move_app_position));
         android.graphics.drawable.GradientDrawable mBg =
                 new android.graphics.drawable.GradientDrawable();
         mBg.setCornerRadius(itemRadius);
@@ -1387,7 +1394,7 @@ public class LauncherActivity extends Activity {
             try { startActivity(new Intent(a).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return; }
             catch (Exception ignored) {}
         }
-        showToast("Cannot open network settings");
+        showToast(getString(R.string.toast_no_network_settings));
     }
 
     final class RecyclingShelfView extends ViewGroup {
@@ -2225,7 +2232,7 @@ public class LauncherActivity extends Activity {
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 if (tryUninstall(fallback)) return;
 
-                showToast("Cannot uninstall " + appToUninstall.label);
+                showToast(getString(R.string.toast_cannot_uninstall, appToUninstall.label));
             }
 
             /** Open the system "App info" page for the focused app.
@@ -2244,7 +2251,7 @@ public class LauncherActivity extends Activity {
                 try {
                     if (i.resolveActivity(pm) != null) { startActivity(i); return; }
                 } catch (Exception ignored) {}
-                showToast("Cannot open app info");
+                showToast(getString(R.string.toast_no_app_info));
             }
 
             private boolean tryUninstall(Intent intent) {
@@ -2413,7 +2420,7 @@ public class LauncherActivity extends Activity {
             Intent d = new Intent(Intent.ACTION_MAIN);
             d.setComponent(app.component); d.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(d);
-        } catch (Exception e) { showToast("App not available"); }
+        } catch (Exception e) { showToast(getString(R.string.toast_app_unavailable)); }
     }
 
     // ── Remote-key → app shortcut routing ────────────────────────────────
@@ -2786,7 +2793,7 @@ public class LauncherActivity extends Activity {
         manageBg.setColor(Color.TRANSPARENT);
         manage.setBackground(manageBg);
         TextView manageLabel = new TextView(this);
-        manageLabel.setText("Manage hidden apps");
+        manageLabel.setText(R.string.keymap_manage_hidden);
         // Idle colour is a bit dimmer than slot-row labels (0xCCFFFFFF →
         // 0x99FFFFFF) so the row visibly reads as a different category
         // even before the user notices the divider. Selected colour
@@ -2853,7 +2860,7 @@ public class LauncherActivity extends Activity {
         hideView.setClipToPadding(false);
 
         TextView hideTitle = new TextView(this);
-        hideTitle.setText("Manage hidden apps");
+        hideTitle.setText(R.string.keymap_manage_hidden);
         hideTitle.setTextColor(0xFFEFEFEF);
         hideTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         hideTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -3053,7 +3060,7 @@ public class LauncherActivity extends Activity {
             TextView val   = (TextView)  row.getChildAt(3);
 
             if (pkg == null) {
-                val.setText("Not assigned");
+                val.setText(R.string.keymap_not_assigned);
                 icon.setVisibility(View.GONE);
                 icon.setImageDrawable(null);
             } else {
@@ -3159,7 +3166,7 @@ public class LauncherActivity extends Activity {
         keymapPickerSlotRow = rowIdx;
         TextView pt = keymapPickerTitle;
         if (pt != null) {
-            pt.setText("Pick app for " + SHORTCUT_LABELS[rowIdx]);
+            pt.setText(getString(R.string.keymap_pick_app_for, SHORTCUT_LABELS[rowIdx]));
         }
         if (keymapPickerBuiltSize != appList.size()) {
             rebuildPickerChips();
@@ -3222,7 +3229,7 @@ public class LauncherActivity extends Activity {
         strip.removeAllViews();
         // First chip is the "Not assigned" sentinel — always present so the
         // user can clear a binding from the picker without a separate gesture.
-        addPickerChip(strip, "Not assigned", null, true);
+        addPickerChip(strip, getString(R.string.keymap_not_assigned), null, true);
         for (int i = 0; i < appList.size(); i++) {
             AppInfo a = appList.get(i);
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
@@ -3768,7 +3775,9 @@ public class LauncherActivity extends Activity {
     private Bitmap processIcon(Drawable d) {
         if (d == null) return null;
         int sz = dp(ICON_DP);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && d instanceof AdaptiveIconDrawable) {
+        // AdaptiveIconDrawable was introduced in API 26 (O); minSdk is 30,
+        // so the SDK guard is redundant — keep only the type check.
+        if (d instanceof AdaptiveIconDrawable) {
             AdaptiveIconDrawable aid = (AdaptiveIconDrawable) d;
             int bleed = Math.round(sz * 18f / 108f);
             int full  = sz + bleed * 2;
@@ -3978,7 +3987,7 @@ public class LauncherActivity extends Activity {
                 if (fb != null) {
                     crossfadeWallpaper(fb);
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_WP_URI, uri.toString()).apply();
-                } else { showToast("Could not load wallpaper"); loadSystemWallpaper(); }
+                } else { showToast(getString(R.string.toast_wallpaper_load_failed)); loadSystemWallpaper(); }
             });
         });
     }
@@ -4060,7 +4069,7 @@ public class LauncherActivity extends Activity {
         i.setType("image/*"); i.addCategory(Intent.CATEGORY_OPENABLE);
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try { startActivityForResult(i, REQ_PICK_WP); }
-        catch (Exception e) { showToast("No file picker available"); }
+        catch (Exception e) { showToast(getString(R.string.toast_no_file_picker)); }
     }
 
     @Override @SuppressWarnings("deprecation")
@@ -4070,7 +4079,7 @@ public class LauncherActivity extends Activity {
             Uri uri = data.getData();
             if (uri != null) {
                 try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
-                catch (SecurityException e) { showToast("Could not get permission for this image"); return; }
+                catch (SecurityException e) { showToast(getString(R.string.toast_wallpaper_no_permission)); return; }
                 userWpLoading.set(false);
                 applyWallpaperFromUri(uri);
             }
@@ -4092,6 +4101,18 @@ public class LauncherActivity extends Activity {
         try { unregisterReceiver(packageReceiver); } catch (IllegalArgumentException ignored) {}
     }
 
+    /** Resolve the user-visible labels for every remappable remote key from
+     *  string resources. Called once from onCreate; the resulting array is
+     *  read on every keymap-overlay open and on every picker-title rebuild. */
+    private void initShortcutLabels() {
+        SHORTCUT_LABELS[0] = getString(R.string.key_red);
+        SHORTCUT_LABELS[1] = getString(R.string.key_green);
+        SHORTCUT_LABELS[2] = getString(R.string.key_yellow);
+        SHORTCUT_LABELS[3] = getString(R.string.key_blue);
+        SHORTCUT_LABELS[4] = getString(R.string.key_menu);
+        SHORTCUT_LABELS[5] = getString(R.string.key_subtitle);
+    }
+
     private void initCaches() {
         int memMb   = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
         int cacheMb = Math.min(memMb / 8, 16);
@@ -4106,21 +4127,15 @@ public class LauncherActivity extends Activity {
                 new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
     }
 
-    @SuppressWarnings("deprecation")
     private void hideSystemUI() {
         Window w = getWindow();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            w.setDecorFitsSystemWindows(false);
-            WindowInsetsController c = w.getInsetsController();
-            if (c != null) {
-                c.hide(WindowInsets.Type.systemBars());
-                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-            }
-        } else {
-            w.getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        // Modern WindowInsetsController path. minSdk is 30 (R), so the
+        // legacy SystemUiVisibility branch is unreachable and removed.
+        w.setDecorFitsSystemWindows(false);
+        WindowInsetsController c = w.getInsetsController();
+        if (c != null) {
+            c.hide(WindowInsets.Type.systemBars());
+            c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         }
     }
 
@@ -4130,40 +4145,5 @@ public class LauncherActivity extends Activity {
         if (currentToast != null) currentToast.cancel();
         currentToast = Toast.makeText(this, msg, Toast.LENGTH_SHORT);
         currentToast.show();
-    }
-
-    static final class RingView extends View {
-        // Premium clean ring — no shadow, no glow, single crisp stroke that
-        // hugs the icon edge with ZERO gap. The ring's inner edge sits exactly
-        // on the icon's outer edge so it reads as a halo wrapped around the
-        // icon, not a separate floating circle.
-        private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private float cx, cy, ringRadius;
-
-        private final float iconR;
-
-        RingView(Context ctx, int strokePx, int iconPx) {
-            super(ctx);
-            // Hardware layer is fine for a solid stroke.
-            setLayerType(View.LAYER_TYPE_HARDWARE, null);
-            this.iconR = iconPx / 2f;
-
-            ring.setStyle(Paint.Style.STROKE);
-            ring.setColor(0xFFFFFFFF);
-            ring.setStrokeWidth(strokePx);
-        }
-
-        @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
-            super.onSizeChanged(w, h, ow, oh);
-            cx = w / 2f; cy = h / 2f;
-            // Inner edge of the stroke = icon outer edge (zero gap). Stroke is
-            // centred on the radius, so radius = iconR + strokeWidth / 2.
-            ringRadius = iconR + ring.getStrokeWidth() / 2f;
-        }
-
-        @Override protected void onDraw(Canvas c) {
-            if (ringRadius <= 0) return;
-            c.drawCircle(cx, cy, ringRadius, ring);
-        }
     }
 }

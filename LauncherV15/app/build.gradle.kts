@@ -13,6 +13,11 @@ android {
         versionCode   = 1
         versionName   = "1.0.0"
         resourceConfigurations += listOf("en")
+
+        // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
+        // (and any local emulator run) can find and execute the smoke test
+        // under src/androidTest. JUnit 4 runner shipped with androidx.test.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -60,18 +65,64 @@ android {
         resValues   = false
     }
 
+    // Lint is now a real quality gate.
+    //
+    // History: lint was previously fully disabled (abortOnError = false,
+    // checkReleaseBuilds = false). That meant the build silently ignored
+    // every static-analysis warning Android offered. We now run lint on
+    // every build and FAIL on errors. Specific issues that we cannot
+    // fix in one quality pass without behavioural risk are surfaced as
+    // warnings rather than errors via lintConfig (see lint.xml at the
+    // module root). New issues introduced by future changes will fail
+    // the build, which is what a quality gate should do.
     lint {
-        abortOnError       = false
-        checkReleaseBuilds = false
+        abortOnError       = true
+        checkReleaseBuilds = true
+        warningsAsErrors   = false
+        // Skip dependencies — there are none, but explicit beats implicit.
+        checkDependencies  = false
+        // Generate machine-readable reports the CI lint job uploads.
+        textReport         = true
+        htmlReport         = true
+        xmlReport          = true
+        lintConfig         = file("lint.xml")
+        // SyntheticAccessor: this codebase intentionally uses inner classes
+        // (RecyclingShelfView, CellView) that touch outer-class fields. The
+        // synthetic accessors lint flags are a real cost on Dalvik but
+        // negligible on ART (minSdk 30 ⇒ ART always). Disable rather than
+        // restructure, which would be far more invasive than the saving
+        // justifies.
+        disable += setOf("SyntheticAccessor")
     }
 }
 
-// Block Kotlin from entering via any transitive dep
-configurations.all {
+// Block Kotlin from entering via any transitive dep — applies to the
+// PRODUCTION classpaths only. Test classpaths are exempt so androidx.test
+// can pull its dependencies (which transitively include Kotlin runtime
+// stubs in newer versions). The Kotlin runtime stays out of the released
+// APK because androidTestImplementation produces a separate test APK.
+configurations.matching {
+    val n = it.name
+    !n.contains("Test", ignoreCase = true) &&
+            !n.startsWith("androidTest") &&
+            !n.startsWith("test")
+}.configureEach {
     exclude(group = "org.jetbrains.kotlin")
     exclude(group = "androidx.core", module = "core-ktx")
 }
 
 dependencies {
-    // ZERO external dependencies — pure Android SDK only
+    // ZERO external dependencies in the production APK — pure Android SDK only.
+
+    // Local JVM unit tests (run on the host, no emulator). Tiny, only
+    // the launcher's pure-Java helpers (e.g. AppOrder) are exercised here.
+    testImplementation("junit:junit:4.13.2")
+
+    // Instrumentation tests (require emulator/device). The smoke test
+    // boots LauncherActivity and verifies basic layout. Compiles in every
+    // build so a structural break to the activity fails CI even when no
+    // emulator runs the test.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
 }

@@ -1,14 +1,85 @@
-name: Build BareLauncher Release APK
+name: Build BareLauncher
 
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # Quality gate: lint + JVM unit tests. Runs on every PR. Independent
+  # of the signing / release pipeline so a broken keystore secret on a
+  # fork PR can't block lint feedback.
+  # ──────────────────────────────────────────────────────────────────
+  quality:
+    name: Lint and unit tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.1"
+
+      - name: Generate Gradle wrapper
+        working-directory: LauncherV15
+        run: |
+          gradle wrapper --gradle-version 8.14.1
+          chmod +x gradlew
+
+      - name: JVM unit tests
+        working-directory: LauncherV15
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Android lint (debug)
+        working-directory: LauncherV15
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
+        run: ./gradlew :app:lintDebug --no-daemon --stacktrace
+
+      - name: Upload lint report
+        # Always upload the report even on failure so the developer can
+        # see exactly which issues lint flagged without re-running CI.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: |
+            LauncherV15/app/build/reports/lint-results-debug.html
+            LauncherV15/app/build/reports/lint-results-debug.xml
+          retention-days: 14
+
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: LauncherV15/app/build/reports/tests/testDebugUnitTest
+          retention-days: 14
+
+  # ──────────────────────────────────────────────────────────────────
+  # Release pipeline: assemble + sign the production APK. Runs on every
+  # main push and on workflow_dispatch. Skipped on PRs (no keystore
+  # secret access from forks) — lint+tests above catch breakage there.
+  # ──────────────────────────────────────────────────────────────────
   build:
     name: Build and Sign Release APK
     runs-on: ubuntu-24.04
+    needs: quality
+    if: github.event_name != 'pull_request'
 
     steps:
       - name: Checkout source
