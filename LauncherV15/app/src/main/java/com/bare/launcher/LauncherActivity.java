@@ -144,6 +144,10 @@ public class LauncherActivity extends Activity {
         @Override protected Matrix initialValue() { return new Matrix(); }
     };
     private static final ThreadLocal<byte[]> sPixelBuf = new ThreadLocal<>();
+    // Reused per-thread sample-point buffer for needsFill — flat int[24]
+    // packed as (x,y) pairs. Beats a fresh int[][] allocation on every
+    // icon at cold-start.
+    private static final ThreadLocal<int[]>  sFillPts  = new ThreadLocal<>();
 
     private static final Paint sMaskPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint sSrcInPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
@@ -378,6 +382,14 @@ public class LauncherActivity extends Activity {
     // Built-row count cached so we only rebuild the toggle rows when the
     // app list size actually changes between opens.
     private int                         keymapHideBuiltSize = -1;
+    // Set true whenever a slot row's text content (binding/label) might
+    // have changed. equalizeKeymapRowWidths is expensive (7 view measures)
+    // and was previously called on every UP/DOWN press — a no-op since
+    // text didn't change between presses. With this flag we only re-
+    // measure on the first refresh after the overlay opens, after a
+    // commit from the picker, or after a package broadcast invalidates
+    // the chip caches.
+    private boolean keymapRowsNeedEqualize = true;
     // Set true on every toggle; on overlay close we re-apply the filtered
     // list to the shelf only if anything actually changed during the
     // session (avoids a full shelf rebuild for read-only opens).
@@ -425,9 +437,11 @@ public class LauncherActivity extends Activity {
             // Invalidate cached picker chip strip — its identities can no
             // longer be trusted to match the in-memory appList after a
             // package install / remove / replace. Same applies to the
-            // hide-manager toggle rows.
+            // hide-manager toggle rows. Slot rows must be re-measured
+            // because a relabelled package can change the equalised width.
             keymapPickerBuiltSize = -1;
             keymapHideBuiltSize   = -1;
+            keymapRowsNeedEqualize = true;
             RecyclingShelfView s = shelf;
             if (s == null) return;
             s.removeCallbacks(pkgReloadRunnable);
@@ -580,6 +594,11 @@ public class LauncherActivity extends Activity {
         // ImageViews. The view is being detached so GC reclaims them
         // eventually, but holding the bitmap until the next GC pass is
         // wasteful when we already know the activity is finishing.
+        // Recycle the underlying bitmaps explicitly — wallpaper bitmaps
+        // are screen-sized ARGB_8888 (8-32 MB), and on TV ROMs without
+        // largeHeap that memory is worth freeing immediately.
+        recycleImageViewBitmap(wallpaperFront);
+        recycleImageViewBitmap(wallpaperBack);
         if (wallpaperFront != null) wallpaperFront.setImageDrawable(null);
         if (wallpaperBack  != null) wallpaperBack .setImageDrawable(null);
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
@@ -601,6 +620,20 @@ public class LauncherActivity extends Activity {
         try { ex.awaitTermination(300, TimeUnit.MILLISECONDS); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         finally { ex.shutdownNow(); }
+    }
+
+    /** Recycle the bitmap currently held by an ImageView, if any. Used on
+     *  activity destroy to free wallpaper memory immediately rather than
+     *  waiting for GC. Safe: the caller clears the ImageView's drawable
+     *  reference right after, so no consumer holds a live reference to
+     *  the bitmap when this returns. */
+    private static void recycleImageViewBitmap(ImageView iv) {
+        if (iv == null) return;
+        android.graphics.drawable.Drawable d = iv.getDrawable();
+        if (d instanceof BitmapDrawable) {
+            Bitmap b = ((BitmapDrawable) d).getBitmap();
+            if (b != null && !b.isRecycled()) b.recycle();
+        }
     }
 
     @Override
@@ -1958,9 +1991,12 @@ public class LauncherActivity extends Activity {
             int viewportCenterX = scrollX + w / 2;
             int bestIdx = focusedIndex;
             int bestDist = Integer.MAX_VALUE;
+            // Use the precomputed sidePad (== dp(10) at construction) instead
+            // of calling dp(10) per iteration — same value, no per-loop math.
+            int halfCellW = cellW / 2;
             for (int i = 0; i < attached.size(); i++) {
                 int idx = attached.keyAt(i);
-                int cellCenter = centerX + idx * stride + dp(10) + cellW / 2;
+                int cellCenter = centerX + idx * stride + sidePad + halfCellW;
                 int dist = Math.abs(cellCenter - viewportCenterX);
                 if (dist < bestDist) { bestDist = dist; bestIdx = idx; }
             }
@@ -2530,7 +2566,14 @@ public class LauncherActivity extends Activity {
             int eq    = raw.indexOf('=', start);
             if (eq > start && eq < end - 1) {
                 try {
-                    int kc = Integer.parseInt(raw, start, eq, 10);
+                    // Use String.substring + Integer.parseInt(String). The
+                    // CharSequence overload Integer.parseInt(CharSequence,
+                    // int, int, int) was only added in API 33 — minSdk=30
+                    // would crash with NoSuchMethodError on Android 11/12.
+                    // The substring allocation runs at most ~6 times per
+                    // launcher cold-start (one per stored shortcut), so
+                    // the cost is negligible against the safety win.
+                    int kc = Integer.parseInt(raw.substring(start, eq));
                     String pkg = raw.substring(eq + 1, end);
                     if (!pkg.isEmpty()) {
                         if (isCuratedShortcutKey(kc)) keyMap.put(kc, pkg);
@@ -2591,18 +2634,20 @@ public class LauncherActivity extends Activity {
     }
 
     /** Drop hidden-set entries whose package is no longer installed.
-     *  Called from loadApps once the fresh appList is known. Cheap: most
-     *  users hide ≤ a handful of packages, so the inner loop is tiny. */
+     *  Called from loadApps once the fresh appList is known. O(N + M)
+     *  via a single ArraySet pass over fresh package names; the prior
+     *  nested loop was O(N · M) and quadratic when many apps were
+     *  hidden — fine in practice but trivially fixed. */
     private void pruneHiddenApps(List<AppInfo> fresh) {
         if (hiddenApps.isEmpty()) return;
+        ArraySet<String> installed = new ArraySet<>(fresh.size());
+        for (int j = 0, m = fresh.size(); j < m; j++) installed.add(fresh.get(j).packageName);
         boolean changed = false;
         for (int i = hiddenApps.size() - 1; i >= 0; i--) {
-            String pkg = hiddenApps.valueAt(i);
-            boolean found = false;
-            for (int j = 0, m = fresh.size(); j < m; j++) {
-                if (fresh.get(j).packageName.equals(pkg)) { found = true; break; }
+            if (!installed.contains(hiddenApps.valueAt(i))) {
+                hiddenApps.removeAt(i);
+                changed = true;
             }
-            if (!found) { hiddenApps.removeAt(i); changed = true; }
         }
         if (changed) saveHiddenApps();
     }
@@ -3202,8 +3247,14 @@ public class LauncherActivity extends Activity {
 
         // Equalise row widths to the widest row so the menu is exactly as
         // wide as it needs to be (no dead space) AND the selection pill
-        // aligns across all rows. Cheap: 7 measure() passes on tiny rows.
-        equalizeKeymapRowWidths(col, rows);
+        // aligns across all rows. Only re-measure when bindings/labels
+        // might have changed — selection-only repaints (every UP/DOWN
+        // press) skip this entirely, saving 7 view-measure passes per
+        // navigation event.
+        if (keymapRowsNeedEqualize) {
+            equalizeKeymapRowWidths(col, rows);
+            keymapRowsNeedEqualize = false;
+        }
     }
 
     /** Measure every selectable row in the slot column and snap them all to
@@ -3308,6 +3359,9 @@ public class LauncherActivity extends Activity {
             }
         }
         saveKeyMap();
+        // Slot-row text just changed — schedule a re-measure on the next
+        // refresh so equalised widths reflect the new app label.
+        keymapRowsNeedEqualize = true;
         refreshKeymapRows();
         exitAppPicker();
     }
@@ -3920,12 +3974,18 @@ public class LauncherActivity extends Activity {
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
         boolean fill = needsFill(raw, sz);
-        // Always apply white fill for transparent icons — ensures premium consistent look
-        int  csz  = Math.round(sz * (fill ? 0.72f : 1.0f));
+        // Fast path when no white plate is needed: csz==sz and inset==0 means
+        // the matrix transform was an identity, the saveLayer/canvas was a
+        // pointless copy, and the intermediate `out` bitmap was a clone of
+        // `raw`. Just clip the rendered drawable to a circle and return —
+        // saves one ARGB_8888 allocation (~iconPx²·4 bytes ≈ 18 KB at 68 dp
+        // on hdpi, more on xxxhdpi) and one full-size canvas draw per icon.
+        if (!fill) return clipToCircle(raw, sz);
+        int  csz   = Math.round(sz * 0.72f);
         int  inset = (sz - csz) / 2;
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
-        if (fill) canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
+        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
         Matrix mx = sMatrixTL.get();
         mx.setScale((float) csz / sz, (float) csz / sz);
         mx.postTranslate(inset, inset);
@@ -3956,25 +4016,43 @@ public class LauncherActivity extends Activity {
             src.copyPixelsToBuffer(buf);
         }
 
+        // Sample 12 points laid out as 4 outer corners + 4 edge midpoints +
+        // 4 deeper-inset corners. Coordinates packed into a flat int[24]
+        // (stride 2: x,y,x,y,...) reused across calls via ThreadLocal —
+        // the previous int[][] form allocated 13 arrays (1 outer + 12 inner)
+        // every time processIcon ran, which is once per app icon at startup.
         int inset = Math.max(1, sz / 16);
-        int[][] pts = {
-            // 4 outer corners (just inside edge)
-            {inset, inset}, {sz-1-inset, inset}, {inset, sz-1-inset}, {sz-1-inset, sz-1-inset},
-            // 4 edge midpoints
-            {sz/2, inset}, {inset, sz/2}, {sz-1-inset, sz/2}, {sz/2, sz-1-inset},
-            // 4 deeper inset corners — guard against icons whose first ring of
-            // pixels is anti-aliased (alpha 0..30) but real content is just inside
-            {sz/8, sz/8}, {sz - sz/8 - 1, sz/8}, {sz/8, sz - sz/8 - 1}, {sz - sz/8 - 1, sz - sz/8 - 1}
-        };
+        int e    = sz - 1 - inset;   // edge index after inset
+        int q    = sz / 8;
+        int qe   = sz - q - 1;       // far inset
+        int[] pts = sFillPts.get();
+        if (pts == null) { pts = new int[24]; sFillPts.set(pts); }
+        // 4 outer corners
+        pts[ 0] = inset; pts[ 1] = inset;
+        pts[ 2] = e;     pts[ 3] = inset;
+        pts[ 4] = inset; pts[ 5] = e;
+        pts[ 6] = e;     pts[ 7] = e;
+        // 4 edge midpoints
+        pts[ 8] = sz/2;  pts[ 9] = inset;
+        pts[10] = inset; pts[11] = sz/2;
+        pts[12] = e;     pts[13] = sz/2;
+        pts[14] = sz/2;  pts[15] = e;
+        // 4 deeper inset corners — guard against icons whose first ring of
+        // pixels is anti-aliased (alpha 0..30) but real content is just inside
+        pts[16] = q;     pts[17] = q;
+        pts[18] = qe;    pts[19] = q;
+        pts[20] = q;     pts[21] = qe;
+        pts[22] = qe;    pts[23] = qe;
         int trans = 0;
-        for (int[] p : pts) {
+        for (int i = 0; i < 24; i += 2) {
+            int x = pts[i], y = pts[i + 1];
             int a = fast
-                ? (px[p[1] * rowBytes + p[0] * 4 + 3] & 0xFF)
-                : Color.alpha(src.getPixel(p[0], p[1]));
+                ? (px[y * rowBytes + x * 4 + 3] & 0xFF)
+                : Color.alpha(src.getPixel(x, y));
             if (a < 30) trans++;
         }
         // 6+ of 12 transparent (50%) → icon has a transparent background → fill.
-        return trans * 2 >= pts.length;
+        return trans >= 6;
     }
 
     private Bitmap renderDrawable(Drawable d, int sz) {
@@ -4116,7 +4194,12 @@ public class LauncherActivity extends Activity {
      *      then fade FRONT out — the user sees the new image revealed
      *      beneath. Once the fade ends we copy the bitmap up to FRONT,
      *      restore FRONT alpha to 1, and clear BACK. Roles never swap so
-     *      shelf/clock/buttons are never hidden. */
+     *      shelf/clock/buttons are never hidden.
+     *
+     *  Memory hygiene: the previous bitmap on FRONT is recycled after the
+     *  cross-fade ends. Wallpaper bitmaps are screen-sized ARGB_8888 (~8 MB
+     *  for 1080p, up to ~32 MB for 4K), so leaving the old one for GC after
+     *  every change is a real footprint win on TV ROMs with no largeHeap. */
     private void crossfadeWallpaper(Bitmap fb) {
         ImageView front = wallpaperFront, back = wallpaperBack;
         if (front == null || back == null || fb == null) return;
@@ -4130,6 +4213,26 @@ public class LauncherActivity extends Activity {
         // a half-faded view on screen.
         front.animate().cancel();
         back.animate().cancel();
+        // Capture the bitmap currently on FRONT so we can recycle it after
+        // promotion. Skip recycle if it happens to be the same instance as
+        // the new bitmap (wallpaper observer resending the same drawable).
+        final Bitmap oldBmp;
+        android.graphics.drawable.Drawable oldDrawable = front.getDrawable();
+        if (oldDrawable instanceof BitmapDrawable) {
+            Bitmap b = ((BitmapDrawable) oldDrawable).getBitmap();
+            oldBmp = (b != null && !b.isRecycled() && b != fb) ? b : null;
+        } else {
+            oldBmp = null;
+        }
+        // Recycle the bitmap that was on BACK before the previous swap (if
+        // any). After a previous cross-fade we cleared BACK's drawable to
+        // null but didn't recycle its bitmap; do it now before reusing the
+        // slot. In steady state this is a no-op.
+        android.graphics.drawable.Drawable oldBackDrawable = back.getDrawable();
+        if (oldBackDrawable instanceof BitmapDrawable) {
+            Bitmap b = ((BitmapDrawable) oldBackDrawable).getBitmap();
+            if (b != null && !b.isRecycled() && b != fb && b != oldBmp) b.recycle();
+        }
         back.setImageBitmap(fb);
         back.setAlpha(1f);
         final ImageView fFront = front;
@@ -4147,6 +4250,9 @@ public class LauncherActivity extends Activity {
                     fFront.setAlpha(1f);
                     fBack.setImageDrawable(null);
                     fBack.setAlpha(1f);
+                    // Free the previous wallpaper bitmap. Safe: at this
+                    // point no ImageView still references it.
+                    if (oldBmp != null && !oldBmp.isRecycled()) oldBmp.recycle();
                 })
                 .start();
     }
