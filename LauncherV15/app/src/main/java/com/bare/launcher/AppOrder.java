@@ -1,6 +1,5 @@
 package com.bare.launcher;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,18 +67,5 @@ final class AppOrder {
             first = false;
         }
         return sb.toString();
-    }
-
-    /**
-     * Convenience overload — callers that only have an iterable of objects
-     * with a known {@code packageName} can use {@link #serialize(List)} after
-     * mapping; this overload exists for symmetry with {@link #parse(String)}
-     * and is kept tiny to avoid pulling in any SDK types.
-     */
-    static List<String> packageNames(List<String> in) {
-        if (in == null) return new ArrayList<>(0);
-        ArrayList<String> out = new ArrayList<>(in.size());
-        for (String s : in) if (s != null) out.add(s);
-        return out;
     }
 }
