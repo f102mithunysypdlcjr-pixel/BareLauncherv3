@@ -95,8 +95,11 @@ sink, and a hardened release pipeline.
 
 - **Public-release polish at the repository root.** Added `README.md`
   (sideload install / make-default / build-from-source / release
-  process) and `LICENSE` (MIT) so the project is legally and
-  practically distributable.
+  process) and `LICENSE` (Apache License 2.0) so the project is
+  legally and practically distributable. Apache 2.0 chosen over MIT
+  for its explicit patent grant and contribution clauses, which
+  matter for a launcher that interacts with arbitrary installed
+  apps and may attract third-party patches.
 - **ABI cap** for the shipped APK: `armeabi-v7a` + `arm64-v8a`.
   The launcher is pure Java with zero native dependencies, so the
   produced APK has no `lib/` folder and a single binary already
