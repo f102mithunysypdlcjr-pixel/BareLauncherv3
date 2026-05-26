@@ -306,6 +306,10 @@ public class LauncherActivity extends Activity {
     // dense-int-key access pattern with zero autoboxing on every key press.
     private final SparseArray<String> keyMap            = new SparseArray<>();
     private FrameLayout               keymapOverlay     = null;
+    // The animated card lives inside keymapOverlay; we hold a separate
+    // reference because the dropdown animation (scale + fade + Y-translate)
+    // is applied to the card, not to the full-screen backdrop overlay.
+    private android.widget.LinearLayout keymapCard      = null;
     private android.widget.LinearLayout keymapColumn    = null;
     private int                       keymapSelectedRow = 0;
 
@@ -514,7 +518,7 @@ public class LauncherActivity extends Activity {
         wpBtnView = null; netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
         menuOverlay = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
-        keymapOverlay = null; keymapColumn = null;
+        keymapOverlay = null; keymapColumn = null; keymapCard = null;
         keymapPickerView = null; keymapPickerTitle = null;
         keymapPickerHsv = null; keymapPickerStrip = null;
         super.onDestroy();
@@ -731,10 +735,28 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout menuCol = new android.widget.LinearLayout(this);
         menuCol.setOrientation(android.widget.LinearLayout.VERTICAL);
         menuCol.setGravity(Gravity.CENTER_HORIZONTAL);
-        android.graphics.drawable.GradientDrawable menuBg = new android.graphics.drawable.GradientDrawable();
-        menuBg.setColor(0xEE111111);
-        menuBg.setCornerRadius(dp(10));
+        // Apple-TV plate matches the keymap card exactly: deep slate with a
+        // hairline rim. Dropping the previous opaque-black plate gives the
+        // app context menu the same visual vocabulary as the rest of the UI.
+        android.graphics.drawable.GradientDrawable menuBg =
+                new android.graphics.drawable.GradientDrawable();
+        menuBg.setColor(0xF21A1A1F);
+        menuBg.setCornerRadius(dp(12));
+        menuBg.setStroke(1, 0x1AFFFFFF);
         menuCol.setBackground(menuBg);
+        // Small inner padding so each rounded item-pill is inset from the
+        // card edge — otherwise a square selection would visually clash
+        // with the card's rounded outer corner.
+        menuCol.setPadding(dp(4), dp(4), dp(4), dp(4));
+        menuCol.setElevation(dp(8));
+
+        // Each menu item gets its OWN GradientDrawable as background so the
+        // selected highlight is a rounded pill (not a flat rectangle, which
+        // is what the previous setBackgroundColor call produced — and what
+        // looked clipped against the card's rounded outer corner).
+        // updateMenuHighlight just mutates the colour on these existing
+        // drawables; the rounded shape is fixed at construction time.
+        final int itemRadius = dp(8);
 
         menuUninstall = new TextView(this);
         menuUninstall.setText("✕  Uninstall");
@@ -742,10 +764,15 @@ public class LauncherActivity extends Activity {
         menuUninstall.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         menuUninstall.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         menuUninstall.setGravity(Gravity.CENTER);
-        menuUninstall.setPadding(dp(20), dp(12), dp(20), dp(12));
+        menuUninstall.setPadding(dp(20), dp(11), dp(20), dp(11));
         menuUninstall.setClickable(true);
         menuUninstall.setFocusable(false);
         menuUninstall.setContentDescription("Uninstall app");
+        android.graphics.drawable.GradientDrawable uBg =
+                new android.graphics.drawable.GradientDrawable();
+        uBg.setCornerRadius(itemRadius);
+        uBg.setColor(Color.TRANSPARENT);
+        menuUninstall.setBackground(uBg);
         menuUninstall.setOnClickListener(v -> {
             RecyclingShelfView s = shelf;
             if (s != null && s.reorderMode) {
@@ -756,19 +783,21 @@ public class LauncherActivity extends Activity {
             }
         });
 
-        View divider = new View(this);
-        divider.setBackgroundColor(0x33FFFFFF);
-
         menuAppInfo = new TextView(this);
         menuAppInfo.setText("ⓘ  App Info");
         menuAppInfo.setTextColor(Color.WHITE);
         menuAppInfo.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         menuAppInfo.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         menuAppInfo.setGravity(Gravity.CENTER);
-        menuAppInfo.setPadding(dp(20), dp(12), dp(20), dp(12));
+        menuAppInfo.setPadding(dp(20), dp(11), dp(20), dp(11));
         menuAppInfo.setClickable(true);
         menuAppInfo.setFocusable(false);
         menuAppInfo.setContentDescription("Open app info in system settings");
+        android.graphics.drawable.GradientDrawable iBg =
+                new android.graphics.drawable.GradientDrawable();
+        iBg.setCornerRadius(itemRadius);
+        iBg.setColor(Color.TRANSPARENT);
+        menuAppInfo.setBackground(iBg);
         menuAppInfo.setOnClickListener(v -> {
             RecyclingShelfView s = shelf;
             if (s != null && s.reorderMode) {
@@ -779,19 +808,21 @@ public class LauncherActivity extends Activity {
             }
         });
 
-        View divider2 = new View(this);
-        divider2.setBackgroundColor(0x33FFFFFF);
-
         menuMove = new TextView(this);
         menuMove.setText("⇔  Move");
         menuMove.setTextColor(Color.WHITE);
         menuMove.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         menuMove.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         menuMove.setGravity(Gravity.CENTER);
-        menuMove.setPadding(dp(20), dp(12), dp(20), dp(12));
+        menuMove.setPadding(dp(20), dp(11), dp(20), dp(11));
         menuMove.setClickable(true);
         menuMove.setFocusable(false);
         menuMove.setContentDescription("Move app position");
+        android.graphics.drawable.GradientDrawable mBg =
+                new android.graphics.drawable.GradientDrawable();
+        mBg.setCornerRadius(itemRadius);
+        mBg.setColor(Color.TRANSPARENT);
+        menuMove.setBackground(mBg);
         menuMove.setOnClickListener(v -> {
             RecyclingShelfView s = shelf;
             if (s != null && s.reorderMode) {
@@ -802,11 +833,18 @@ public class LauncherActivity extends Activity {
             }
         });
 
-        menuCol.addView(menuUninstall, new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
-        menuCol.addView(divider,       new android.widget.LinearLayout.LayoutParams(MATCH, 1));
-        menuCol.addView(menuAppInfo,   new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
-        menuCol.addView(divider2,      new android.widget.LinearLayout.LayoutParams(MATCH, 1));
-        menuCol.addView(menuMove,      new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
+        // Dividers removed — the rounded-pill selection state is enough to
+        // separate items visually, and removing them gives a cleaner
+        // Apple-TV-style menu with no horizontal noise.
+        android.widget.LinearLayout.LayoutParams itemLp =
+                new android.widget.LinearLayout.LayoutParams(dp(140), WRAP);
+        itemLp.bottomMargin = dp(2);
+        menuCol.addView(menuUninstall, itemLp);
+        android.widget.LinearLayout.LayoutParams itemLp2 =
+                new android.widget.LinearLayout.LayoutParams(dp(140), WRAP);
+        itemLp2.bottomMargin = dp(2);
+        menuCol.addView(menuAppInfo,   itemLp2);
+        menuCol.addView(menuMove,      new android.widget.LinearLayout.LayoutParams(dp(140), WRAP));
 
         menuOverlay.addView(menuCol, new FrameLayout.LayoutParams(WRAP, WRAP));
         root.addView(menuOverlay);
@@ -933,14 +971,37 @@ public class LauncherActivity extends Activity {
         RecyclingShelfView s = shelf; if (s == null) return;
         if (menuUninstall == null || menuAppInfo == null || menuMove == null) return;
         int sel = s.menuSelection;
-        final int hl = 0x552C2C2C;
-        menuUninstall.setBackgroundColor(sel == RecyclingShelfView.MENU_UNINSTALL ? hl : Color.TRANSPARENT);
-        menuAppInfo  .setBackgroundColor(sel == RecyclingShelfView.MENU_APP_INFO  ? hl : Color.TRANSPARENT);
-        menuMove     .setBackgroundColor(sel == RecyclingShelfView.MENU_MOVE      ? hl : Color.TRANSPARENT);
-        // Uninstall stays red — bright when selected, dim when not.
-        menuUninstall.setTextColor(sel == RecyclingShelfView.MENU_UNINSTALL ? 0xFFFF6B6B : 0xAAFF6B6B);
-        menuAppInfo  .setTextColor(sel == RecyclingShelfView.MENU_APP_INFO  ? Color.WHITE : 0xAAFFFFFF);
-        menuMove     .setTextColor(sel == RecyclingShelfView.MENU_MOVE      ? Color.WHITE : 0xAAFFFFFF);
+        // Bright frosted-white pill for the selected item, mirroring the
+        // toolbar buttons & keymap rows. The selected item's text inverts
+        // to dark for contrast; non-destructive items invert to near-black,
+        // Uninstall keeps its red identity but darkens to read on white.
+        final int hlWhite = 0xFFEFEFEF;
+        // Each item's background was constructed as a GradientDrawable with
+        // a fixed corner radius (see buildLayout) — we mutate the colour on
+        // those existing drawables so the rounded shape never changes.
+        setMenuItemBg(menuUninstall, sel == RecyclingShelfView.MENU_UNINSTALL ? hlWhite : Color.TRANSPARENT);
+        setMenuItemBg(menuAppInfo,   sel == RecyclingShelfView.MENU_APP_INFO  ? hlWhite : Color.TRANSPARENT);
+        setMenuItemBg(menuMove,      sel == RecyclingShelfView.MENU_MOVE      ? hlWhite : Color.TRANSPARENT);
+        menuUninstall.setTextColor(sel == RecyclingShelfView.MENU_UNINSTALL ? 0xFFC0202A : 0xCCFF6B6B);
+        menuAppInfo  .setTextColor(sel == RecyclingShelfView.MENU_APP_INFO  ? 0xFF111114 : 0xCCFFFFFF);
+        menuMove     .setTextColor(sel == RecyclingShelfView.MENU_MOVE      ? 0xFF111114 : 0xCCFFFFFF);
+    }
+
+    /** Updates the colour of an item's existing rounded GradientDrawable
+     *  background WITHOUT replacing it (which is what setBackgroundColor
+     *  would do, losing the corner radius). Falls back to a fresh rounded
+     *  drawable if the item somehow lost its background. */
+    private void setMenuItemBg(TextView tv, int color) {
+        android.graphics.drawable.Drawable d = tv.getBackground();
+        if (d instanceof android.graphics.drawable.GradientDrawable) {
+            ((android.graphics.drawable.GradientDrawable) d).setColor(color);
+            return;
+        }
+        android.graphics.drawable.GradientDrawable g =
+                new android.graphics.drawable.GradientDrawable();
+        g.setCornerRadius(dp(8));
+        g.setColor(color);
+        tv.setBackground(g);
     }
 
     private View buildNetBtn(int sz) {
@@ -2445,67 +2506,88 @@ public class LauncherActivity extends Activity {
      *  open — keeping it inflated is cheap (one FrameLayout + ~20 child views)
      *  and avoids the inflate cost on every reopen.
      *
-     *  Visual style: compact centred card, soft 18 dp corners, dim
-     *  translucent backdrop, two-column slot rows (label · value) with a
-     *  subtle rounded highlight on the focused row. Apple-TV-ish without
-     *  the cost of a real blur. */
+     *  Visual style: compact dropdown anchored just below the mapper button
+     *  (top-right toolbar). Apple-TV-inspired palette: deep slate plate with
+     *  a hairline rim, idle rows transparent + light-grey text, focused row
+     *  becomes a bright frosted-white pill with dark text — exactly the same
+     *  language as the toolbar buttons (idle dark / focused white-frosted),
+     *  so the launcher's visual vocabulary stays consistent.
+     *
+     *  Compactness: rows flow content-tight (tag → name col → icon → app
+     *  label) with NO flex spacer pushing label and value to opposite
+     *  edges. The previous design had ~180 dp of dead space in every row;
+     *  the new layout uses only what the content needs. */
     private void buildKeymapOverlay() {
         FrameLayout r = root; if (r == null) return;
         FrameLayout ov = new FrameLayout(this) {
             @Override public boolean onTouchEvent(MotionEvent ev) {
-                // Backdrop swallows taps so they don't reach the shelf.
+                // Tap-outside-the-card dismisses (matches the context-menu UX).
+                if (ev.getAction() == MotionEvent.ACTION_DOWN) {
+                    android.widget.LinearLayout c = keymapCard;
+                    if (c != null) {
+                        float x = ev.getX(), y = ev.getY();
+                        float l = c.getX(), t = c.getY();
+                        float rt = l + c.getWidth(), b = t + c.getHeight();
+                        if (x < l || x > rt || y < t || y > b) {
+                            hideKeymapOverlay();
+                            return true;
+                        }
+                    }
+                }
                 return true;
             }
         };
         ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
-        ov.setBackgroundColor(0xCC000000);   // 80% black backdrop
+        // Light contextual dim — this is a dropdown, not a full-screen modal.
+        // Keeps the home shelf faintly visible behind so the action feels
+        // anchored to the page rather than blocking it.
+        ov.setBackgroundColor(0x33000000);
         ov.setClickable(true);
         ov.setFocusable(true);
         ov.setFocusableInTouchMode(true);
         ov.setVisibility(View.GONE);
 
-        // Centred card holds both sub-views. Wrap-content height; slot list
-        // and picker swap visibility inside it (no second card needed).
+        // Apple-TV style card: deep slate plate, soft 14 dp corners, 1 px
+        // hairline rim, subtle elevation. Slot list and picker swap
+        // visibility inside the same card — no second card needed.
         android.widget.LinearLayout card = new android.widget.LinearLayout(this);
         card.setOrientation(android.widget.LinearLayout.VERTICAL);
         android.graphics.drawable.GradientDrawable cardBg =
                 new android.graphics.drawable.GradientDrawable();
-        cardBg.setColor(0xE61C1C1F);             // soft warm-black, 90% opacity
-        cardBg.setCornerRadius(dp(18));
-        cardBg.setStroke(1, 0x22FFFFFF);         // 1px hairline rim
+        cardBg.setColor(0xF21A1A1F);          // deep slate, ~95% opacity
+        cardBg.setCornerRadius(dp(14));
+        cardBg.setStroke(1, 0x1AFFFFFF);      // ~10% white hairline rim
         card.setBackground(cardBg);
-        card.setPadding(dp(20), dp(18), dp(20), dp(16));
-        card.setElevation(dp(8));
+        card.setPadding(dp(8), dp(8), dp(8), dp(8));
+        card.setElevation(dp(10));
+        // Highlight pills are clipped to the card's rounded outline by
+        // hardware regardless of these flags; setting them avoids any
+        // accidental scale-overflow clipping for the picker chips.
+        card.setClipChildren(false);
+        card.setClipToPadding(false);
 
         // ── Slot list view (default) ──────────────────────────────
         android.widget.LinearLayout col = new android.widget.LinearLayout(this);
         col.setOrientation(android.widget.LinearLayout.VERTICAL);
 
-        TextView title = new TextView(this);
-        title.setText("Remote Buttons");
-        title.setTextColor(0xFFEFEFEF);
-        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setLetterSpacing(0.04f);
-        title.setPadding(dp(4), 0, dp(4), dp(10));
-        col.addView(title);
-
-        // Each row is a tiny horizontal LinearLayout: [color tag][name] [icon][app]
-        // Two columns with a flex spacer in between — proper layout, no
-        // hand-padded ASCII-art. Selected row gets a 0x22 white rounded fill.
-        final int rowW = dp(360);
+        // Each row: [tag dot][name (fixed col)][icon][app label] — left-flow,
+        // no flex spacer. All rows share rowW so the selection pill aligns
+        // and reads as a coherent menu, not a ragged list.
+        final int rowW     = dp(252);
+        final int nameColW = dp(60);
         for (int i = 0; i < SHORTCUT_LABELS.length; i++) {
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
             row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(12), dp(8), dp(12), dp(8));
+            row.setPadding(dp(10), dp(7), dp(10), dp(7));
             android.graphics.drawable.GradientDrawable rowBg =
                     new android.graphics.drawable.GradientDrawable();
-            rowBg.setCornerRadius(dp(10));
+            rowBg.setCornerRadius(dp(9));
             rowBg.setColor(Color.TRANSPARENT);
             row.setBackground(rowBg);
 
-            // [0] color tag (small dot for the four colour keys, hidden otherwise)
+            // [0] colour tag (small dot for the four colour keys, transparent
+            //     placeholder for Menu/Subtitle so the name column still aligns).
             View tag = new View(this);
             android.graphics.drawable.GradientDrawable tagBg =
                     new android.graphics.drawable.GradientDrawable();
@@ -2513,11 +2595,11 @@ public class LauncherActivity extends Activity {
             tagBg.setColor(SHORTCUT_TAGS[i] == 0 ? Color.TRANSPARENT : SHORTCUT_TAGS[i]);
             tag.setBackground(tagBg);
             android.widget.LinearLayout.LayoutParams tagLp =
-                    new android.widget.LinearLayout.LayoutParams(dp(8), dp(8));
-            tagLp.setMarginEnd(dp(10));
+                    new android.widget.LinearLayout.LayoutParams(dp(7), dp(7));
+            tagLp.setMarginEnd(dp(8));
             row.addView(tag, tagLp);
 
-            // [1] button name (fixed-width left column)
+            // [1] button name (fixed-width column for vertical alignment)
             TextView name = new TextView(this);
             name.setText(SHORTCUT_LABELS[i]);
             name.setTextColor(0xCCFFFFFF);
@@ -2525,30 +2607,27 @@ public class LauncherActivity extends Activity {
             name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             name.setSingleLine(true);
             android.widget.LinearLayout.LayoutParams nameLp =
-                    new android.widget.LinearLayout.LayoutParams(dp(80), WRAP);
+                    new android.widget.LinearLayout.LayoutParams(nameColW, WRAP);
+            nameLp.setMarginEnd(dp(12));
             row.addView(name, nameLp);
 
-            // [2] flex spacer
-            View spacer = new View(this);
-            row.addView(spacer, new android.widget.LinearLayout.LayoutParams(0, 1, 1f));
-
-            // [3] app icon (visible only when assigned and cached)
+            // [2] app icon (visible only when assigned and cached)
             ImageView icon = new ImageView(this);
             icon.setVisibility(View.GONE);
             android.widget.LinearLayout.LayoutParams iconLp =
-                    new android.widget.LinearLayout.LayoutParams(dp(22), dp(22));
+                    new android.widget.LinearLayout.LayoutParams(dp(18), dp(18));
             iconLp.setMarginEnd(dp(8));
             row.addView(icon, iconLp);
 
-            // [4] right column: app label or "Not assigned"
+            // [3] app label — flows left-aligned next to the icon. No
+            //     flex spacer: this is the whole point of the redesign.
             TextView val = new TextView(this);
             val.setTextColor(0x88FFFFFF);
             val.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
             val.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
             val.setSingleLine(true);
             val.setEllipsize(TextUtils.TruncateAt.END);
-            val.setMaxWidth(dp(180));
-            val.setGravity(Gravity.END);
+            val.setMaxWidth(dp(150));
             row.addView(val, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
 
             android.widget.LinearLayout.LayoutParams rlp =
@@ -2557,44 +2636,36 @@ public class LauncherActivity extends Activity {
             col.addView(row, rlp);
         }
 
-        TextView slotsHint = new TextView(this);
-        slotsHint.setText("OK to assign  \u00B7  Back to close");
-        slotsHint.setTextColor(0x66FFFFFF);
-        slotsHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
-        slotsHint.setLetterSpacing(0.05f);
-        slotsHint.setPadding(0, dp(10), 0, dp(2));
-        slotsHint.setGravity(Gravity.CENTER);
-        col.addView(slotsHint);
-
         // ── App picker view ─────────────────────────────────────
         android.widget.LinearLayout picker = new android.widget.LinearLayout(this);
         picker.setOrientation(android.widget.LinearLayout.VERTICAL);
         picker.setVisibility(View.GONE);
+        picker.setClipChildren(false);
+        picker.setClipToPadding(false);
 
         TextView pickerTitle = new TextView(this);
         pickerTitle.setTextColor(0xFFEFEFEF);
-        pickerTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16);
+        pickerTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         pickerTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         pickerTitle.setLetterSpacing(0.04f);
-        pickerTitle.setPadding(dp(4), 0, dp(4), dp(10));
+        pickerTitle.setPadding(dp(4), dp(2), dp(4), dp(8));
         picker.addView(pickerTitle);
 
-        // Horizontal scroller. Cap viewport at ~62% of screen with a hard
-        // ceiling of 620 dp — prevents the card from spanning the screen
-        // on 1080p TVs while still showing 4–5 chips at a time.
+        // Horizontal scroller, capped at ~52% of the screen so the picker
+        // never balloons across the display on big TVs.
         android.widget.HorizontalScrollView hsv =
                 new android.widget.HorizontalScrollView(this);
         hsv.setHorizontalScrollBarEnabled(false);
         hsv.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        int hsvW = Math.min(dp(620), Math.round(screenW * 0.62f));
-        if (hsvW < dp(360)) hsvW = dp(360);
+        int hsvW = Math.min(dp(540), Math.round(screenW * 0.52f));
+        if (hsvW < dp(300)) hsvW = dp(300);
         android.widget.LinearLayout.LayoutParams hsvLp =
                 new android.widget.LinearLayout.LayoutParams(hsvW, WRAP);
         picker.addView(hsv, hsvLp);
 
         android.widget.LinearLayout strip = new android.widget.LinearLayout(this);
         strip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        strip.setPadding(dp(2), dp(6), dp(2), dp(6));
+        strip.setPadding(dp(2), dp(4), dp(2), dp(4));
         // Allow chip scale-up to draw outside the strip's logical bounds.
         strip.setClipChildren(false);
         strip.setClipToPadding(false);
@@ -2602,24 +2673,19 @@ public class LauncherActivity extends Activity {
         hsv.setClipToPadding(false);
         hsv.addView(strip, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
-        TextView pickerHint = new TextView(this);
-        pickerHint.setText("OK to assign  \u00B7  Back to cancel");
-        pickerHint.setTextColor(0x66FFFFFF);
-        pickerHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
-        pickerHint.setLetterSpacing(0.05f);
-        pickerHint.setPadding(0, dp(10), 0, dp(2));
-        pickerHint.setGravity(Gravity.CENTER);
-        picker.addView(pickerHint);
-
         card.addView(col);
         card.addView(picker);
 
+        // Top-right anchored. Exact margins are computed in showKeymapOverlay
+        // so the card sits immediately below the mapper toolbar button and
+        // visually "drops out" of it.
         FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
-        cardLp.gravity = Gravity.CENTER;
+        cardLp.gravity = Gravity.TOP | Gravity.END;
         ov.addView(card, cardLp);
 
         r.addView(ov);
         keymapOverlay     = ov;
+        keymapCard        = card;
         keymapColumn      = col;
         keymapPickerView  = picker;
         keymapPickerTitle = pickerTitle;
@@ -2630,7 +2696,8 @@ public class LauncherActivity extends Activity {
     private void showKeymapOverlay() {
         if (keymapOverlay == null) buildKeymapOverlay();
         FrameLayout ko = keymapOverlay;
-        if (ko == null) return;
+        final android.widget.LinearLayout card = keymapCard;
+        if (ko == null || card == null) return;
         // Hide the focus ring — it belongs to the shelf, which is now
         // logically behind the overlay.
         RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
@@ -2640,13 +2707,61 @@ public class LauncherActivity extends Activity {
         if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
         if (keymapColumn     != null) keymapColumn    .setVisibility(View.VISIBLE);
         refreshKeymapRows();
+
+        // Anchor the card just below the mapper toolbar button so it reads
+        // as a dropdown coming out of that icon. Right edge aligns with the
+        // mapper button's right edge, top edge sits 4 dp below it.
+        int topMargin   = dp(78);   // fallback if mapper button isn't laid out yet
+        int rightMargin = dp(20);
+        View mb = mapperBtnView;
+        FrameLayout r = root;
+        if (mb != null && r != null && mb.getWidth() > 0) {
+            int[] mbLoc = new int[2];
+            int[] rLoc  = new int[2];
+            mb.getLocationOnScreen(mbLoc);
+            r .getLocationOnScreen(rLoc);
+            int mbBottomInRoot = mbLoc[1] - rLoc[1] + mb.getHeight();
+            int mbRightInRoot  = mbLoc[0] - rLoc[0] + mb.getWidth();
+            int rW = r.getWidth() > 0 ? r.getWidth() : screenW;
+            topMargin   = mbBottomInRoot + dp(4);
+            rightMargin = rW - mbRightInRoot;
+            if (rightMargin < dp(8)) rightMargin = dp(8);
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
+        lp.gravity     = Gravity.TOP | Gravity.END;
+        lp.topMargin   = topMargin;
+        lp.rightMargin = rightMargin;
+        card.setLayoutParams(lp);
+
         ko.setVisibility(View.VISIBLE);
         ko.bringToFront();
         ko.requestFocus();
+
+        // Drop-down animation: scale-up from the top-right corner with a
+        // small downward translate so the card appears to "fall out" of the
+        // mapper button. Pivot must be set after measure(), which happens
+        // on the next layout pass — post() guarantees getWidth() is valid.
+        card.animate().cancel();
+        card.setAlpha(0f);
+        card.setScaleX(0.94f); card.setScaleY(0.86f);
+        card.setTranslationY(-dp(6));
+        card.post(() -> {
+            if (card != keymapCard) return;
+            card.setPivotX(card.getWidth());     // top-right corner
+            card.setPivotY(0f);
+            card.animate()
+                    .alpha(1f)
+                    .scaleX(1f).scaleY(1f)
+                    .translationY(0f)
+                    .setDuration(160)
+                    .setInterpolator(MENU_IN)
+                    .start();
+        });
     }
 
     private void hideKeymapOverlay() {
-        FrameLayout ko = keymapOverlay;
+        final FrameLayout ko = keymapOverlay;
+        final android.widget.LinearLayout card = keymapCard;
         if (ko == null) return;
         // Reset to slot-list mode so a future re-open is consistent
         // (avoids the case where Back from slot-list closes the overlay
@@ -2654,7 +2769,27 @@ public class LauncherActivity extends Activity {
         keymapMode = KEYMAP_MODE_SLOTS;
         if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
         if (keymapColumn     != null) keymapColumn    .setVisibility(View.VISIBLE);
-        ko.setVisibility(View.GONE);
+        if (card != null) {
+            card.animate().cancel();
+            card.animate()
+                    .alpha(0f)
+                    .scaleX(0.96f).scaleY(0.9f)
+                    .translationY(-dp(4))
+                    .setDuration(110)
+                    .setInterpolator(MENU_OUT)
+                    .withEndAction(() -> {
+                        if (ko != keymapOverlay) return;
+                        // Cancellation race guard — see hideContextMenu.
+                        if (card.getAlpha() > 0.05f) return;
+                        ko.setVisibility(View.GONE);
+                        card.setAlpha(1f);
+                        card.setScaleX(1f); card.setScaleY(1f);
+                        card.setTranslationY(0f);
+                    })
+                    .start();
+        } else {
+            ko.setVisibility(View.GONE);
+        }
         // Restore focus to the mapper button so the user lands back
         // where they triggered the overlay.
         View mb = mapperBtnView;
@@ -2668,44 +2803,56 @@ public class LauncherActivity extends Activity {
     /** Repaint every slot row to reflect the current keyMap state and
      *  selection. Called on every navigation event in slot mode and on
      *  every commit from picker mode. Cheap — each row is a tiny
-     *  LinearLayout with at most 5 children, all looked up by index. */
+     *  LinearLayout with at most 4 children, all looked up by index.
+     *
+     *  Selection language: bright frosted-white pill + dark text, mirroring
+     *  the toolbar buttons' "idle dark / focused white-frosted" pattern.
+     *  This keeps a single visual vocabulary across the whole launcher. */
     private void refreshKeymapRows() {
         android.widget.LinearLayout col = keymapColumn;
         if (col == null) return;
-        // Children: title (0), N rows, hint at end.
         int rows = SHORTCUT_LABELS.length;
         for (int i = 0; i < rows; i++) {
-            View child = col.getChildAt(1 + i);
+            View child = col.getChildAt(i);
             if (!(child instanceof android.widget.LinearLayout)) continue;
             android.widget.LinearLayout row = (android.widget.LinearLayout) child;
             boolean sel = (i == keymapSelectedRow);
             int kc = SHORTCUT_KEYCODES[i];
             String pkg = keyMap.get(kc);
 
-            // Children inside row: tag(0), name(1), spacer(2), icon(3), val(4)
+            // Children inside row: tag(0), name(1), icon(2), val(3)
             TextView name  = (TextView)  row.getChildAt(1);
-            ImageView icon = (ImageView) row.getChildAt(3);
-            TextView val   = (TextView)  row.getChildAt(4);
+            ImageView icon = (ImageView) row.getChildAt(2);
+            TextView val   = (TextView)  row.getChildAt(3);
 
             if (pkg == null) {
                 val.setText("Not assigned");
-                val.setTextColor(sel ? 0xCCFFFFFF : 0x66FFFFFF);
                 icon.setVisibility(View.GONE);
                 icon.setImageDrawable(null);
             } else {
                 AppInfo a = findAppByPackage(pkg);
                 val.setText(a != null ? a.label : pkg);
-                val.setTextColor(sel ? 0xFFFFFFFF : 0xC0FFFFFF);
                 Bitmap bmp = (iconCache != null) ? iconCache.get(pkg) : null;
                 if (bmp != null) { icon.setImageBitmap(bmp); icon.setVisibility(View.VISIBLE); }
                 else             { icon.setImageDrawable(null); icon.setVisibility(View.GONE); }
             }
-            name.setTextColor(sel ? 0xFFFFFFFF : 0xCCFFFFFF);
+
+            // Apple-TV inversion: selected row becomes a bright plate with
+            // dark text; idle rows are transparent with light text. The
+            // same colour ramp as the toolbar buttons (idle 0xCCFFFFFF,
+            // focused 0xFF111114).
+            if (sel) {
+                name.setTextColor(0xFF111114);
+                val .setTextColor(pkg == null ? 0xAA111114 : 0xFF111114);
+            } else {
+                name.setTextColor(0xCCFFFFFF);
+                val .setTextColor(pkg == null ? 0x66FFFFFF : 0xC0FFFFFF);
+            }
 
             android.graphics.drawable.Drawable rbg = row.getBackground();
             if (rbg instanceof android.graphics.drawable.GradientDrawable) {
                 ((android.graphics.drawable.GradientDrawable) rbg)
-                        .setColor(sel ? 0x22FFFFFF : Color.TRANSPARENT);
+                        .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
             }
         }
     }
@@ -2859,16 +3006,19 @@ public class LauncherActivity extends Activity {
 
     private void paintPickerChip(View chip, boolean sel) {
         if (chip == null) return;
+        // Apple-TV inverted pill: selected chip is bright frosted-white with
+        // dark text; idle chips are transparent with light text. Same
+        // language as the slot rows and the toolbar buttons.
         android.graphics.drawable.Drawable bgd = chip.getBackground();
         if (bgd instanceof android.graphics.drawable.GradientDrawable) {
             ((android.graphics.drawable.GradientDrawable) bgd)
-                    .setColor(sel ? 0x33FFFFFF : Color.TRANSPARENT);
+                    .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
         }
         if (chip instanceof android.widget.LinearLayout) {
             android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
             View last = cl.getChildAt(cl.getChildCount() - 1);
             if (last instanceof TextView) {
-                ((TextView) last).setTextColor(sel ? Color.WHITE : 0x99FFFFFF);
+                ((TextView) last).setTextColor(sel ? 0xFF111114 : 0x99FFFFFF);
             }
         }
         chip.animate().cancel();
