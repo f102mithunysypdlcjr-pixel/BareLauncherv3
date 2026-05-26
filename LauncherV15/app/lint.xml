@@ -55,4 +55,12 @@
          devices (≤ API 32) and SET_WALLPAPER for write access. -->
     <issue id="MissingPermission" severity="ignore" />
 
+    <!-- QUERY_ALL_PACKAGES is one of Google Play's documented legitimate
+         use cases for HOME launchers: a launcher's whole job is to enumerate
+         every installed app the user might want to launch. The manifest
+         also declares a <queries> block as a fallback so the launcher works
+         even when the permission is denied (rare, but possible on stripped
+         ROMs). The lint check assumes consumer apps; this is a launcher. -->
+    <issue id="QueryAllPackagesPermission" severity="ignore" />
+
 </lint>
