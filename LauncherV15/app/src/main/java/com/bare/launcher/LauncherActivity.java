@@ -56,6 +56,7 @@ import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.Interpolator;
+import android.view.animation.OvershootInterpolator;
 import android.view.animation.PathInterpolator;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -104,15 +105,21 @@ public class LauncherActivity extends Activity {
     private static final int    UNFOCUS_DUR_MS = 100;
 
     // Easing curves. Defined once, reused everywhere — no per-animation alloc.
-    //   FOCUS_EASE   — decelerate-out, the canonical "press / lift" curve
-    //   SCROLL_EASE  — Material standard ease-in-out for shelf scrolling
-    //   REORDER_EASE — quick decelerate for the swap slide
-    //   MENU_IN      — gentle overshoot-free pop-in for the context menu
-    private static final Interpolator FOCUS_EASE   = new DecelerateInterpolator(1.6f);
-    private static final Interpolator SCROLL_EASE  = new PathInterpolator(0.33f, 0f, 0.2f, 1f);
-    private static final Interpolator REORDER_EASE = new PathInterpolator(0.25f, 0.1f, 0.2f, 1f);
-    private static final Interpolator MENU_IN      = new PathInterpolator(0.18f, 0.7f, 0.25f, 1f);
-    private static final Interpolator MENU_OUT     = new PathInterpolator(0.4f, 0f, 0.7f, 0.3f);
+    //   FOCUS_EASE      — decelerate-out, the canonical "press / lift" curve
+    //   FOCUS_IN_BOUNCE — subtle overshoot for focus-IN only. Tension is kept
+    //                     small (~2.0) so the cell ticks slightly past
+    //                     FOCUS_SCALE before settling — reads as a tiny
+    //                     "tap" of life on selection without dominating the
+    //                     shelf or stressing slow GPUs.
+    //   SCROLL_EASE     — Material standard ease-in-out for shelf scrolling
+    //   REORDER_EASE    — quick decelerate for the swap slide
+    //   MENU_IN         — gentle overshoot-free pop-in for the context menu
+    private static final Interpolator FOCUS_EASE      = new DecelerateInterpolator(1.6f);
+    private static final Interpolator FOCUS_IN_BOUNCE = new OvershootInterpolator(2.0f);
+    private static final Interpolator SCROLL_EASE     = new PathInterpolator(0.33f, 0f, 0.2f, 1f);
+    private static final Interpolator REORDER_EASE    = new PathInterpolator(0.25f, 0.1f, 0.2f, 1f);
+    private static final Interpolator MENU_IN         = new PathInterpolator(0.18f, 0.7f, 0.25f, 1f);
+    private static final Interpolator MENU_OUT        = new PathInterpolator(0.4f, 0f, 0.7f, 0.3f);
 
     private static final ThreadLocal<Matrix> sMatrixTL = new ThreadLocal<Matrix>() {
         @Override protected Matrix initialValue() { return new Matrix(); }
@@ -253,6 +260,7 @@ public class LauncherActivity extends Activity {
 
     private FrameLayout        menuOverlay   = null;
     private       TextView    menuUninstall = null;
+    private       TextView    menuAppInfo   = null;
     private       TextView    menuMove      = null;
     private final int[]    menuCellLoc      = new int[2];
     private final int[]    menuRootLoc      = new int[2];
@@ -429,6 +437,7 @@ public class LauncherActivity extends Activity {
         iconInflight.clear();
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
+        menuOverlay = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
         super.onDestroy();
     }
 
@@ -653,6 +662,29 @@ public class LauncherActivity extends Activity {
         View divider = new View(this);
         divider.setBackgroundColor(0x33FFFFFF);
 
+        menuAppInfo = new TextView(this);
+        menuAppInfo.setText("ⓘ  App Info");
+        menuAppInfo.setTextColor(Color.WHITE);
+        menuAppInfo.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        menuAppInfo.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        menuAppInfo.setGravity(Gravity.CENTER);
+        menuAppInfo.setPadding(dp(20), dp(12), dp(20), dp(12));
+        menuAppInfo.setClickable(true);
+        menuAppInfo.setFocusable(false);
+        menuAppInfo.setContentDescription("Open app info in system settings");
+        menuAppInfo.setOnClickListener(v -> {
+            RecyclingShelfView s = shelf;
+            if (s != null && s.reorderMode) {
+                s.menuSelection = RecyclingShelfView.MENU_APP_INFO;
+                RecyclingShelfView.CellView cv = s.attached.get(s.dragIndex);
+                if (cv != null) cv.triggerAppInfo();
+                else s.exitReorderMode(false);
+            }
+        });
+
+        View divider2 = new View(this);
+        divider2.setBackgroundColor(0x33FFFFFF);
+
         menuMove = new TextView(this);
         menuMove.setText("⇔  Move");
         menuMove.setTextColor(Color.WHITE);
@@ -674,8 +706,10 @@ public class LauncherActivity extends Activity {
         });
 
         menuCol.addView(menuUninstall, new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
-        menuCol.addView(divider, new android.widget.LinearLayout.LayoutParams(MATCH, 1));
-        menuCol.addView(menuMove, new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
+        menuCol.addView(divider,       new android.widget.LinearLayout.LayoutParams(MATCH, 1));
+        menuCol.addView(menuAppInfo,   new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
+        menuCol.addView(divider2,      new android.widget.LinearLayout.LayoutParams(MATCH, 1));
+        menuCol.addView(menuMove,      new android.widget.LinearLayout.LayoutParams(dp(130), WRAP));
 
         menuOverlay.addView(menuCol, new FrameLayout.LayoutParams(WRAP, WRAP));
         root.addView(menuOverlay);
@@ -684,7 +718,7 @@ public class LauncherActivity extends Activity {
     }
 
     void showContextMenu(View cell) {
-        if (menuOverlay == null || menuUninstall == null || menuMove == null) return;
+        if (menuOverlay == null || menuUninstall == null || menuAppInfo == null || menuMove == null) return;
         cell.getLocationOnScreen(menuCellLoc);
         FrameLayout r = root; if (r == null) return;
         r.getLocationOnScreen(menuRootLoc);
@@ -800,12 +834,16 @@ public class LauncherActivity extends Activity {
 
     void updateMenuHighlight() {
         RecyclingShelfView s = shelf; if (s == null) return;
-        if (menuUninstall == null || menuMove == null) return;
-        boolean uninstSel = s.menuSelection == RecyclingShelfView.MENU_UNINSTALL;
-        menuUninstall.setBackgroundColor(uninstSel ? 0x552C2C2C : Color.TRANSPARENT);
-        menuMove.setBackgroundColor(uninstSel ? Color.TRANSPARENT : 0x552C2C2C);
-        menuUninstall.setTextColor(uninstSel ? 0xFFFF6B6B : 0xAAFF6B6B);
-        menuMove.setTextColor(uninstSel ? 0xAAFFFFFF : Color.WHITE);
+        if (menuUninstall == null || menuAppInfo == null || menuMove == null) return;
+        int sel = s.menuSelection;
+        final int hl = 0x552C2C2C;
+        menuUninstall.setBackgroundColor(sel == RecyclingShelfView.MENU_UNINSTALL ? hl : Color.TRANSPARENT);
+        menuAppInfo  .setBackgroundColor(sel == RecyclingShelfView.MENU_APP_INFO  ? hl : Color.TRANSPARENT);
+        menuMove     .setBackgroundColor(sel == RecyclingShelfView.MENU_MOVE      ? hl : Color.TRANSPARENT);
+        // Uninstall stays red — bright when selected, dim when not.
+        menuUninstall.setTextColor(sel == RecyclingShelfView.MENU_UNINSTALL ? 0xFFFF6B6B : 0xAAFF6B6B);
+        menuAppInfo  .setTextColor(sel == RecyclingShelfView.MENU_APP_INFO  ? Color.WHITE : 0xAAFFFFFF);
+        menuMove     .setTextColor(sel == RecyclingShelfView.MENU_MOVE      ? Color.WHITE : 0xAAFFFFFF);
     }
 
     private View buildNetBtn(int sz) {
@@ -1071,9 +1109,21 @@ public class LauncherActivity extends Activity {
         boolean reorderMode   = false;
         int     dragIndex     = -1;
 
-        // MENU_UNINSTALL=0 (top row), MENU_MOVE=1 (bottom row)
+        // True while a programmatic D-pad-held navigation is being processed.
+        // Triggers two short-circuits in CellView.onFocusChange:
+        //   • scale snaps to its target (no animator) — avoids the ~50 ms
+        //     thrash where each held-key event cancels the previous bounce
+        //     and leaves cells stuck at intermediate scales.
+        //   • the redundant ensureVisible() is skipped — requestFocusOnIndex
+        //     already ran ensureVisibleSync().
+        // Set/cleared synchronously around requestFocus(), so it accurately
+        // tags the focus callback that fires inside requestFocus().
+        boolean fastNav = false;
+
+        // MENU_UNINSTALL=0 (top), MENU_APP_INFO=1 (middle), MENU_MOVE=2 (bottom)
         private static final int MENU_UNINSTALL = 0;
-        private static final int MENU_MOVE      = 1;
+        private static final int MENU_APP_INFO  = 1;
+        private static final int MENU_MOVE      = 2;
         int menuSelection = MENU_MOVE;
 
         RecyclingShelfView(Context ctx) {
@@ -1234,28 +1284,43 @@ public class LauncherActivity extends Activity {
             post(() -> requestFocusOnIndex(targetIdx));
         }
 
-        void requestFocusOnIndex(int idx) {
+        void requestFocusOnIndex(int idx) { requestFocusOnIndex(idx, false); }
+
+        /** Programmatic focus jump.
+         *  @param snap  true → no smooth-scroll animation (used for held D-pad
+         *               navigation so fast scroll actually feels fast — the
+         *               smooth path was queueing 120-240 ms tweens that each
+         *               cancelled the previous, producing the "slow drift"
+         *               artefact users perceive as broken fast scroll).
+         *  Boundaries CLAMP rather than wrap. The previous cyclic-wrap
+         *  behaviour produced an "auto-scroll back to start" jolt at the end
+         *  of the shelf which read as the launcher scrolling on its own. */
+        void requestFocusOnIndex(int idx, boolean snap) {
             if (appList.isEmpty()) return;
-            // Cyclic wrap: stepping past the last app rolls around to the
-            // first, and vice versa. To avoid the "shelf flies across all
-            // apps" artefact when wrapping, we SNAP the scroll on a wrap
-            // (idx came in out-of-range) instead of animating across the
-            // entire list.
             int sz = appList.size();
-            int wrapped = ((idx % sz) + sz) % sz;
-            boolean isWrap = (idx != wrapped);
-            focusedIndex = wrapped;
+            if (idx < 0)   idx = 0;
+            if (idx >= sz) idx = sz - 1;
+            focusedIndex = idx;
             // Cancel any in-flight fling to prevent scroll fighting
             scroller.abortAnimation();
-            if (isWrap) ensureVisibleSync(wrapped);
-            else        ensureVisible(wrapped);
+            if (snap) ensureVisibleSync(idx);
+            else      ensureVisible(idx);
             // Force fillVisible after scroll to ensure the cell exists
             fillVisible();
-            CellView cv = attached.get(wrapped);
-            if (cv != null) cv.requestFocus();
-            else {
-                // Cell not yet attached — post a retry after layout
-                final int target = wrapped;
+            CellView cv = attached.get(idx);
+            if (cv != null) {
+                // Tag the focus callback that fires inside requestFocus() so
+                // the cell can short-circuit its bounce animation.
+                boolean prev = fastNav;
+                fastNav = snap;
+                try { cv.requestFocus(); }
+                finally { fastNav = prev; }
+            } else {
+                // Cell not yet attached — post a retry after layout.
+                // Snap-mode flag is not propagated through the post: the
+                // cell will animate normally on the deferred path, which
+                // is rare and fine.
+                final int target = idx;
                 post(() -> {
                     fillVisible();
                     CellView cv2 = attached.get(target);
@@ -1356,10 +1421,11 @@ public class LauncherActivity extends Activity {
             if (dx == 0) return;
             scroller.abortAnimation();
             // Duration scales gently with distance — short hops feel snappy
-            // (120 ms) while long jumps still complete in under ~240 ms so
-            // they never feel sluggish. Lower than before for performance.
+            // (90 ms) while long jumps still complete in under ~190 ms so
+            // they never feel sluggish. Held D-pad bypasses this path
+            // entirely (snap mode) for true fast scroll.
             int dist = Math.abs(dx);
-            int dur  = Math.max(120, Math.min(240, 120 + dist / 8));
+            int dur  = Math.max(90, Math.min(190, 90 + dist / 8));
             scroller.startScroll(scrollX, 0, dx, 0, dur);
             postInvalidateOnAnimation();
         }
@@ -1502,6 +1568,15 @@ public class LauncherActivity extends Activity {
             private       String  labelStr     = "";
             private       String  labelDisplay = "";
 
+            // Pre-allocated focus-tween update listener — reused across every
+            // focus animation so we don't churn a fresh lambda (with its
+            // captured CellView.this) per key press during fast nav.
+            private final android.animation.ValueAnimator.AnimatorUpdateListener focusUpdateListener =
+                    anim -> {
+                        if (isFocused() && isAttachedToWindow())
+                            positionRing(CellView.this);
+                    };
+
             CellView(Context ctx) {
                 super(ctx);
                 iconPx         = dp(ICON_DP);
@@ -1553,24 +1628,37 @@ public class LauncherActivity extends Activity {
                 setOnFocusChangeListener((v, f) -> {
                     if (!reorderMode) {
                         animate().cancel();
-                        if (f) {
-                            // Toned-down focus pop: scale only, no lift,
-                            // 130 ms decelerate. Reads as "selected" without
+                        if (fastNav) {
+                            // Held D-pad nav — snap scale, skip animator entirely.
+                            // Without this, every key-repeat press fires a focus
+                            // animation that's cancelled ~50 ms later by the next
+                            // press, which both thrashes ViewPropertyAnimator and
+                            // leaves cells stuck at intermediate scales when the
+                            // hold ends. Snap-scale gives a clean, instant fast-
+                            // scroll feel that matches the synced shelf scroll.
+                            setScaleX(f ? FOCUS_SCALE : 1f);
+                            setScaleY(f ? FOCUS_SCALE : 1f);
+                            if (f && isAttachedToWindow() && getWidth() > 0)
+                                positionRing(CellView.this);
+                        } else if (f) {
+                            // Subtle bouncy focus-IN: OvershootInterpolator(2.0)
+                            // ticks the cell ~7-8 % past FOCUS_SCALE then settles.
+                            // Reads as a tiny "tap" of life on selection without
                             // dominating the shelf or stressing slow GPUs.
-                            // updateListener keeps the RingView in lockstep
-                            // with the cell across every animation frame.
+                            // The reused focusUpdateListener keeps the RingView
+                            // in lockstep with the cell every frame — and being
+                            // pre-allocated, avoids per-focus lambda churn.
                             animate().scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
                                      .setDuration(FOCUS_DUR_MS)
-                                     .setInterpolator(FOCUS_EASE)
-                                     .setUpdateListener(anim -> {
-                                         if (isFocused() && isAttachedToWindow())
-                                             positionRing(CellView.this);
-                                     })
+                                     .setInterpolator(FOCUS_IN_BOUNCE)
+                                     .setUpdateListener(focusUpdateListener)
                                      .start();
                         } else {
-                            // Clear the update listener so the lambda (which captures
-                            // CellView.this) doesn't persist on ViewPropertyAnimator
-                            // and fire pointlessly during the unfocus tween.
+                            // Plain decelerate shrink on focus-out — no bounce,
+                            // matches Material spec for de-selection. Clear the
+                            // update listener so the lambda doesn't fire pointlessly
+                            // during the unfocus tween (it's a no-op anyway since
+                            // !isFocused, but the dispatch cost is real).
                             animate().scaleX(1f).scaleY(1f)
                                      .setDuration(UNFOCUS_DUR_MS)
                                      .setInterpolator(FOCUS_EASE)
@@ -1592,20 +1680,21 @@ public class LauncherActivity extends Activity {
                             // saw the ring "disappear" between consecutive cells).
                             if (isAttachedToWindow() && getWidth() > 0)
                                 positionRing(CellView.this);
-                            ensureVisible(boundIndex);
+                            // Skip the smooth-scroll path during snap navigation —
+                            // requestFocusOnIndex already called ensureVisibleSync().
+                            if (!fastNav) ensureVisible(boundIndex);
                         }
-                    } else {
-                        // Don't hide the ring on focus loss — the next cell to gain
-                        // focus will reposition it in the SAME frame. Hiding here
-                        // produced the "ring stutters across only a handful of apps
-                        // during fast scroll" artefact, because the brief INVISIBLE
-                        // state was visible to the user between every key press.
-                        // The ring is hidden explicitly when:
-                        //   • focus leaves the shelf entirely (handled by
-                        //     RecyclingShelfView.onFocusChange below)
-                        //   • the activity exits or the shelf is re-populated
-                        //   • a touch interaction begins on the shelf
                     }
+                    // Don't hide the ring on focus loss — the next cell to gain
+                    // focus will reposition it in the SAME frame. Hiding here
+                    // produced the "ring stutters across only a handful of apps
+                    // during fast scroll" artefact, because the brief INVISIBLE
+                    // state was visible to the user between every key press.
+                    // The ring is hidden explicitly when:
+                    //   • focus leaves the shelf entirely (handled by the
+                    //     globalFocusListener on the root)
+                    //   • the activity exits or the shelf is re-populated
+                    //   • a touch interaction begins on the shelf
                 });
 
                 setOnKeyListener((v, kc, ev) -> {
@@ -1631,15 +1720,20 @@ public class LauncherActivity extends Activity {
                                 if (menuSelection == MENU_MOVE) swapWithNeighbour(dragIndex + 1);
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                if (menuSelection != MENU_UNINSTALL) { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
+                                // Cycle MOVE → APP_INFO → UNINSTALL (top); stop at top.
+                                if      (menuSelection == MENU_MOVE)     { menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_APP_INFO) { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_MOVE; updateMenuHighlight(); }
+                                // Cycle UNINSTALL → APP_INFO → MOVE; DOWN at MOVE confirms.
+                                if      (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_APP_INFO)  { menuSelection = MENU_MOVE;     updateMenuHighlight(); }
                                 else exitReorderMode(true);
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                             case KeyEvent.KEYCODE_BUTTON_A:
-                                if (menuSelection == MENU_UNINSTALL) triggerUninstall();
+                                if      (menuSelection == MENU_UNINSTALL) triggerUninstall();
+                                else if (menuSelection == MENU_APP_INFO)  triggerAppInfo();
                                 else exitReorderMode(true);
                                 return true;
                             case KeyEvent.KEYCODE_BACK:
@@ -1687,8 +1781,16 @@ public class LauncherActivity extends Activity {
 
                     if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
                     switch (kc) {
-                        case KeyEvent.KEYCODE_DPAD_LEFT:  requestFocusOnIndex(boundIndex - 1); return true;
-                        case KeyEvent.KEYCODE_DPAD_RIGHT: requestFocusOnIndex(boundIndex + 1); return true;
+                        case KeyEvent.KEYCODE_DPAD_LEFT:
+                            // Snap (instant) when the key is being held down so
+                            // the user gets the fast-scroll they pressed for.
+                            // First press (repeatCount==0) still gets the smooth
+                            // glide for a polished single-step feel.
+                            requestFocusOnIndex(boundIndex - 1, ev.getRepeatCount() > 0);
+                            return true;
+                        case KeyEvent.KEYCODE_DPAD_RIGHT:
+                            requestFocusOnIndex(boundIndex + 1, ev.getRepeatCount() > 0);
+                            return true;
                         case KeyEvent.KEYCODE_DPAD_UP:
                             View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
                         case KeyEvent.KEYCODE_DPAD_DOWN:
@@ -1730,6 +1832,25 @@ public class LauncherActivity extends Activity {
                 if (tryUninstall(fallback)) return;
 
                 showToast("Cannot uninstall " + appToUninstall.label);
+            }
+
+            /** Open the system "App info" page for the focused app.
+             *  Always exits reorder mode first so the menu doesn't linger
+             *  behind the settings activity (and so the user comes back to
+             *  a clean shelf). Falls back to a toast if no Settings app on
+             *  the device handles ACTION_APPLICATION_DETAILS_SETTINGS — that
+             *  path is well-supported but cheap-TV ROMs occasionally strip it. */
+            void triggerAppInfo() {
+                if (boundApp == null) return;
+                final String pkg = boundApp.packageName;
+                exitReorderMode(false);
+                Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", pkg, null))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try {
+                    if (i.resolveActivity(pm) != null) { startActivity(i); return; }
+                } catch (Exception ignored) {}
+                showToast("Cannot open app info");
             }
 
             private boolean tryUninstall(Intent intent) {
