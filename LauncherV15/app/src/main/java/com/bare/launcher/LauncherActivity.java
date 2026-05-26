@@ -279,27 +279,24 @@ public class LauncherActivity extends Activity {
     private final int[]    menuOverlayLoc   = new int[2];
 
     // ── Remote-key → app shortcut state ──────────────────────────────────
-    // Curated list of TV-remote keycodes that are safe to remap. These are
-    // dedicated shortcut buttons on most TV remotes (colour buttons, guide,
-    // info, etc.) and never collide with launcher navigation. Order = row
-    // order in the config overlay.
+    // Curated list of TV-remote keycodes that are safe to remap. Order = row
+    // order in the config overlay. The four colour keys plus three named
+    // shortcut keys cover every TV remote we ship for; KEYCODE_MENU is
+    // intentionally included even though some remotes also surface it as a
+    // launcher-affordance — we trade that affordance for user-controlled
+    // remapping (the launcher itself does not consume MENU).
     private static final int[]    SHORTCUT_KEYCODES = {
             KeyEvent.KEYCODE_PROG_RED,
             KeyEvent.KEYCODE_PROG_GREEN,
             KeyEvent.KEYCODE_PROG_YELLOW,
             KeyEvent.KEYCODE_PROG_BLUE,
+            KeyEvent.KEYCODE_MENU,
             KeyEvent.KEYCODE_GUIDE,
-            KeyEvent.KEYCODE_INFO,
-            KeyEvent.KEYCODE_CAPTIONS,
-            KeyEvent.KEYCODE_BOOKMARK,
-            KeyEvent.KEYCODE_SETTINGS,
-            KeyEvent.KEYCODE_TV,
-            KeyEvent.KEYCODE_TV_INPUT,
+            KeyEvent.KEYCODE_SEARCH,
     };
     private static final String[] SHORTCUT_LABELS   = {
-            "Red",      "Green",    "Yellow",    "Blue",
-            "Guide",    "Info",     "Captions",
-            "Bookmark", "Settings", "TV",        "TV Input"
+            "Red",   "Green", "Yellow", "Blue",
+            "Menu",  "Guide", "Search"
     };
     // Keyed by raw keycode → package name. SparseArray fits the small,
     // dense-int-key access pattern with zero autoboxing on every key press.
@@ -307,6 +304,29 @@ public class LauncherActivity extends Activity {
     private FrameLayout               keymapOverlay     = null;
     private android.widget.LinearLayout keymapColumn    = null;
     private int                       keymapSelectedRow = 0;
+
+    // ── Keymap overlay app-picker state ──────────────────────────────────
+    // The overlay has two visual modes that swap visibility inside the card:
+    //   • SLOTS  — vertical list of remappable keys (default)
+    //   • PICKER — horizontal scrollable list of installed apps for the
+    //              slot the user just opened
+    // Mode-switching is driven by handleKeymapOverlayKey: OK on a slot
+    // enters PICKER, OK on an app commits the binding and returns to SLOTS,
+    // BACK in PICKER cancels back to SLOTS, BACK in SLOTS closes the overlay.
+    private static final int            KEYMAP_MODE_SLOTS  = 0;
+    private static final int            KEYMAP_MODE_PICKER = 1;
+    private int                         keymapMode          = KEYMAP_MODE_SLOTS;
+    private android.widget.LinearLayout keymapPickerView    = null;  // vertical wrapper for picker
+    private TextView                    keymapPickerTitle   = null;  // "Pick app for Red"
+    private android.widget.HorizontalScrollView keymapPickerHsv = null;
+    private android.widget.LinearLayout keymapPickerStrip   = null;  // horizontal app chips
+    private int                         keymapPickerIdx     = 0;     // 0 = "None" sentinel, 1..N = appList[i-1]
+    private int                         keymapPickerSlotRow = 0;     // which slot row triggered the picker
+
+    // Third toolbar icon (next to wifi + wallpaper) that opens the keymap
+    // overlay. Held as a field so focus-chain handlers and onDestroy can
+    // reach it.
+    private View                        mapperBtnView     = null;
 
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
      *  Single source of truth for "ring should not be visible right now". */
@@ -480,8 +500,11 @@ public class LauncherActivity extends Activity {
         iconInflight.clear();
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
+        mapperBtnView = null;
         menuOverlay = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
         keymapOverlay = null; keymapColumn = null;
+        keymapPickerView = null; keymapPickerTitle = null;
+        keymapPickerHsv = null; keymapPickerStrip = null;
         super.onDestroy();
     }
 
@@ -628,6 +651,13 @@ public class LauncherActivity extends Activity {
         final int MARG_T  = dp(18);
         final int MARG_E  = dp(20);
 
+        // Top-right toolbar buttons. Layout left-to-right is:
+        //   [mapper] [wifi] [wallpaper]
+        // Margins are computed from the right edge — wallpaper sits flush
+        // against MARG_E, each preceding button is one (BTN_VIEW_SZ + BTN_GAP)
+        // step further left. mapperBtn was added as a third icon so the
+        // remote-key remapping config gets a dedicated, discoverable entry
+        // (no long-press gesture, no nested menu).
         netBtn = buildNetBtn(BTN_SZ);
         FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         netLp.gravity = Gravity.TOP | Gravity.END;
@@ -637,6 +667,17 @@ public class LauncherActivity extends Activity {
         netBtn.setClipBounds(null);
         netBtn.setContentDescription("Network settings");
         root.addView(netBtn);
+
+        View mpLocal = buildMapperBtn(BTN_SZ);
+        mapperBtnView = mpLocal;
+        FrameLayout.LayoutParams mpLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
+        mpLp.gravity = Gravity.TOP | Gravity.END;
+        mpLp.topMargin = MARG_T;
+        // Leftmost of the three: 2 stride steps from the right edge.
+        mpLp.setMarginEnd(MARG_E + 2 * (BTN_VIEW_SZ + BTN_GAP));
+        mpLocal.setLayoutParams(mpLp);
+        mpLocal.setContentDescription("Remap remote buttons");
+        root.addView(mpLocal);
 
         View wpLocal = buildWpBtn(BTN_SZ);
         wpBtnView = wpLocal;
@@ -975,6 +1016,11 @@ public class LauncherActivity extends Activity {
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView sd = shelf; if (sd != null) sd.requestFocusOnIndex(0); return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
+                    // Wifi is the middle button: LEFT focuses the mapper
+                    // (leftmost) when present, else falls through to the
+                    // last shelf cell to preserve pre-mapper behaviour.
+                    View mb = mapperBtnView;
+                    if (mb != null) { mb.requestFocus(); return true; }
                     RecyclingShelfView sl = shelf;
                     if (sl != null) sl.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
                     return true;
@@ -1027,14 +1073,91 @@ public class LauncherActivity extends Activity {
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openStoragePicker());
-        v.setOnLongClickListener(view -> {
-            // Long-press the wallpaper button → open the remote-key
-            // shortcut configuration overlay. Single source of truth for
-            // launcher settings — no separate Activity, no menu, just an
-            // overlay over the home screen as specified.
+        v.setOnFocusChangeListener((view, f) -> {
+            view.animate().cancel();
+            view.animate().scaleX(f ? 1.06f : 1f).scaleY(f ? 1.06f : 1f)
+                    .setDuration(100).setInterpolator(FOCUS_EASE).start();
+            view.invalidate();
+        });
+        v.setOnKeyListener((view, kc, ev) -> {
+            if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+            switch (kc) {
+                case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_BUTTON_A:
+                    view.playSoundEffect(SoundEffectConstants.CLICK);
+                    view.performClick(); return true;
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                    RecyclingShelfView s = shelf;
+                    if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                    View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    RecyclingShelfView sr = shelf; if (sr != null) sr.requestFocusOnIndex(0); return true;
+                default: return false;
+            }
+        });
+        return v;
+    }
+
+    /** Third toolbar pill — opens the remote-key remap overlay.
+     *  Matches the netBtn / wpBtn glass aesthetic exactly: dark idle plate,
+     *  frosted-white focused plate, glyph inverts on focus. The icon is a
+     *  3-bar "sliders" / settings glyph (universal "configure" symbol).
+     *  Drawn entirely with Canvas primitives — zero new resources. */
+    private View buildMapperBtn(int sz) {
+        View v = new View(this) {
+            private final Paint stroke    = makeBtnStrokePaint();
+            private final Paint dot       = makeBtnPaint(true);
+            private final Paint bgIdle    = makeBgIdlePaint();
+            private final Paint bgFocus   = makeBgFocusPaint();
+            private final Paint rim       = makeRimPaint();
+            @Override protected void onDraw(Canvas c) {
+                int w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) return;
+                boolean focused = isFocused();
+                float scale = focused ? 1f : 0.86f;
+                float cx = w / 2f, cy = h / 2f;
+                float r = Math.min(cx, cy) * scale;
+                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
+                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+
+                int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
+                stroke.setColor(symbolColor);
+                dot.setColor(symbolColor);
+
+                // 3 horizontal bars with circular knobs at varied positions —
+                // reads as "sliders" / "configure" at a glance. Knob ordering
+                // (25%, 70%, 50%) gives an asymmetric, hand-tuned look that
+                // never collides with the bar end-caps.
+                float ic       = r * 0.96f;
+                float lineW    = ic * 1.30f;
+                float lineL    = cx - lineW / 2f;
+                float lineR    = cx + lineW / 2f;
+                float strokeW  = ic * 0.18f;
+                float spacing  = ic * 0.55f;
+                float knobR    = strokeW * 0.95f;
+                stroke.setStrokeWidth(strokeW);
+                stroke.setStrokeCap(Paint.Cap.ROUND);
+                stroke.setStrokeJoin(Paint.Join.ROUND);
+
+                final float[] knobFrac = { 0.28f, 0.70f, 0.46f };
+                for (int i = 0; i < 3; i++) {
+                    float by = cy + (i - 1) * spacing;
+                    c.drawLine(lineL, by, lineR, by, stroke);
+                    float kx = lineL + lineW * knobFrac[i];
+                    // Outer knob disc (matches plate colour) acts as a "cut-out"
+                    // around the inner knob to visually separate it from the bar.
+                    c.drawCircle(kx, by, knobR + strokeW * 0.45f,
+                            focused ? bgFocus : bgIdle);
+                    c.drawCircle(kx, by, knobR, dot);
+                }
+            }
+        };
+        applyApplePillStyle(v);
+        v.setOnClickListener(view -> {
             view.playSoundEffect(SoundEffectConstants.CLICK);
             showKeymapOverlay();
-            return true;
         });
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
@@ -1042,60 +1165,29 @@ public class LauncherActivity extends Activity {
                     .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
-        v.setOnKeyListener(new View.OnKeyListener() {
-            // Long-press detection mirrors CellView: arm on first KEY_DOWN,
-            // fire on the first repeat after the 600 ms threshold, suppress
-            // the trailing click so we don't open the wallpaper picker right
-            // after the overlay opens. Done as an anonymous class so the
-            // three pieces of state (down-time / armed / fired) live with
-            // the listener instead of leaking onto the View.
-            long downAt = 0;
-            boolean longArmed = false;
-            boolean longFired = false;
-            @Override public boolean onKey(View view, int kc, KeyEvent ev) {
-                boolean isCenter = kc == KeyEvent.KEYCODE_DPAD_CENTER
-                        || kc == KeyEvent.KEYCODE_ENTER
-                        || kc == KeyEvent.KEYCODE_BUTTON_A;
-                if (isCenter) {
-                    if (ev.getAction() == KeyEvent.ACTION_DOWN) {
-                        if (ev.getRepeatCount() == 0) {
-                            downAt = System.currentTimeMillis();
-                            longArmed = true;
-                            longFired = false;
-                        } else if (longArmed && !longFired
-                                && System.currentTimeMillis() - downAt >= 600) {
-                            longFired = true;
-                            longArmed = false;
-                            view.playSoundEffect(SoundEffectConstants.CLICK);
-                            showKeymapOverlay();
-                        }
-                        return true;
-                    }
-                    if (ev.getAction() == KeyEvent.ACTION_UP) {
-                        boolean wasArmed = longArmed;
-                        longArmed = false;
-                        longFired = false;
-                        downAt = 0;
-                        if (wasArmed) {
-                            view.playSoundEffect(SoundEffectConstants.CLICK);
-                            view.performClick();
-                        }
-                        return true;
-                    }
-                    return false;
-                }
-                if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
-                switch (kc) {
-                    case KeyEvent.KEYCODE_DPAD_DOWN:
-                        RecyclingShelfView s = shelf;
-                        if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
-                        return true;
-                    case KeyEvent.KEYCODE_DPAD_LEFT:
-                        View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
-                    case KeyEvent.KEYCODE_DPAD_RIGHT:
-                        RecyclingShelfView sr = shelf; if (sr != null) sr.requestFocusOnIndex(0); return true;
-                    default: return false;
-                }
+        v.setOnKeyListener((view, kc, ev) -> {
+            if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+            switch (kc) {
+                case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_BUTTON_A:
+                    view.playSoundEffect(SoundEffectConstants.CLICK);
+                    view.performClick(); return true;
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                    // Down lands on the first shelf cell — natural since the
+                    // mapper is the leftmost icon and the leftmost shelf cell
+                    // sits below it.
+                    RecyclingShelfView s = shelf;
+                    if (s != null) s.requestFocusOnIndex(0);
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                    // Wrap to last shelf cell — taking over what netBtn
+                    // previously did when it was leftmost.
+                    RecyclingShelfView sl = shelf;
+                    if (sl != null) sl.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
+                default: return false;
             }
         });
         return v;
@@ -2250,9 +2342,12 @@ public class LauncherActivity extends Activity {
     }
 
     /** Keys the launcher must always handle itself — d-pad, confirm,
-     *  back/home/menu, volume, power. Mapping any of these is silently
+     *  back/home, volume, power. Mapping any of these is silently
      *  ignored so a misconfiguration can never lock the user out of
-     *  navigation. */
+     *  navigation.
+     *  KEYCODE_MENU is deliberately ABSENT — it's exposed as a mappable
+     *  slot in the config overlay, and the launcher never consumes it
+     *  itself, so users can repurpose it freely. */
     private static boolean isCoreNavKey(int kc) {
         switch (kc) {
             case KeyEvent.KEYCODE_DPAD_UP:
@@ -2265,7 +2360,6 @@ public class LauncherActivity extends Activity {
             case KeyEvent.KEYCODE_BUTTON_B:
             case KeyEvent.KEYCODE_BACK:
             case KeyEvent.KEYCODE_HOME:
-            case KeyEvent.KEYCODE_MENU:
             case KeyEvent.KEYCODE_ESCAPE:
             case KeyEvent.KEYCODE_VOLUME_UP:
             case KeyEvent.KEYCODE_VOLUME_DOWN:
@@ -2309,10 +2403,21 @@ public class LauncherActivity extends Activity {
     }
 
     // ── Keymap configuration overlay ─────────────────────────────────────
+    //
+    // The overlay is a full-screen FrameLayout sitting at the top of the
+    // launcher's existing root z-order. Inside the overlay sits a centred
+    // "card" LinearLayout that holds two sibling sub-views which alternate
+    // visibility based on keymapMode:
+    //
+    //   keymapColumn    — vertical list of slot rows (default mode)
+    //   keymapPickerView — horizontal scrollable app chips (picker mode)
+    //
+    // No new Activity, no new Fragment, no new resources. Everything is
+    // built programmatically and reused across opens.
 
-    /** Build the overlay lazily on first long-press. Reused for every
-     *  subsequent open — keeping it inflated is cheap (one FrameLayout +
-     *  N TextViews) and avoids the inflate cost on every reopen. */
+    /** Build the overlay lazily on first open. Reused for every subsequent
+     *  open — keeping it inflated is cheap (one FrameLayout + ~20 TextViews
+     *  + a HorizontalScrollView) and avoids the inflate cost on every reopen. */
     private void buildKeymapOverlay() {
         FrameLayout r = root; if (r == null) return;
         FrameLayout ov = new FrameLayout(this) {
@@ -2328,14 +2433,20 @@ public class LauncherActivity extends Activity {
         ov.setFocusableInTouchMode(true);
         ov.setVisibility(View.GONE);
 
+        // Centred card holds both sub-views. Sized to wrap-content so the
+        // card grows when the picker (which is wider) is shown.
+        android.widget.LinearLayout card = new android.widget.LinearLayout(this);
+        card.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.graphics.drawable.GradientDrawable cardBg =
+                new android.graphics.drawable.GradientDrawable();
+        cardBg.setColor(0xEE111111);
+        cardBg.setCornerRadius(dp(14));
+        card.setBackground(cardBg);
+        card.setPadding(dp(22), dp(20), dp(22), dp(18));
+
+        // ── Slot list view (default) ──────────────────────────────
         android.widget.LinearLayout col = new android.widget.LinearLayout(this);
         col.setOrientation(android.widget.LinearLayout.VERTICAL);
-        android.graphics.drawable.GradientDrawable bg =
-                new android.graphics.drawable.GradientDrawable();
-        bg.setColor(0xEE111111);
-        bg.setCornerRadius(dp(14));
-        col.setBackground(bg);
-        col.setPadding(dp(22), dp(20), dp(22), dp(18));
 
         TextView title = new TextView(this);
         title.setText("Remote Shortcuts");
@@ -2347,7 +2458,7 @@ public class LauncherActivity extends Activity {
         col.addView(title);
 
         // One TextView per slot — cheaper than per-row LinearLayout, and
-        // the two-column look is achieved with a rendered tab span.
+        // the two-column look is achieved with a fixed-width pad.
         for (int i = 0; i < SHORTCUT_LABELS.length; i++) {
             TextView row = new TextView(this);
             row.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
@@ -2362,21 +2473,69 @@ public class LauncherActivity extends Activity {
             col.addView(row, rlp);
         }
 
-        TextView hint = new TextView(this);
-        hint.setText("\u2191\u2193 select  \u00B7  \u2190 \u2192 change app  \u00B7  OK / Back to close");
-        hint.setTextColor(0x88FFFFFF);
-        hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
-        hint.setPadding(0, dp(12), 0, 0);
-        hint.setGravity(Gravity.CENTER);
-        col.addView(hint);
+        TextView slotsHint = new TextView(this);
+        slotsHint.setText("\u2191\u2193 select  \u00B7  OK to assign  \u00B7  Back to close");
+        slotsHint.setTextColor(0x88FFFFFF);
+        slotsHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+        slotsHint.setPadding(0, dp(12), 0, 0);
+        slotsHint.setGravity(Gravity.CENTER);
+        col.addView(slotsHint);
 
-        FrameLayout.LayoutParams colLp = new FrameLayout.LayoutParams(WRAP, WRAP);
-        colLp.gravity = Gravity.CENTER;
-        ov.addView(col, colLp);
+        // ── App picker view (entered when user OK's a slot) ──────
+        android.widget.LinearLayout picker = new android.widget.LinearLayout(this);
+        picker.setOrientation(android.widget.LinearLayout.VERTICAL);
+        picker.setVisibility(View.GONE);
+
+        TextView pickerTitle = new TextView(this);
+        pickerTitle.setTextColor(Color.WHITE);
+        pickerTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+        pickerTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        pickerTitle.setLetterSpacing(0.02f);
+        pickerTitle.setPadding(0, 0, 0, dp(10));
+        picker.addView(pickerTitle);
+
+        // Horizontal scroller — d-pad LEFT/RIGHT moves the highlighted
+        // chip and refreshKeymapPicker auto-scrolls the strip so the
+        // selection stays in view.
+        android.widget.HorizontalScrollView hsv =
+                new android.widget.HorizontalScrollView(this);
+        hsv.setHorizontalScrollBarEnabled(false);
+        hsv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        // Cap card width at ~78% of screen so the scroller has a stable
+        // viewport on any TV size. Height is wrap-content (chip height).
+        int hsvW = Math.max(dp(420), Math.round(screenW * 0.78f));
+        android.widget.LinearLayout.LayoutParams hsvLp =
+                new android.widget.LinearLayout.LayoutParams(hsvW, WRAP);
+        hsvLp.topMargin = dp(2);
+        picker.addView(hsv, hsvLp);
+
+        android.widget.LinearLayout strip = new android.widget.LinearLayout(this);
+        strip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        strip.setPadding(dp(2), dp(4), dp(2), dp(4));
+        hsv.addView(strip, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
+
+        TextView pickerHint = new TextView(this);
+        pickerHint.setText("\u2190\u2192 choose  \u00B7  OK to assign  \u00B7  Back to cancel");
+        pickerHint.setTextColor(0x88FFFFFF);
+        pickerHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+        pickerHint.setPadding(0, dp(12), 0, 0);
+        pickerHint.setGravity(Gravity.CENTER);
+        picker.addView(pickerHint);
+
+        card.addView(col);
+        card.addView(picker);
+
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        cardLp.gravity = Gravity.CENTER;
+        ov.addView(card, cardLp);
 
         r.addView(ov);
-        keymapOverlay = ov;
-        keymapColumn  = col;
+        keymapOverlay     = ov;
+        keymapColumn      = col;
+        keymapPickerView  = picker;
+        keymapPickerTitle = pickerTitle;
+        keymapPickerHsv   = hsv;
+        keymapPickerStrip = strip;
     }
 
     private void showKeymapOverlay() {
@@ -2386,7 +2545,11 @@ public class LauncherActivity extends Activity {
         // Hide the focus ring — it belongs to the shelf, which is now
         // logically behind the overlay.
         RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+        // Always open in slot-list mode.
+        keymapMode        = KEYMAP_MODE_SLOTS;
         keymapSelectedRow = 0;
+        if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
+        if (keymapColumn     != null) keymapColumn    .setVisibility(View.VISIBLE);
         refreshKeymapRows();
         ko.setVisibility(View.VISIBLE);
         ko.bringToFront();
@@ -2396,17 +2559,26 @@ public class LauncherActivity extends Activity {
     private void hideKeymapOverlay() {
         FrameLayout ko = keymapOverlay;
         if (ko == null) return;
+        // Reset to slot-list mode so a future re-open is consistent
+        // (avoids the case where Back from slot-list closes the overlay
+        // while picker mode was still cached as the active sub-view).
+        keymapMode = KEYMAP_MODE_SLOTS;
+        if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
+        if (keymapColumn     != null) keymapColumn    .setVisibility(View.VISIBLE);
         ko.setVisibility(View.GONE);
-        // Restore focus to the wallpaper button so the user lands back
+        // Restore focus to the mapper button so the user lands back
         // where they triggered the overlay.
-        View wb = wpBtnView;
-        if (wb != null) wb.requestFocus();
+        View mb = mapperBtnView;
+        if (mb != null) mb.requestFocus();
+        else {
+            View wb = wpBtnView;
+            if (wb != null) wb.requestFocus();
+        }
     }
 
-    /** Repaint every row to reflect the current keyMap state and selection.
-     *  Called on every navigation event — cheap because each row is a
-     *  single TextView whose content changes are coalesced by the next
-     *  draw pass. */
+    /** Repaint every slot row to reflect the current keyMap state and
+     *  selection. Called on every navigation event in slot mode and on
+     *  every commit from picker mode. Cheap — each row is one TextView. */
     private void refreshKeymapRows() {
         android.widget.LinearLayout col = keymapColumn;
         if (col == null) return;
@@ -2426,55 +2598,192 @@ public class LauncherActivity extends Activity {
                 appLabel = (a != null) ? a.label : pkg;
             }
             // Two-column layout via a single padded label string — keeps
-            // the row to one TextView. Width rendering is fine because we
-            // pad the left column to a fixed character count.
-            String left = SHORTCUT_LABELS[i];
-            // Pad-right to 11 chars; the labels are short and ASCII so
+            // the row to one TextView. Pad-right to 11 chars so the
             // proportional-font drift across the column stays minimal.
+            String left = SHORTCUT_LABELS[i];
             int pad = 11 - left.length();
             StringBuilder sb = new StringBuilder(48);
             sb.append(left);
             for (int p = 0; p < pad; p++) sb.append(' ');
             sb.append("   ");
-            if (sel) sb.append("\u25C0  ");
             sb.append(appLabel);
-            if (sel) sb.append("  \u25B6");
             row.setText(sb);
             row.setBackgroundColor(sel ? 0x33FFFFFF : Color.TRANSPARENT);
             row.setTextColor(sel ? Color.WHITE : 0xAAFFFFFF);
         }
     }
 
-    /** Cycle the assigned app for a row. dir = +1 right, -1 left. The
-     *  cycle includes a "no assignment" sentinel (-1) before app[0] and
-     *  after app[n-1] so the user can always clear a binding without a
-     *  separate gesture. */
-    private void cycleKeymapApp(int rowIdx, int dir) {
-        int n = appList.size();
-        if (n == 0) { showToast("No apps installed"); return; }
+    // ── App picker mode ──────────────────────────────────────────
+
+    /** Enter picker mode for the slot at rowIdx. Hides the slot list,
+     *  rebuilds the chip strip from the current appList, and selects the
+     *  chip matching the current binding (or "None" if unassigned). */
+    private void enterAppPicker(int rowIdx) {
+        if (keymapColumn == null || keymapPickerView == null) return;
+        keymapPickerSlotRow = rowIdx;
+        TextView pt = keymapPickerTitle;
+        if (pt != null) {
+            pt.setText("Pick app for " + SHORTCUT_LABELS[rowIdx]);
+        }
+        rebuildPickerChips();
+        // Pre-select the chip matching the current binding so left/right
+        // navigates from where the user is, not always from the start.
         int kc = SHORTCUT_KEYCODES[rowIdx];
         String pkg = keyMap.get(kc);
-        int cur = -1;   // -1 sentinel = no assignment
+        int idx = 0; // 0 = "None" sentinel
         if (pkg != null) {
-            for (int i = 0; i < n; i++)
-                if (appList.get(i).packageName.equals(pkg)) { cur = i; break; }
+            for (int i = 0; i < appList.size(); i++) {
+                if (appList.get(i).packageName.equals(pkg)) { idx = i + 1; break; }
+            }
         }
-        int nxt = cur + dir;
-        if (nxt < -1) nxt = n - 1;
-        if (nxt >= n) nxt = -1;
-        if (nxt < 0) keyMap.delete(kc);
-        else         keyMap.put(kc, appList.get(nxt).packageName);
-        saveKeyMap();
-        refreshKeymapRows();
+        keymapPickerIdx = idx;
+        keymapMode      = KEYMAP_MODE_PICKER;
+        keymapColumn.setVisibility(View.GONE);
+        keymapPickerView.setVisibility(View.VISIBLE);
+        refreshKeymapPicker();
+        // Initial scroll happens after layout — post() so getLeft() of the
+        // selected chip is non-zero.
+        final android.widget.HorizontalScrollView hsv = keymapPickerHsv;
+        if (hsv != null) hsv.post(this::scrollPickerToSelection);
     }
 
-    /** D-pad navigation inside the overlay. Returns true if the event is
-     *  consumed (the activity-level dispatchKeyEvent then returns true).
-     *  Up/down moves between slots, left/right cycles the slot's app, OK
-     *  closes (saves are automatic on every cycle), Back closes. */
+    /** Cancel the picker without writing anything — return to slot list. */
+    private void exitAppPicker() {
+        keymapMode = KEYMAP_MODE_SLOTS;
+        if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
+        if (keymapColumn     != null) keymapColumn    .setVisibility(View.VISIBLE);
+    }
+
+    /** Commit the highlighted chip as the binding for the current slot row,
+     *  save to SharedPreferences, refresh the slot-list display, and return
+     *  to slot mode. Idx 0 = "None" → delete the binding. */
+    private void commitAppPickerSelection() {
+        int kc = SHORTCUT_KEYCODES[keymapPickerSlotRow];
+        if (keymapPickerIdx <= 0) {
+            keyMap.delete(kc);
+        } else {
+            int appIdx = keymapPickerIdx - 1;
+            if (appIdx >= 0 && appIdx < appList.size()) {
+                keyMap.put(kc, appList.get(appIdx).packageName);
+            }
+        }
+        saveKeyMap();
+        refreshKeymapRows();
+        exitAppPicker();
+    }
+
+    /** Rebuild the chip strip from the current appList. Called every time
+     *  the user enters picker mode so the list always reflects the
+     *  currently-installed apps (a package install/remove between opens
+     *  would otherwise leave stale chips). Each chip is a single TextView. */
+    private void rebuildPickerChips() {
+        android.widget.LinearLayout strip = keymapPickerStrip;
+        if (strip == null) return;
+        strip.removeAllViews();
+        // First chip is the "None" sentinel — always present so the user
+        // can clear a binding from the picker without a separate gesture.
+        addPickerChip(strip, "\u2014  None", true);
+        for (int i = 0; i < appList.size(); i++) {
+            addPickerChip(strip, appList.get(i).label, false);
+        }
+    }
+
+    private void addPickerChip(android.widget.LinearLayout strip, String label, boolean isNone) {
+        TextView chip = new TextView(this);
+        chip.setText(label);
+        chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        chip.setTypeface(Typeface.create(isNone ? "sans-serif" : "sans-serif-medium",
+                Typeface.NORMAL));
+        chip.setTextColor(0xAAFFFFFF);
+        chip.setSingleLine(true);
+        chip.setEllipsize(TextUtils.TruncateAt.END);
+        chip.setGravity(Gravity.CENTER);
+        chip.setPadding(dp(14), dp(8), dp(14), dp(8));
+        chip.setMaxWidth(dp(180));
+        // Rounded chip background — uses the same gradient drawable as
+        // every other rounded-rect surface in the launcher.
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setColor(Color.TRANSPARENT);
+        bg.setCornerRadius(dp(8));
+        chip.setBackground(bg);
+        android.widget.LinearLayout.LayoutParams clp =
+                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+        clp.setMarginEnd(dp(8));
+        strip.addView(chip, clp);
+    }
+
+    /** Repaint chip styles to reflect the current selection and scroll the
+     *  selected chip into the viewport. */
+    private void refreshKeymapPicker() {
+        android.widget.LinearLayout strip = keymapPickerStrip;
+        if (strip == null) return;
+        int n = strip.getChildCount();
+        for (int i = 0; i < n; i++) {
+            TextView chip = (TextView) strip.getChildAt(i);
+            if (chip == null) continue;
+            boolean sel = (i == keymapPickerIdx);
+            // Selected chip gets a lit background + bright text. Unselected
+            // chips stay transparent and dim, matching the slot-list style.
+            android.graphics.drawable.Drawable bgd = chip.getBackground();
+            if (bgd instanceof android.graphics.drawable.GradientDrawable) {
+                ((android.graphics.drawable.GradientDrawable) bgd)
+                        .setColor(sel ? 0x33FFFFFF : Color.TRANSPARENT);
+            }
+            chip.setTextColor(sel ? Color.WHITE : 0xAAFFFFFF);
+        }
+        scrollPickerToSelection();
+    }
+
+    /** Auto-scroll the horizontal strip so the selected chip is visible
+     *  with a small margin. Smooth-scroll keeps the focus motion premium. */
+    private void scrollPickerToSelection() {
+        android.widget.HorizontalScrollView hsv = keymapPickerHsv;
+        android.widget.LinearLayout strip = keymapPickerStrip;
+        if (hsv == null || strip == null) return;
+        if (keymapPickerIdx < 0 || keymapPickerIdx >= strip.getChildCount()) return;
+        View chip = strip.getChildAt(keymapPickerIdx);
+        if (chip == null) return;
+        if (chip.getWidth() == 0) {
+            // Layout hasn't run yet — try again next frame.
+            hsv.post(this::scrollPickerToSelection);
+            return;
+        }
+        int chipLeft  = chip.getLeft();
+        int chipRight = chip.getRight();
+        int viewLeft  = hsv.getScrollX();
+        int viewRight = viewLeft + hsv.getWidth();
+        int margin    = dp(40);
+        if (chipLeft < viewLeft + margin) {
+            hsv.smoothScrollTo(Math.max(0, chipLeft - margin), 0);
+        } else if (chipRight > viewRight - margin) {
+            hsv.smoothScrollTo(chipRight - hsv.getWidth() + margin, 0);
+        }
+    }
+
+    /** D-pad navigation inside the overlay. Routes by current mode:
+     *
+     *  SLOT mode:
+     *    UP/DOWN — move slot selection
+     *    OK      — enter picker for the selected slot
+     *    BACK    — close the overlay
+     *
+     *  PICKER mode:
+     *    LEFT/RIGHT — move chip selection (auto-scrolls)
+     *    OK         — commit the chip and return to slot mode
+     *    BACK       — cancel and return to slot mode
+     *
+     *  All other keys are swallowed so unmapped remote buttons don't
+     *  bleed through and trigger their (potentially mapped) shortcut
+     *  while the user is configuring shortcuts. */
     private boolean handleKeymapOverlayKey(KeyEvent ev) {
         if (ev.getAction() != KeyEvent.ACTION_DOWN) return true;  // eat KEY_UP for handled keys
         int kc = ev.getKeyCode();
+        if (keymapMode == KEYMAP_MODE_PICKER) return handleKeymapPickerKey(kc);
+        return handleKeymapSlotsKey(kc);
+    }
+
+    private boolean handleKeymapSlotsKey(int kc) {
         int rows = SHORTCUT_LABELS.length;
         switch (kc) {
             case KeyEvent.KEYCODE_DPAD_UP:
@@ -2483,20 +2792,37 @@ public class LauncherActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_DOWN:
                 keymapSelectedRow = (keymapSelectedRow + 1) % rows;
                 refreshKeymapRows(); return true;
-            case KeyEvent.KEYCODE_DPAD_LEFT:
-                cycleKeymapApp(keymapSelectedRow, -1); return true;
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
-                cycleKeymapApp(keymapSelectedRow, +1); return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
+                enterAppPicker(keymapSelectedRow); return true;
             case KeyEvent.KEYCODE_BACK:
             case KeyEvent.KEYCODE_ESCAPE:
                 hideKeymapOverlay(); return true;
         }
-        // Swallow everything else so unmapped remote buttons don't bleed
-        // through and trigger their (potentially mapped) shortcut while
-        // the user is configuring shortcuts.
+        // Swallow everything else — see method javadoc.
+        return true;
+    }
+
+    private boolean handleKeymapPickerKey(int kc) {
+        android.widget.LinearLayout strip = keymapPickerStrip;
+        int n = strip == null ? 0 : strip.getChildCount();
+        switch (kc) {
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (n > 0) keymapPickerIdx = Math.max(0, keymapPickerIdx - 1);
+                refreshKeymapPicker(); return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                if (n > 0) keymapPickerIdx = Math.min(n - 1, keymapPickerIdx + 1);
+                refreshKeymapPicker(); return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+                commitAppPickerSelection(); return true;
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+                exitAppPicker(); return true;
+        }
+        // Swallow everything else — see handleKeymapOverlayKey javadoc.
         return true;
     }
 
