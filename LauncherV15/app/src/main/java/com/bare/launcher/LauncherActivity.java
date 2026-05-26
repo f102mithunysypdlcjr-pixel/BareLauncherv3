@@ -362,11 +362,17 @@ public class LauncherActivity extends Activity {
     // manage row 7).
     private android.widget.LinearLayout keymapManageRow   = null;
     // Hide-manager sub-view (third child of the card, sibling of the slot
-    // list and picker — visibility is swapped between the three).
+    // list and picker — visibility is swapped between the three). The hide
+    // manager intentionally mirrors the keymap PICKER's UX exactly: a
+    // horizontal chip strip with the same selection language (bright pill
+    // + dark text + 1.05x scale + auto-scroll). The only delta is that
+    // hidden chips render their label with a strike-through, so the user
+    // can read the hidden flag at a glance in either selected or idle
+    // state without breaking the picker's visual vocabulary.
     private android.widget.LinearLayout keymapHideView    = null;
     private TextView                    keymapHideTitle   = null;
-    private android.widget.ScrollView   keymapHideScroll  = null;
-    private android.widget.LinearLayout keymapHideList    = null;  // vertical list of toggle rows
+    private android.widget.HorizontalScrollView keymapHideHsv = null;
+    private android.widget.LinearLayout keymapHideStrip   = null;  // horizontal chip strip
     private int                         keymapHideIdx     = 0;
     private int                         keymapHideLastIdx = -1;
     // Built-row count cached so we only rebuild the toggle rows when the
@@ -383,12 +389,22 @@ public class LauncherActivity extends Activity {
     private View                        mapperBtnView     = null;
 
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
-     *  Single source of truth for "ring should not be visible right now". */
+     *  Single source of truth for "ring should not be visible right now".
+     *
+     *  Transient-null tolerance: during a cyclic-wrap navigation the
+     *  previously-focused cell is recycled (setVisibility(GONE)), which
+     *  synchronously clears focus to null and re-fires this listener with
+     *  newFocus == null. Hiding the ring on that intermediate event leaves
+     *  a one-frame INVISIBLE window before the destination cell's focus
+     *  event repositions and re-shows it — visible to the user as a "ring
+     *  flickers off when wrapping at the end" glitch. We now skip the null
+     *  transition entirely; the next real focus event (either back to a
+     *  CellView, or out to a toolbar button) makes the correct decision. */
     private final ViewTreeObserver.OnGlobalFocusChangeListener globalFocusListener =
             (oldFocus, newFocus) -> {
                 if (destroyed) return;
-                boolean newIsCell = newFocus instanceof RecyclingShelfView.CellView;
-                if (!newIsCell) {
+                if (newFocus == null) return; // transient — let the next focus event decide
+                if (!(newFocus instanceof RecyclingShelfView.CellView)) {
                     RingView rv = ringView;
                     if (rv != null) rv.setVisibility(View.INVISIBLE);
                 }
@@ -495,7 +511,11 @@ public class LauncherActivity extends Activity {
         if (s != null) {
             int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_SCROLL_IDX, 0);
             if (!appList.isEmpty()) {
-                s.focusedIndex = Math.min(saved, appList.size() - 1);
+                // Clamp against the shelf's currently-displayed size so a
+                // saved index that points past the end of the filtered
+                // (hide-apps) view doesn't get misread as a wrap target by
+                // requestFocusOnIndex during the upcoming restore.
+                s.focusedIndex = Math.min(saved, s.lastIndex());
             } else {
                 // Cold start: apps haven't loaded yet. Stash the index;
                 // loadApps's UI callback will apply it once the shelf is populated.
@@ -571,7 +591,7 @@ public class LauncherActivity extends Activity {
         keymapPickerHsv = null; keymapPickerStrip = null;
         keymapManageRow = null;
         keymapHideView = null; keymapHideTitle = null;
-        keymapHideScroll = null; keymapHideList = null;
+        keymapHideHsv  = null; keymapHideStrip = null;
         super.onDestroy();
     }
 
@@ -1146,7 +1166,7 @@ public class LauncherActivity extends Activity {
                     View mb = mapperBtnView;
                     if (mb != null) { mb.requestFocus(); return true; }
                     RecyclingShelfView sl = shelf;
-                    if (sl != null) sl.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
+                    if (sl != null) sl.requestFocusOnIndex(sl.lastIndex());
                     return true;
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
                     View wb = wpBtnView; if (wb != null) wb.requestFocus(); return true;
@@ -1212,7 +1232,7 @@ public class LauncherActivity extends Activity {
                     view.performClick(); return true;
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView s = shelf;
-                    if (s != null) s.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
+                    if (s != null) s.requestFocusOnIndex(s.lastIndex());
                     return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
                     View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
@@ -1307,7 +1327,7 @@ public class LauncherActivity extends Activity {
                     // Wrap to last shelf cell — taking over what netBtn
                     // previously did when it was leftmost.
                     RecyclingShelfView sl = shelf;
-                    if (sl != null) sl.requestFocusOnIndex(appList.isEmpty() ? 0 : appList.size() - 1);
+                    if (sl != null) sl.requestFocusOnIndex(sl.lastIndex());
                     return true;
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
                     View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
@@ -1415,6 +1435,19 @@ public class LauncherActivity extends Activity {
         //           when ensureVisible scrolls. Pre-computed once per shelf
         //           instead of dp(10) / dp(48) every scroll frame & focus event.
         private final int cellW, cellH, stride, sidePad, edgePad;
+
+        // Source of truth for what the shelf is rendering RIGHT NOW. The
+        // outer appList is the master inventory of every installed
+        // launchable app; the shelf may show a filtered subset (hide-apps
+        // feature). bindCell, fillVisible, requestFocusOnIndex, etc. all
+        // read from this list — never from the outer appList directly.
+        // Mismatching the two was the cause of the "hide app function not
+        // working" regression: setApps used to update the bookkeeping
+        // (totalW, focusedIndex) from the filtered list while bindCell
+        // still rendered apps from the unfiltered appList, so cells got
+        // counted but rendered the wrong identities.
+        private final ArrayList<AppInfo>   displayed = new ArrayList<>();
+
         int focusedIndex = 0;
 
         boolean reorderMode   = false;
@@ -1489,11 +1522,29 @@ public class LauncherActivity extends Activity {
         }
 
         void swapWithNeighbour(int targetIdx) {
-            if (targetIdx < 0 || targetIdx >= appList.size() || targetIdx == dragIndex) return;
+            if (targetIdx < 0 || targetIdx >= displayed.size() || targetIdx == dragIndex) return;
             // Capture the from/to so the post-swap slide animation knows the
             // visual delta between each cell's old and new screen positions.
             int oldDragIdx = dragIndex;
-            Collections.swap(appList, oldDragIdx, targetIdx);
+            // Swap in displayed (the rendered ordering). We then mirror the
+            // swap into the master appList — but ONLY for the two AppInfo
+            // identities involved, leaving any hidden apps that sit between
+            // them in their original positions. This keeps the persisted
+            // order in sync with what the user actually rearranged without
+            // scrambling hidden-app placement.
+            AppInfo movedApp     = displayed.get(oldDragIdx);
+            AppInfo neighbourApp = displayed.get(targetIdx);
+            Collections.swap(displayed, oldDragIdx, targetIdx);
+            int aMaster = -1, bMaster = -1;
+            for (int i = 0, n = appList.size(); i < n; i++) {
+                AppInfo a = appList.get(i);
+                if      (a == movedApp)     aMaster = i;
+                else if (a == neighbourApp) bMaster = i;
+                if (aMaster >= 0 && bMaster >= 0) break;
+            }
+            if (aMaster >= 0 && bMaster >= 0 && aMaster != bMaster) {
+                Collections.swap(appList, aMaster, bMaster);
+            }
             dragIndex    = targetIdx;
             focusedIndex = dragIndex;
             ensureVisibleSync(dragIndex);   // sync scroll — swap-slide animates cleanly off final layout
@@ -1546,7 +1597,7 @@ public class LauncherActivity extends Activity {
         private void rebindAll() {
             for (int i = 0; i < attached.size(); i++) {
                 int idx = attached.keyAt(i);
-                if (idx >= 0 && idx < appList.size()) bindCell(attached.valueAt(i), idx);
+                if (idx >= 0 && idx < displayed.size()) bindCell(attached.valueAt(i), idx);
             }
             int targetIdx = reorderMode ? dragIndex : focusedIndex;
             CellView focused = attached.get(targetIdx);
@@ -1588,16 +1639,32 @@ public class LauncherActivity extends Activity {
                 cv.setVisibility(GONE); pool.add(cv);
             }
             attached.clear();
-            if (apps.isEmpty()) { focusedIndex = 0; scrollX = 0; }
-            if (!apps.isEmpty()) focusedIndex = Math.min(focusedIndex, apps.size() - 1);
-            totalW = apps.size() * stride; centerX = 0; needsRefill = true;
+            // Snapshot the caller's list into our own so subsequent
+            // mutations from the activity don't reach inside the shelf
+            // (the activity may rebuild appList during a package broadcast
+            // without re-calling setApps; we want stable rendering until
+            // applyShelfApps is invoked again).
+            displayed.clear();
+            if (apps != null && !apps.isEmpty()) displayed.addAll(apps);
+            if (displayed.isEmpty()) { focusedIndex = 0; scrollX = 0; }
+            else                     focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
+            totalW = displayed.size() * stride; centerX = 0; needsRefill = true;
             requestLayout();
-            for (AppInfo app : apps) preWarmIcon(app);
+            for (AppInfo app : displayed) preWarmIcon(app);
             final int targetIdx = focusedIndex;
             post(() -> requestFocusOnIndex(targetIdx));
         }
 
         void requestFocusOnIndex(int idx) { requestFocusOnIndex(idx, false); }
+
+        /** Last visible-cell index, or 0 if the shelf is empty. Callers
+         *  that want to jump to "the rightmost shelf cell" should use this
+         *  instead of {@code appList.size() - 1} so the hide-apps filter
+         *  is respected (otherwise an UP-from-toolbar can land focus on a
+         *  hidden index past the end of the rendered cells, which the
+         *  shelf then has to clamp — visible as a brief mis-positioned
+         *  ring before snap-back). */
+        int lastIndex() { return displayed.isEmpty() ? 0 : displayed.size() - 1; }
 
         /** Programmatic focus jump.
          *  @param snap  true → no smooth-scroll animation. Used for held
@@ -1634,8 +1701,8 @@ public class LauncherActivity extends Activity {
          *    its visual cue (the bounce that previously rode on the focus
          *    listener path). */
         void requestFocusOnIndex(int idx, boolean snap) {
-            if (appList.isEmpty()) return;
-            int sz = appList.size();
+            if (displayed.isEmpty()) return;
+            int sz = displayed.size();
             boolean wrapped = false;
             if (snap) {
                 // Held D-pad → clamp.
@@ -1694,6 +1761,14 @@ public class LauncherActivity extends Activity {
                 if (cvBounce != null && cvBounce.isFocused()) {
                     cvBounce.animate().cancel();
                     cvBounce.setScaleX(1f); cvBounce.setScaleY(1f);
+                    // Re-anchor the ring to the now-scale-1 cell BEFORE the
+                    // animation starts. Without this, the previous fastNav
+                    // positionRing call used scale=FOCUS_SCALE, so for one
+                    // frame the ring sat at the larger radius around a
+                    // shrunk cell — read as "ring jumps off" at wrap. The
+                    // animator's per-frame update listener takes over after
+                    // this first sync.
+                    LauncherActivity.this.positionRing(cvBounce);
                     cvBounce.animate()
                             .scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
                             .setDuration(FOCUS_DUR_MS)
@@ -1734,10 +1809,10 @@ public class LauncherActivity extends Activity {
 
         private void fillVisible() {
             int w = getWidth();
-            if (w == 0 || appList.isEmpty()) return;
+            if (w == 0 || displayed.isEmpty()) return;
             if (centerX == 0) centerX = (totalW < w) ? (w - totalW) / 2 : dp(24);
             int first = Math.max(0, (scrollX - centerX) / stride - BUFFER);
-            int last  = Math.min(appList.size() - 1, (scrollX + w - centerX) / stride + BUFFER);
+            int last  = Math.min(displayed.size() - 1, (scrollX + w - centerX) / stride + BUFFER);
             for (int i = attached.size() - 1; i >= 0; i--) {
                 int idx = attached.keyAt(i);
                 if (idx < first || idx > last) {
@@ -1777,7 +1852,13 @@ public class LauncherActivity extends Activity {
         }
 
         private void bindCell(CellView cv, int index) {
-            AppInfo app = appList.get(index);
+            if (index < 0 || index >= displayed.size()) {
+                // Defensive: skip stale binds from a recycle path that
+                // raced an applyShelfApps() shrink. The cell's content
+                // will be re-bound on the next fillVisible.
+                return;
+            }
+            AppInfo app = displayed.get(index);
             int left = cellLeft(index), top = (getMeasuredHeight() - cellH) / 2;
             cv.bind(app, index);
             cv.layout(left, top, left + cellW, top + cellH);
@@ -1873,7 +1954,7 @@ public class LauncherActivity extends Activity {
          *  centre and gives it focus. Called only after a touch fling settles. */
         private void snapFocusToVisibleCenter() {
             int w = getWidth();
-            if (w <= 0 || appList.isEmpty()) return;
+            if (w <= 0 || displayed.isEmpty()) return;
             int viewportCenterX = scrollX + w / 2;
             int bestIdx = focusedIndex;
             int bestDist = Integer.MAX_VALUE;
@@ -2370,9 +2451,13 @@ public class LauncherActivity extends Activity {
                         } else if (pendingScrollIdx >= 0) {
                             // App list unchanged but a pending index is waiting —
                             // honour it. setApps wasn't called, so manually request focus.
+                            // Clamp against the shelf's currently-rendered size (not
+                            // appList.size()) — when hide-apps is filtering, the saved
+                            // index could exceed the visible list and requestFocusOnIndex
+                            // would otherwise interpret it as an out-of-bounds wrap.
                             RecyclingShelfView s = shelf;
                             if (s != null && !appList.isEmpty()) {
-                                s.requestFocusOnIndex(Math.min(pendingScrollIdx, appList.size() - 1));
+                                s.requestFocusOnIndex(Math.min(pendingScrollIdx, s.lastIndex()));
                             }
                             pendingScrollIdx = -1;
                         }
@@ -2848,11 +2933,14 @@ public class LauncherActivity extends Activity {
         hsv.addView(strip, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
         // ── Hide-manager view ───────────────────────────────────────
-        // Vertical, scrollable, OK-toggleable list of every installed app.
-        // Same card, same scale-up animation as the picker — only the
-        // sub-view's visibility changes. Rows are built lazily on first
-        // open and only rebuilt when the underlying app list size changes
-        // (see keymapHideBuiltSize), so reopens are O(1).
+        // Multi-select sibling of the picker: same horizontal chip strip,
+        // same selection language (bright frosted-white pill + dark text
+        // + 1.05x scale + auto-scroll). The only delta is that hidden
+        // chips render their label with a strike-through line so the
+        // hidden flag is legible in either selected or idle state — this
+        // way the launcher uses ONE chip-picker idiom across both
+        // single-select (button mapper) and multi-select (hide manager)
+        // flows, instead of the previous vertical-list special case.
         android.widget.LinearLayout hideView = new android.widget.LinearLayout(this);
         hideView.setOrientation(android.widget.LinearLayout.VERTICAL);
         hideView.setVisibility(View.GONE);
@@ -2860,7 +2948,7 @@ public class LauncherActivity extends Activity {
         hideView.setClipToPadding(false);
 
         TextView hideTitle = new TextView(this);
-        hideTitle.setText(R.string.keymap_manage_hidden);
+        hideTitle.setText(R.string.keymap_hide_title);
         hideTitle.setTextColor(0xFFEFEFEF);
         hideTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         hideTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -2868,25 +2956,30 @@ public class LauncherActivity extends Activity {
         hideTitle.setPadding(dp(4), dp(2), dp(4), dp(8));
         hideView.addView(hideTitle);
 
-        // Scroller capped to ~52% of the screen height so the card never
-        // outgrows the panel on big TVs. Width matches the picker's hsv
-        // for a consistent card footprint between modes.
-        android.widget.ScrollView hsv2 = new android.widget.ScrollView(this);
-        hsv2.setVerticalScrollBarEnabled(false);
+        // Horizontal scroller, capped at the same width as the picker so
+        // both card sub-modes have a consistent footprint and the user's
+        // muscle memory carries between them.
+        android.widget.HorizontalScrollView hsv2 =
+                new android.widget.HorizontalScrollView(this);
+        hsv2.setHorizontalScrollBarEnabled(false);
         hsv2.setOverScrollMode(View.OVER_SCROLL_NEVER);
         int hideW = Math.min(dp(540), Math.round(screenW * 0.52f));
         if (hideW < dp(300)) hideW = dp(300);
-        int hideH = Math.min(dp(360), Math.round(screenH * 0.52f));
-        if (hideH < dp(200)) hideH = dp(200);
         android.widget.LinearLayout.LayoutParams hsv2Lp =
-                new android.widget.LinearLayout.LayoutParams(hideW, hideH);
+                new android.widget.LinearLayout.LayoutParams(hideW, WRAP);
         hideView.addView(hsv2, hsv2Lp);
 
-        android.widget.LinearLayout hideList = new android.widget.LinearLayout(this);
-        hideList.setOrientation(android.widget.LinearLayout.VERTICAL);
-        hideList.setPadding(dp(2), dp(2), dp(2), dp(2));
-        hsv2.addView(hideList,
-                new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
+        android.widget.LinearLayout hideStrip = new android.widget.LinearLayout(this);
+        hideStrip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        hideStrip.setPadding(dp(2), dp(4), dp(2), dp(4));
+        // Allow chip scale-up to draw outside the strip's logical bounds
+        // (matches the picker strip).
+        hideStrip.setClipChildren(false);
+        hideStrip.setClipToPadding(false);
+        hsv2.setClipChildren(false);
+        hsv2.setClipToPadding(false);
+        hsv2.addView(hideStrip,
+                new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
         card.addView(col);
         card.addView(picker);
@@ -2909,8 +3002,8 @@ public class LauncherActivity extends Activity {
         keymapPickerStrip = strip;
         keymapHideView    = hideView;
         keymapHideTitle   = hideTitle;
-        keymapHideScroll  = hsv2;
-        keymapHideList    = hideList;
+        keymapHideHsv     = hsv2;
+        keymapHideStrip   = hideStrip;
     }
 
     private void showKeymapOverlay() {
@@ -3454,14 +3547,14 @@ public class LauncherActivity extends Activity {
     // (see hideKeymapOverlay) so a heavy session of multiple toggles
     // doesn't trigger N shelf rebuilds.
 
-    /** Enter hide mode — swap the slot list for the hide list, rebuild
-     *  rows on first open / after a package change, and pre-select the
-     *  first row. Mirrors enterAppPicker's structure so the UX feels
+    /** Enter hide mode — swap the slot list for the hide chip strip,
+     *  rebuild chips on first open / after a package change, and pre-select
+     *  the first chip. Mirrors enterAppPicker exactly so the UX feels
      *  identical between the two card sub-modes. */
     private void enterHideManager() {
         if (keymapColumn == null || keymapHideView == null) return;
         if (keymapHideBuiltSize != appList.size()) {
-            buildHideRows();
+            buildHideChips();
             keymapHideBuiltSize = appList.size();
         }
         int n = appList.size();
@@ -3471,11 +3564,11 @@ public class LauncherActivity extends Activity {
         keymapColumn   .setVisibility(View.GONE);
         if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
         keymapHideView .setVisibility(View.VISIBLE);
-        refreshHideList();
-        // Initial scroll happens after layout — post() so getTop() of the
-        // selected row is non-zero.
-        final android.widget.ScrollView sv = keymapHideScroll;
-        if (sv != null) sv.post(this::scrollHideToSelection);
+        refreshHideStrip();
+        // Initial scroll happens after layout — post() so getLeft() of the
+        // selected chip is non-zero.
+        final android.widget.HorizontalScrollView hsv = keymapHideHsv;
+        if (hsv != null) hsv.post(this::scrollHideToSelection);
     }
 
     /** Cancel the hide manager and return to slot mode. The shelf is
@@ -3492,144 +3585,160 @@ public class LauncherActivity extends Activity {
         refreshKeymapRows();
     }
 
-    /** Rebuild the toggle rows from the current appList. Called only when
-     *  the app list size has changed since the last build. Each row is a
-     *  small horizontal LinearLayout with [icon][label][check]. The check
-     *  is a single Unicode ✓ TextView whose colour we toggle between
-     *  bright green (hidden) and transparent (visible) — zero drawables,
-     *  zero state branching at paint time. */
-    private void buildHideRows() {
-        android.widget.LinearLayout list = keymapHideList;
-        if (list == null) return;
-        list.removeAllViews();
+    /** Build the hide-manager chip strip from the current appList. Called
+     *  only when the app list size has changed since the last build, or
+     *  when a package broadcast invalidates the cache. Each chip is the
+     *  same horizontal LinearLayout shape used by the keymap picker:
+     *  [icon (20dp)] [label]. The hidden flag is encoded entirely as a
+     *  paint flag on the label TextView (Paint.STRIKE_THRU_TEXT_FLAG),
+     *  so toggling state is a single setPaintFlags() call — no view
+     *  insert/remove churn, no visibility flip, no allocation. */
+    private void buildHideChips() {
+        android.widget.LinearLayout strip = keymapHideStrip;
+        if (strip == null) return;
+        strip.removeAllViews();
         for (int i = 0; i < appList.size(); i++) {
             AppInfo a = appList.get(i);
-            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
-            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(10), dp(7), dp(10), dp(7));
-            android.graphics.drawable.GradientDrawable rbg =
-                    new android.graphics.drawable.GradientDrawable();
-            rbg.setCornerRadius(dp(9));
-            rbg.setColor(Color.TRANSPARENT);
-            row.setBackground(rbg);
-
-            // [0] app icon (uses the same iconCache the shelf uses; if not
-            //     yet resident we leave the slot empty — no spinner, no
-            //     placeholder, just the next-frame paint).
-            ImageView iv = new ImageView(this);
-            Bitmap bmp = (iconCache != null) ? iconCache.get(a.packageName) : null;
-            if (bmp != null) iv.setImageBitmap(bmp);
-            android.widget.LinearLayout.LayoutParams ivLp =
-                    new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
-            ivLp.setMarginEnd(dp(10));
-            row.addView(iv, ivLp);
-
-            // [1] app label — flex grows to fill the remaining width so the
-            //     check mark stays right-aligned across all rows.
-            TextView name = new TextView(this);
-            name.setText(a.label);
-            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
-            name.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-            name.setSingleLine(true);
-            name.setEllipsize(TextUtils.TruncateAt.END);
-            android.widget.LinearLayout.LayoutParams nameLp =
-                    new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
-            nameLp.setMarginEnd(dp(8));
-            row.addView(name, nameLp);
-
-            // [2] hidden-state check mark (Unicode ✓). Always present so
-            //     row width is stable; colour-keyed to encode state with
-            //     zero drawables and zero allocations.
-            TextView check = new TextView(this);
-            check.setText("\u2713");
-            check.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
-            check.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-            row.addView(check,
-                    new android.widget.LinearLayout.LayoutParams(dp(18), WRAP));
-
-            android.widget.LinearLayout.LayoutParams rowLp =
-                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
-            rowLp.bottomMargin = dp(1);
-            list.addView(row, rowLp);
+            Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
+            addHideChip(strip, a.label, b);
         }
     }
 
-    /** Repaint the hide list to reflect the current selection + hidden
-     *  state. Same two-mode pattern as refreshKeymapPicker:
-     *
+    /** Mirror of {@link #addPickerChip} for the hide-manager strip. The
+     *  geometry, paddings, idle colours and pill background match exactly
+     *  so the two strips are visually indistinguishable in idle state.
+     *  Hidden state is applied later by {@link #paintHideChip} as a
+     *  strike-through flag on the label paint. */
+    private void addHideChip(android.widget.LinearLayout strip,
+                             String label, Bitmap icon) {
+        android.widget.LinearLayout chip = new android.widget.LinearLayout(this);
+        chip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        chip.setGravity(Gravity.CENTER_VERTICAL);
+        chip.setPadding(dp(10), dp(7), dp(12), dp(7));
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setColor(Color.TRANSPARENT);
+        bg.setCornerRadius(dp(10));
+        chip.setBackground(bg);
+
+        // Icon slot — always present so chip widths stay consistent
+        // whether or not the bitmap has been cached yet.
+        ImageView iv = new ImageView(this);
+        if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
+        else              { iv.setVisibility(View.GONE); }
+        android.widget.LinearLayout.LayoutParams ivLp =
+                new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
+        ivLp.setMarginEnd(dp(7));
+        chip.addView(iv, ivLp);
+
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        tv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        tv.setTextColor(0x99FFFFFF);
+        tv.setSingleLine(true);
+        tv.setEllipsize(TextUtils.TruncateAt.END);
+        tv.setMaxWidth(dp(150));
+        chip.addView(tv);
+
+        android.widget.LinearLayout.LayoutParams clp =
+                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+        clp.setMarginEnd(dp(7));
+        strip.addView(chip, clp);
+    }
+
+    /** Repaint chip styles to reflect current selection AND hidden state.
+     *  Two paint modes (same dispatch pattern as refreshKeymapPicker):
      *    • prev < 0 → first paint after entering hide mode. Full sweep:
-     *      paint every row's check + selection state. This also covers
-     *      the case where buildHideRows just rebuilt the rows (their
-     *      check colours start at default and need a sync).
-     *    • prev ≥ 0 → in-session navigation. Only the two rows that
-     *      changed selection are repainted. The toggled row's check is
-     *      already updated separately by toggleSelectedHide. */
-    private void refreshHideList() {
-        android.widget.LinearLayout list = keymapHideList;
-        if (list == null) return;
-        int n = list.getChildCount();
+     *      every chip's pill colour / text colour / strike-through / scale.
+     *    • prev ≥ 0 → in-session navigation. Only the two chips that
+     *      changed selection are repainted. The toggled chip's strike-
+     *      through is updated separately by {@link #toggleSelectedHide}. */
+    private void refreshHideStrip() {
+        android.widget.LinearLayout strip = keymapHideStrip;
+        if (strip == null) return;
+        int n = strip.getChildCount();
         if (n == 0) return;
         int prev = keymapHideLastIdx;
         int curr = keymapHideIdx;
         if (prev < 0) {
-            // Full sweep — paint every row's check + selection state.
+            // Full sweep — paint every chip's idle state, then highlight
+            // the current one. We have to walk every chip here because the
+            // strike-through paint flag may have stuck from a prior open.
             for (int i = 0; i < n; i++) {
-                paintHideRow(list.getChildAt(i),
-                        i < appList.size() && hiddenApps.contains(appList.get(i).packageName),
-                        i == curr);
+                boolean hidden = i < appList.size()
+                        && hiddenApps.contains(appList.get(i).packageName);
+                paintHideChip(strip.getChildAt(i), i == curr, hidden, false);
             }
         } else if (prev != curr) {
             if (prev < n) {
-                paintHideRow(list.getChildAt(prev),
-                        prev < appList.size() && hiddenApps.contains(appList.get(prev).packageName),
-                        false);
+                boolean ph = prev < appList.size()
+                        && hiddenApps.contains(appList.get(prev).packageName);
+                paintHideChip(strip.getChildAt(prev), false, ph, true);
             }
             if (curr >= 0 && curr < n) {
-                paintHideRow(list.getChildAt(curr),
-                        curr < appList.size() && hiddenApps.contains(appList.get(curr).packageName),
-                        true);
+                boolean ch = curr < appList.size()
+                        && hiddenApps.contains(appList.get(curr).packageName);
+                paintHideChip(strip.getChildAt(curr), true, ch, true);
             }
         }
         keymapHideLastIdx = curr;
         scrollHideToSelection();
     }
 
-    /** Single source of truth for a hide-row's visual state. Three signals:
-     *    • selected → bright frosted-white pill + dark text
-     *    • idle     → transparent pill + light text
-     *    • hidden   → bright green check; on the selected row we shift to
-     *                 a darker green so it stays readable against the white
-     *                 pill (otherwise the green-on-white contrast is poor).
-     *    • visible  → transparent check (same Unicode glyph, alpha = 0). */
-    private void paintHideRow(View row, boolean hidden, boolean sel) {
-        if (!(row instanceof android.widget.LinearLayout)) return;
-        android.widget.LinearLayout ll = (android.widget.LinearLayout) row;
-        android.graphics.drawable.Drawable bg = ll.getBackground();
-        if (bg instanceof android.graphics.drawable.GradientDrawable) {
-            ((android.graphics.drawable.GradientDrawable) bg)
+    /** Single source of truth for a hide-chip's visual state. Matches the
+     *  keymap-picker chip paint exactly for selection / scale / pill
+     *  background; adds strike-through on the label when hidden so the
+     *  flag is legible in both selected and idle pills. */
+    private void paintHideChip(View chip, boolean sel, boolean hidden, boolean animate) {
+        if (chip == null) return;
+        android.graphics.drawable.Drawable bgd = chip.getBackground();
+        if (bgd instanceof android.graphics.drawable.GradientDrawable) {
+            ((android.graphics.drawable.GradientDrawable) bgd)
                     .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
         }
-        View nameV = ll.getChildAt(1);
-        if (nameV instanceof TextView) {
-            ((TextView) nameV).setTextColor(sel ? 0xFF111114 : 0xC0FFFFFF);
+        if (chip instanceof android.widget.LinearLayout) {
+            android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+            View last = cl.getChildAt(cl.getChildCount() - 1);
+            if (last instanceof TextView) {
+                TextView tv = (TextView) last;
+                // Selected → dark text on bright pill; idle → light text.
+                // Hidden idle is dimmer than visible idle (0x66FFFFFF vs
+                // 0x99FFFFFF) so the strike-through reads as "muted /
+                // hidden" at a glance. Selected hidden stays at full dark
+                // text — the strike-through still distinguishes it.
+                if (sel) {
+                    tv.setTextColor(hidden ? 0xFF111114 : 0xFF111114);
+                } else {
+                    tv.setTextColor(hidden ? 0x66FFFFFF : 0x99FFFFFF);
+                }
+                int flags = tv.getPaintFlags();
+                if (hidden) flags |=  Paint.STRIKE_THRU_TEXT_FLAG;
+                else        flags &= ~Paint.STRIKE_THRU_TEXT_FLAG;
+                tv.setPaintFlags(flags);
+            }
         }
-        View checkV = ll.getChildAt(2);
-        if (checkV instanceof TextView) {
-            int color;
-            if (hidden) color = sel ? 0xFF1A7F4F : 0xFF30A46C;  // green
-            else        color = 0x00000000;                     // transparent
-            ((TextView) checkV).setTextColor(color);
+        chip.animate().cancel();
+        float targetScale = sel ? 1.05f : 1f;
+        if (animate) {
+            chip.animate()
+                    .scaleX(targetScale).scaleY(targetScale)
+                    .setDuration(140)
+                    .setInterpolator(FOCUS_EASE)
+                    .start();
+        } else {
+            chip.setScaleX(targetScale);
+            chip.setScaleY(targetScale);
         }
     }
 
-    /** Toggle the hidden flag for the currently-selected row. Saves the
-     *  pref synchronously, repaints just the check mark of the affected
-     *  row (no full sweep), and marks the shelf as dirty so it gets
-     *  re-filtered when the overlay closes. */
+    /** Toggle the hidden flag for the currently-selected chip. Saves the
+     *  pref synchronously, repaints just that chip's strike-through (no
+     *  full sweep), and marks the shelf as dirty so it gets re-filtered
+     *  when the overlay closes. */
     private void toggleSelectedHide() {
-        android.widget.LinearLayout list = keymapHideList;
-        if (list == null) return;
+        android.widget.LinearLayout strip = keymapHideStrip;
+        if (strip == null) return;
         int idx = keymapHideIdx;
         if (idx < 0 || idx >= appList.size()) return;
         String pkg = appList.get(idx).packageName;
@@ -3638,57 +3747,59 @@ public class LauncherActivity extends Activity {
         else                          { hiddenApps.add(pkg);    nowHidden = true;  }
         saveHiddenApps();
         keymapHideDirty = true;
-        // Cheap repaint: only the affected row, and only its check colour
-        // (selection / label colour didn't change, so we don't even need
-        // the full paintHideRow path).
-        if (idx < list.getChildCount()) {
-            View row = list.getChildAt(idx);
-            if (row instanceof android.widget.LinearLayout) {
-                View checkV = ((android.widget.LinearLayout) row).getChildAt(2);
-                if (checkV instanceof TextView) {
-                    ((TextView) checkV).setTextColor(
-                            nowHidden ? 0xFF1A7F4F : 0x00000000);
+        // Cheap repaint: the selected chip retains its bright pill, only
+        // the strike-through paint flag changes.
+        if (idx < strip.getChildCount()) {
+            View chip = strip.getChildAt(idx);
+            if (chip instanceof android.widget.LinearLayout) {
+                android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+                View last = cl.getChildAt(cl.getChildCount() - 1);
+                if (last instanceof TextView) {
+                    TextView tv = (TextView) last;
+                    int flags = tv.getPaintFlags();
+                    if (nowHidden) flags |=  Paint.STRIKE_THRU_TEXT_FLAG;
+                    else           flags &= ~Paint.STRIKE_THRU_TEXT_FLAG;
+                    tv.setPaintFlags(flags);
                 }
             }
         }
     }
 
-    /** Auto-scroll the vertical list so the selected row stays in view
-     *  with a small margin. */
+    /** Auto-scroll the horizontal strip so the selected chip stays in
+     *  view with a small margin. Identical to scrollPickerToSelection. */
     private void scrollHideToSelection() {
-        android.widget.ScrollView sv = keymapHideScroll;
-        android.widget.LinearLayout list = keymapHideList;
-        if (sv == null || list == null) return;
-        if (keymapHideIdx < 0 || keymapHideIdx >= list.getChildCount()) return;
-        View row = list.getChildAt(keymapHideIdx);
-        if (row == null) return;
-        if (row.getHeight() == 0) {
-            sv.post(this::scrollHideToSelection);
+        android.widget.HorizontalScrollView hsv = keymapHideHsv;
+        android.widget.LinearLayout strip = keymapHideStrip;
+        if (hsv == null || strip == null) return;
+        if (keymapHideIdx < 0 || keymapHideIdx >= strip.getChildCount()) return;
+        View chip = strip.getChildAt(keymapHideIdx);
+        if (chip == null) return;
+        if (chip.getWidth() == 0) {
+            hsv.post(this::scrollHideToSelection);
             return;
         }
-        int rowTop    = row.getTop();
-        int rowBottom = row.getBottom();
-        int viewTop   = sv.getScrollY();
-        int viewH     = sv.getHeight();
-        int viewBot   = viewTop + viewH;
-        int margin    = dp(28);
-        if (rowTop < viewTop + margin) {
-            sv.smoothScrollTo(0, Math.max(0, rowTop - margin));
-        } else if (rowBottom > viewBot - margin) {
-            sv.smoothScrollTo(0, rowBottom - viewH + margin);
+        int chipLeft  = chip.getLeft();
+        int chipRight = chip.getRight();
+        int viewLeft  = hsv.getScrollX();
+        int viewRight = viewLeft + hsv.getWidth();
+        int margin    = dp(40);
+        if (chipLeft < viewLeft + margin) {
+            hsv.smoothScrollTo(Math.max(0, chipLeft - margin), 0);
+        } else if (chipRight > viewRight - margin) {
+            hsv.smoothScrollTo(chipRight - hsv.getWidth() + margin, 0);
         }
     }
 
     private boolean handleKeymapHideKey(int kc) {
-        android.widget.LinearLayout list = keymapHideList;
-        int n = list == null ? 0 : list.getChildCount();
+        android.widget.LinearLayout strip = keymapHideStrip;
+        int n = strip == null ? 0 : strip.getChildCount();
         switch (kc) {
-            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
                 if (n > 0) keymapHideIdx = Math.max(0, keymapHideIdx - 1);
-                refreshHideList(); return true;
-            case KeyEvent.KEYCODE_DPAD_DOWN:
+                refreshHideStrip(); return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
                 if (n > 0) keymapHideIdx = Math.min(n - 1, keymapHideIdx + 1);
-                refreshHideList(); return true;
+                refreshHideStrip(); return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:

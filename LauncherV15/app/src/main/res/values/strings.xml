@@ -26,6 +26,10 @@
     <!-- Picker title; %1$s is the human-readable label of the remote key
          being bound (Red, Green, Menu, etc.) -->
     <string name="keymap_pick_app_for">Pick app for %1$s</string>
+    <!-- Hide-manager strip title. Hint reminds the user that OK toggles
+         the hidden flag for the focused chip; strike-through encodes the
+         hidden state in either selected or idle pill. -->
+    <string name="keymap_hide_title">Hide apps from shelf · OK toggles</string>
 
     <!-- Remote key shortcut labels. Order must match SHORTCUT_KEYCODES. -->
     <string name="key_red">Red</string>
