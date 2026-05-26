@@ -162,8 +162,23 @@ jobs:
           chmod +x gradlew
 
       # Cache the booted AVD so subsequent runs skip the ~3-4 min boot
-      # animation. The cache key is api-level + target + arch so a
-      # matrix expansion automatically gets independent caches.
+      # animation. The cache key is api-level + target + arch + a manual
+      # version suffix; the matrix expansion automatically gets
+      # independent caches.
+      #
+      # Bump the trailing -vN whenever a CI run hits the
+      #   "android.os.ServiceManager$ServiceNotFoundException:
+      #    No service published for: input"
+      # error during the post-boot keyevent unlock. That message means
+      # a previously cached AVD snapshot was saved at a race window
+      # where sys.boot_completed=1 is true but InputManagerService is
+      # not yet registered. Resuming from that snapshot lets the
+      # emulator-runner action's auto-unlock keyevent fire too early
+      # and the action treats the non-zero adb exit as fatal. The
+      # snapshot survives in the cache until this key is bumped, so
+      # every run on the same key keeps failing the same way.
+      # History: -v1 (initial, recommended pattern) saw one bad
+      # snapshot in late May 2026 -> -v2 (clean re-seed).
       - name: AVD cache
         uses: actions/cache@v4
         id: avd-cache
@@ -171,7 +186,7 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v1
+          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v2
 
       # On a cold cache: boot a fresh AVD once, save the snapshot, exit.
       # The next step reuses that snapshot so the smoke test starts
