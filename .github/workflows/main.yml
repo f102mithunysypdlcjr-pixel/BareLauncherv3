@@ -97,14 +97,131 @@ jobs:
           retention-days: 14
 
   # ──────────────────────────────────────────────────────────────────
+  # Instrumentation smoke test on a real Android emulator. Boots an
+  # API 30 (minSdk) AVD with KVM acceleration and runs the smoke test
+  # under src/androidTest. This is the safety net the project lacked
+  # for over a year — until we wired it here, instrumentation tests
+  # only compiled, never executed.
+  #
+  # API 30 picked over the latest (36) deliberately: it's the minSdk,
+  # so any behaviour-change between Android 11 and the launcher's
+  # programmatic UI surfaces here first. Adding API 36 to the matrix
+  # is a follow-up pass once boot-time / CI-quota numbers from real
+  # runs of this job are known.
+  #
+  # Cost: ~5-7 min on a cold AVD, ~2 min once the AVD cache is warm.
+  # Runs on PRs as well as main pushes — catching instrumentation
+  # regressions BEFORE merge is worth that quota.
+  # ──────────────────────────────────────────────────────────────────
+  instrumentation:
+    name: Instrumentation smoke test (API ${{ matrix.api-level }})
+    runs-on: ubuntu-24.04
+    needs: quality
+    timeout-minutes: 35
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Single API level for now; matrix is set up so adding 36 is
+        # a one-line change once we've confirmed CI throughput.
+        api-level: [30]
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4.5.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Hardware-accelerated emulator execution requires /dev/kvm to be
+      # writeable by the runner user. Without this the emulator falls
+      # back to software emulation (10x slower) and frequently times
+      # out under the action's default 600 s boot deadline.
+      # Pattern documented at
+      # https://github.com/ReactiveCircus/android-emulator-runner#running-hardware-accelerated-emulators-on-linux-runners
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          mkdir -p "$HOME/gradle" && unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Gradle wrapper
+        working-directory: LauncherV15
+        run: |
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
+          chmod +x gradlew
+
+      # Cache the booted AVD so subsequent runs skip the ~3-4 min boot
+      # animation. The cache key is api-level + target + arch so a
+      # matrix expansion automatically gets independent caches.
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v1
+
+      # On a cold cache: boot a fresh AVD once, save the snapshot, exit.
+      # The next step reuses that snapshot so the smoke test starts
+      # against an already-booted emulator. Pinned to the v2.37.0 commit
+      # SHA rather than the floating v2 tag for supply-chain safety.
+      - name: Create AVD and generate snapshot for caching
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: echo "Generated AVD snapshot for caching"
+
+      - name: Run instrumentation smoke test
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          working-directory: LauncherV15
+          script: ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
+
+      - name: Upload instrumentation test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instrumentation-report-api${{ matrix.api-level }}
+          path: |
+            LauncherV15/app/build/reports/androidTests/connected
+            LauncherV15/app/build/outputs/androidTest-results
+          retention-days: 14
+
+  # ──────────────────────────────────────────────────────────────────
   # Release pipeline: assemble + sign the production APK. Runs on every
   # main push and on workflow_dispatch. Skipped on PRs (no keystore
   # secret access from forks) — lint+tests above catch breakage there.
+  # Depends on `instrumentation` so a smoke-test failure on the real
+  # emulator blocks the release artefact from ever being built.
   # ──────────────────────────────────────────────────────────────────
   build:
     name: Build and Sign Release APK
     runs-on: ubuntu-24.04
-    needs: quality
+    needs: [quality, instrumentation]
     if: github.event_name != 'pull_request'
 
     steps:

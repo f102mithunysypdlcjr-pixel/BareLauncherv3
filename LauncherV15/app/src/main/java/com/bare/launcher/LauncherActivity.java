@@ -2,7 +2,6 @@ package com.bare.launcher;
 
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.WallpaperManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -13,17 +12,11 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.PorterDuff;
-import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
 import android.graphics.Typeface;
-import android.graphics.drawable.AdaptiveIconDrawable;
-import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
@@ -31,13 +24,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
-import android.text.SpannableStringBuilder;
-import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.TextPaint;
-import android.text.style.RelativeSizeSpan;
-import android.text.style.StyleSpan;
-import android.text.style.TypefaceSpan;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.DisplayMetrics;
@@ -46,12 +34,10 @@ import android.util.SparseArray;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
-import android.graphics.Outline;
 import android.view.SoundEffectConstants;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.animation.DecelerateInterpolator;
@@ -66,15 +52,12 @@ import android.widget.OverScroller;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.InputStream;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -85,10 +68,10 @@ public class LauncherActivity extends Activity {
     private static final int    CELL_W_DP      = 90;
     private static final int    CELL_H_DP      = 100;
     private static final int    RING_STROKE_DP = 3;
-    // Tick once per minute. The clock has no seconds, so a 1Hz tick was 59 wakeups
-    // per minute of pure waste. Re-scheduling now uses (next-minute - now) so the
-    // tick lands exactly on the minute boundary, giving us the smooth-tween hook.
-    private static final long   CLOCK_MS       = 60_000L;
+    // Clock cadence lives in {@link ClockFormatter#nextMinuteDelay} now.
+    // The launcher schedules ticks aligned to the minute boundary so a
+    // 1 Hz wakeup loop is avoided; the clock has no seconds, so anything
+    // finer would be 59 wakeups per minute of pure waste.
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
@@ -140,28 +123,21 @@ public class LauncherActivity extends Activity {
     private static final Interpolator MENU_IN         = new PathInterpolator(0.18f, 0.7f, 0.25f, 1f);
     private static final Interpolator MENU_OUT        = new PathInterpolator(0.4f, 0f, 0.7f, 0.3f);
 
-    private static final ThreadLocal<Matrix> sMatrixTL = new ThreadLocal<Matrix>() {
-        @Override protected Matrix initialValue() { return new Matrix(); }
-    };
-    private static final ThreadLocal<byte[]> sPixelBuf = new ThreadLocal<>();
-    // Reused per-thread sample-point buffer for needsFill — flat int[24]
-    // packed as (x,y) pairs. Beats a fresh int[][] allocation on every
-    // icon at cold-start.
-    private static final ThreadLocal<int[]>  sFillPts  = new ThreadLocal<>();
-
-    private static final Paint sMaskPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private static final Paint sSrcInPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private static final Paint sDrawPaint  = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-    private static final Paint sPhFill     = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private static final Paint sWhiteFill  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    // Static icon-pipeline scratch buffers (sMatrixTL, sPixelBuf, sFillPts)
+    // and paints (sMaskPaint, sSrcInPaint, sDrawPaint, sWhiteFill) used to
+    // live here. They moved to {@link IconRenderer}, which is the only
+    // consumer — pulling them out drops ~25 lines from the activity and
+    // gives the icon pipeline a single home.
+    //
+    // sPhFill stays here because the only caller is {@code CellView.drawIcon}
+    // (the placeholder rendered before the real icon bitmap arrives). It is
+    // shared across every cell; one paint per process keeps GC pressure
+    // zero on the cold-start icon-flood frames.
+    private static final Paint sPhFill = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     static {
-        sMaskPaint.setColor(Color.WHITE);
-        sSrcInPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
         sPhFill.setStyle(Paint.Style.FILL);
         sPhFill.setColor(0x33FFFFFF);
-        sWhiteFill.setStyle(Paint.Style.FILL);
-        sWhiteFill.setColor(Color.WHITE);
     }
 
     private volatile float      density;
@@ -170,8 +146,10 @@ public class LauncherActivity extends Activity {
     // CPUs could observe stale zeros and produce a 1px-tall wallpaper bitmap.
     private volatile int        screenW, screenH;
     private volatile boolean    destroyed       = false;
-    private final AtomicBoolean systemWpLoading = new AtomicBoolean(false);
-    private final AtomicBoolean userWpLoading   = new AtomicBoolean(false);
+    // Wallpaper-loading guards live inside {@link WallpaperController} now.
+    // The icon and app-list executors stay in the activity because their
+    // hot-path consumers (CellView icon delivery, package broadcast
+    // refresh) live here.
     private final AtomicBoolean appsLoading     = new AtomicBoolean(false);
 
     private PackageManager      pm;
@@ -179,11 +157,14 @@ public class LauncherActivity extends Activity {
     private RecyclingShelfView shelf;
     // Wallpaper rendering uses two stacked ImageViews. wallpaperFront is on
     // top (always visible to the user); wallpaperBack sits below and is the
-    // staging slot used during a fade. Roles do NOT swap — that previously
-    // led to a bringToFront() bug which moved the wallpaper above the
-    // shelf/clock/buttons and hid the home screen.
+    // staging slot used during a fade. Roles do NOT swap — the
+    // {@link WallpaperController} that drives both views enforces the
+    // "front is always front" invariant. The activity holds these as
+    // fields only so {@code onDestroy} can clear the references; all
+    // bitmap mutation goes through the controller.
     private ImageView          wallpaperFront;
     private ImageView          wallpaperBack;
+    private WallpaperController wallpaperCtl;
     private TextView           clockView;
     private View               netBtn;
     private View               wpBtnView;
@@ -196,15 +177,12 @@ public class LauncherActivity extends Activity {
     // use clockTick as the token for removeCallbacks.
     private final Handler uiHandler    = new Handler(Looper.getMainLooper());
     private       boolean clockRunning = false;
-    private       int     lastShownMinute = -1;
 
-    private final java.util.Calendar       clockCal   = java.util.Calendar.getInstance();
-    private final char[]                   clockChars = new char[8];
-    private final SpannableStringBuilder   clockSsb   = new SpannableStringBuilder();
-    // AM/PM is rendered ~38% size, light weight, slight letter-spacing — Apple-TV style.
-    private final RelativeSizeSpan         clockAmPmSize  = new RelativeSizeSpan(0.42f);
-    private final TypefaceSpan             clockAmPmFace  = new TypefaceSpan("sans-serif-thin");
-    private final StyleSpan                clockAmPmStyle = new StyleSpan(Typeface.NORMAL);
+    // Clock formatter encapsulates all the per-tick allocation hygiene
+    // (Calendar reuse, char[8] digit buffer, SpannableStringBuilder, AM/PM
+    // spans). Pulled out of the activity into {@link ClockFormatter} —
+    // the activity now only deals with scheduling / TextView wiring.
+    private final ClockFormatter clockFmt = new ClockFormatter();
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -214,9 +192,8 @@ public class LauncherActivity extends Activity {
             // Schedule the next tick for the next minute boundary, with a
             // tiny 50 ms cushion so we land just AFTER :00 rather than just
             // before (avoids a tick firing twice in the same minute on a
-            // slightly-fast wall-clock).
-            long delay = CLOCK_MS - (now % CLOCK_MS) + 50L;
-            uiHandler.postDelayed(this, delay);
+            // slightly-fast wall-clock). See {@link ClockFormatter#nextMinuteDelay}.
+            uiHandler.postDelayed(this, ClockFormatter.nextMinuteDelay(now));
         }
     };
 
@@ -225,48 +202,14 @@ public class LauncherActivity extends Activity {
     private void tickClock(long now) {
         TextView cv = clockView;
         if (cv == null) return;
-        clockCal.setTimeInMillis(now);
-        int currentMinute = clockCal.get(java.util.Calendar.MINUTE);
-        if (currentMinute == lastShownMinute) return; // no visible change
-        lastShownMinute = currentMinute;
-        cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
-    }
-
-    private CharSequence buildClock(long ms) {
-        clockCal.setTimeInMillis(ms);
-        int hour = clockCal.get(java.util.Calendar.HOUR);
-        if (hour == 0) hour = 12;
-        int min  = clockCal.get(java.util.Calendar.MINUTE);
-        int ampm = clockCal.get(java.util.Calendar.AM_PM);
-        int pos  = 0;
-        if (hour >= 10) clockChars[pos++] = (char)('0' + hour / 10);
-        clockChars[pos++] = (char)('0' + hour % 10);
-        clockChars[pos++] = ':';
-        clockChars[pos++] = (char)('0' + min / 10);
-        clockChars[pos++] = (char)('0' + min % 10);
-        clockChars[pos++] = ' ';
-        int amStart = pos;
-        clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
-        clockChars[pos++] = 'M';
-        clockSsb.clear(); clockSsb.clearSpans();
-        // String.valueOf builds a tiny throwaway String, but tickClock now
-        // fires once per minute (not per second), so this is 1 small alloc /
-        // minute — far below GC pressure. We tried bypassing it via
-        // append(char[],int,int) but SpannableStringBuilder only accepts
-        // CharSequence on append, so the only zero-alloc path would be a
-        // wrapper class around clockChars implementing CharSequence — not
-        // worth the complexity for this savings.
-        clockSsb.append(String.valueOf(clockChars, 0, pos));
-        // Time portion (digits) inherits the TextView's heavy base typeface.
-        // AM/PM gets thinner family + smaller size for a refined Apple-TV look.
-        clockSsb.setSpan(clockAmPmSize,  amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        clockSsb.setSpan(clockAmPmFace,  amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        clockSsb.setSpan(clockAmPmStyle, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return clockSsb;
+        if (!clockFmt.shouldRepaint(now)) return; // no visible change
+        cv.setText(clockFmt.format(now), TextView.BufferType.SPANNABLE);
     }
 
     private ThreadPoolExecutor       iconExecutor;
-    private ExecutorService          wpExecutor;
+    // Wallpaper executor moved into {@link WallpaperController} along with
+    // the loading-guard atomic booleans. Only the icon and app-list
+    // executors remain here; their hot paths live inside this activity.
     private ExecutorService          appExecutor;
     private LruCache<String, Bitmap> iconCache;
 
@@ -488,6 +431,12 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Install the zero-dependency crash sink BEFORE we do anything
+        // else that could fault. From this point on any uncaught throwable
+        // on any thread gets timestamped and appended to
+        // <internalFiles>/crash.log so a remote user can pull a real
+        // trace (no Crashlytics / Sentry / etc. — see CrashLogger javadoc).
+        CrashLogger.install(this);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         DisplayMetrics dm = getResources().getDisplayMetrics();
         density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels;
@@ -587,20 +536,13 @@ public class LauncherActivity extends Activity {
         stopClock();
         uiHandler.removeCallbacksAndMessages(null);
         unregisterPkgReceiver();
-        shutdown(iconExecutor); shutdown(wpExecutor); shutdown(appExecutor);
+        shutdown(iconExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
-        // Explicitly drop the Drawable references on the wallpaper
-        // ImageViews. The view is being detached so GC reclaims them
-        // eventually, but holding the bitmap until the next GC pass is
-        // wasteful when we already know the activity is finishing.
-        // Recycle the underlying bitmaps explicitly — wallpaper bitmaps
-        // are screen-sized ARGB_8888 (8-32 MB), and on TV ROMs without
-        // largeHeap that memory is worth freeing immediately.
-        recycleImageViewBitmap(wallpaperFront);
-        recycleImageViewBitmap(wallpaperBack);
-        if (wallpaperFront != null) wallpaperFront.setImageDrawable(null);
-        if (wallpaperBack  != null) wallpaperBack .setImageDrawable(null);
+        // Wallpaper teardown — controller recycles its own bitmaps and
+        // clears the ImageView drawables. Keeps the activity from having
+        // to know about wallpaper memory hygiene at all.
+        if (wallpaperCtl != null) { wallpaperCtl.onDestroy(); wallpaperCtl = null; }
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
@@ -620,20 +562,6 @@ public class LauncherActivity extends Activity {
         try { ex.awaitTermination(300, TimeUnit.MILLISECONDS); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         finally { ex.shutdownNow(); }
-    }
-
-    /** Recycle the bitmap currently held by an ImageView, if any. Used on
-     *  activity destroy to free wallpaper memory immediately rather than
-     *  waiting for GC. Safe: the caller clears the ImageView's drawable
-     *  reference right after, so no consumer holds a live reference to
-     *  the bitmap when this returns. */
-    private static void recycleImageViewBitmap(ImageView iv) {
-        if (iv == null) return;
-        android.graphics.drawable.Drawable d = iv.getDrawable();
-        if (d instanceof BitmapDrawable) {
-            Bitmap b = ((BitmapDrawable) d).getBitmap();
-            if (b != null && !b.isRecycled()) b.recycle();
-        }
     }
 
     @Override
@@ -702,12 +630,16 @@ public class LauncherActivity extends Activity {
         density = dm.density;
         screenW = dm.widthPixels;
         screenH = dm.heightPixels;
+        // Forward the new screen size into the wallpaper controller so its
+        // next decode caps to the new dimensions (e.g. HDMI swap on TV
+        // changes both screenW and screenH).
+        if (wallpaperCtl != null) wallpaperCtl.onConfigurationChanged(screenW, screenH);
         TextView cv = clockView;
         if (cv != null) {
-            // Force-refresh: lastShownMinute is reset so tickClock paints
-            // unconditionally (the per-minute idempotency guard would
-            // otherwise skip the redraw).
-            lastShownMinute = -1;
+            // Force-refresh: ClockFormatter's "last shown minute" sentinel
+            // is reset so tickClock paints unconditionally (the per-minute
+            // idempotency guard would otherwise skip the redraw).
+            clockFmt.reset();
             cv.setAlpha(1f);
             tickClock(System.currentTimeMillis());
         }
@@ -737,6 +669,19 @@ public class LauncherActivity extends Activity {
         wallpaperFront.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         root.addView(wallpaperFront);
 
+        // Stand up the wallpaper subsystem now that both ImageViews are
+        // attached. {@link WallpaperController} owns its own background
+        // executor and loading-guard atomic flags; the activity only calls
+        // its small lifecycle / interaction surface.
+        wallpaperCtl = new WallpaperController(
+                this,
+                getSharedPreferences(PREFS, MODE_PRIVATE),
+                KEY_WP_URI,
+                wallpaperFront, wallpaperBack,
+                screenW, screenH,
+                FOCUS_EASE,
+                this::showToast);
+
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
         shelfLp.gravity = Gravity.BOTTOM;
@@ -760,7 +705,7 @@ public class LauncherActivity extends Activity {
         clockView.setTextColor(Color.WHITE);
         clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
         // Heavy base typeface — time digits read thick. AM/PM is overridden
-        // back to sans-serif-thin via a TypefaceSpan in buildClock().
+        // back to sans-serif-thin via a TypefaceSpan in {@link ClockFormatter}.
         clockView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
         clockView.setLetterSpacing(0.02f);
         root.addView(clockView);
@@ -1370,75 +1315,37 @@ public class LauncherActivity extends Activity {
         return v;
     }
 
-    /** Common Apple-TV pill setup: round outline clip, no system focus rect,
-     *  no state list animator, hardware layer, sound effects on. */
+    /** Common Apple-TV pill setup is now centralised in {@link AppleStyle}.
+     *  This wrapper exists only so unchanged button-construction call sites
+     *  (which call {@code applyApplePillStyle(v)} unqualified) keep
+     *  compiling. The body is a one-liner forwarding to the shared helper. */
     private void applyApplePillStyle(View v) {
-        v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        v.setBackground(null);
-        v.setForeground(null);
-        v.setStateListAnimator(null);
-        // Kills the platform's default rectangular focus highlight that
-        // Theme.DeviceDefault paints under any focusable View on TV.
-        v.setDefaultFocusHighlightEnabled(false);
-        v.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(View view, Outline outline) {
-                int w = view.getWidth(), h = view.getHeight();
-                int s = Math.min(w, h);
-                int x = (w - s) / 2;
-                int y = (h - s) / 2;
-                outline.setOval(x, y, x + s, y + s);
-            }
-        });
-        v.setClipToOutline(true);
-        v.setSoundEffectsEnabled(true);
-        v.setFocusable(true);
-        v.setFocusableInTouchMode(true);
-        v.setClickable(true);
+        AppleStyle.applyApplePillStyle(v);
     }
 
     private Paint makeBtnPaint(boolean fill) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(0xFFFFFFFF);
-        p.setStyle(fill ? Paint.Style.FILL : Paint.Style.STROKE);
-        // Default to BUTT — the WiFi glyph wants flat band ends. Per-draw
-        // calls override this for paths that need rounded caps (none right now).
-        p.setStrokeCap(Paint.Cap.BUTT);
-        return p;
+        return AppleStyle.makeBtnPaint(fill);
     }
 
     private Paint makeBtnStrokePaint() {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(0xFFFFFFFF);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeCap(Paint.Cap.ROUND);
-        p.setStrokeJoin(Paint.Join.ROUND);
-        return p;
+        return AppleStyle.makeBtnStrokePaint();
     }
 
     /** Idle button background — dark glass that reads on any wallpaper. */
     private Paint makeBgIdlePaint() {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(0x66000000);
-        return p;
+        return AppleStyle.makeBgIdlePaint();
     }
 
     /** Focused button background — frosted near-white that lifts the symbol
      *  via inversion. This is the Apple-TV "selected pill" effect. */
     private Paint makeBgFocusPaint() {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(0xF2F4F4F6);
-        return p;
+        return AppleStyle.makeBgFocusPaint();
     }
 
-    /** Hairline inner rim that defines the glass plate edge in any state. */
+    /** Hairline inner rim that defines the glass plate edge in any state.
+     *  Stroke width is 1 dp scaled by the activity's cached density. */
     private Paint makeRimPaint() {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setStyle(Paint.Style.STROKE);
-        p.setColor(0x33FFFFFF);
-        p.setStrokeWidth(dp(1));
-        return p;
+        return AppleStyle.makeRimPaint(density);
     }
 
     private void openNetSettings() {
@@ -2546,91 +2453,66 @@ public class LauncherActivity extends Activity {
 
     // ── Remote-key → app shortcut routing ────────────────────────────────
 
-    /** Parse the persisted keymap once at startup. Format: "kc=pkg,kc=pkg".
-     *  Malformed entries are silently dropped (forward-compat: a future
-     *  version could write extra fields after the package name and an old
-     *  build will still recover the keycode mapping).
-     *  Bindings for keycodes no longer in {@link #SHORTCUT_KEYCODES} are
-     *  also dropped so removed slots (Guide/Search) auto-clean on next
-     *  cold-start. If anything was filtered, we rewrite prefs immediately
-     *  so the on-disk format converges to the new shape. */
+    /** Parse the persisted keymap once at startup. The pure-Java parsing
+     *  logic — including the "drop bindings whose keycode is no longer in
+     *  {@link #SHORTCUT_KEYCODES}" rule — lives in {@link KeymapStore},
+     *  which is JVM-testable. The activity owns the {@link SparseArray}
+     *  destination and the {@code SharedPreferences} read; the parser
+     *  pushes accepted entries through the {@code keyMap::put} method
+     *  reference (zero-autoboxing for {@code int → SparseArray.put(int)}).
+     *
+     *  If anything was filtered, we rewrite prefs immediately so the
+     *  on-disk format converges to the new shape. */
     private void loadKeyMap() {
         keyMap.clear();
         String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_KEYMAP, null);
-        if (raw == null || raw.isEmpty()) return;
-        boolean dropped = false;
-        int n = raw.length(), start = 0;
-        while (start < n) {
-            int comma = raw.indexOf(',', start);
-            int end   = comma < 0 ? n : comma;
-            int eq    = raw.indexOf('=', start);
-            if (eq > start && eq < end - 1) {
-                try {
-                    // Use String.substring + Integer.parseInt(String). The
-                    // CharSequence overload Integer.parseInt(CharSequence,
-                    // int, int, int) was only added in API 33 — minSdk=30
-                    // would crash with NoSuchMethodError on Android 11/12.
-                    // The substring allocation runs at most ~6 times per
-                    // launcher cold-start (one per stored shortcut), so
-                    // the cost is negligible against the safety win.
-                    int kc = Integer.parseInt(raw.substring(start, eq));
-                    String pkg = raw.substring(eq + 1, end);
-                    if (!pkg.isEmpty()) {
-                        if (isCuratedShortcutKey(kc)) keyMap.put(kc, pkg);
-                        else                          dropped = true;
-                    }
-                } catch (NumberFormatException ignored) { dropped = true; }
-            }
-            start = end + 1;
-        }
+        boolean dropped = KeymapStore.parseKeyMap(raw, SHORTCUT_KEYCODES, keyMap::put);
         if (dropped) saveKeyMap();
-    }
-
-    private static boolean isCuratedShortcutKey(int kc) {
-        for (int k : SHORTCUT_KEYCODES) if (k == kc) return true;
-        return false;
     }
 
     /** Write the keymap back to SharedPreferences. Called on every
      *  configuration change (left/right cycle in the overlay) — the user
-     *  spec requires assignments to be saved instantly with no confirm. */
+     *  spec requires assignments to be saved instantly with no confirm.
+     *
+     *  Two array allocations per save (one int[], one String[]) feed the
+     *  testable {@link KeymapStore#serializeKeyMap} signature. The save
+     *  path is rare (only when the user changes a binding) — never on a
+     *  hot path — so the cost is irrelevant against the testability gain. */
     private void saveKeyMap() {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < keyMap.size(); i++) {
-            if (sb.length() > 0) sb.append(',');
-            sb.append(keyMap.keyAt(i)).append('=').append(keyMap.valueAt(i));
+        int n = keyMap.size();
+        int[]    keycodes = new int[n];
+        String[] packages = new String[n];
+        for (int i = 0; i < n; i++) {
+            keycodes[i] = keyMap.keyAt(i);
+            packages[i] = keyMap.valueAt(i);
         }
         getSharedPreferences(PREFS, MODE_PRIVATE)
-                .edit().putString(KEY_KEYMAP, sb.toString()).apply();
+                .edit().putString(KEY_KEYMAP,
+                        KeymapStore.serializeKeyMap(keycodes, packages)).apply();
     }
 
-    /** Parse the persisted hidden-apps set once at startup. Comma-separated
-     *  package names; blank tokens silently skipped. Hidden-but-uninstalled
-     *  packages get garbage-collected the next time loadApps() runs (see
-     *  pruneHiddenApps). */
+    /** Parse the persisted hidden-apps set once at startup. Hidden-but-
+     *  uninstalled packages get garbage-collected the next time
+     *  {@link #loadApps()} runs (see {@link #pruneHiddenApps}). */
     private void loadHiddenApps() {
         hiddenApps.clear();
         String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HIDDEN, null);
-        if (raw == null || raw.isEmpty()) return;
-        int n = raw.length(), start = 0;
-        while (start < n) {
-            int comma = raw.indexOf(',', start);
-            int end   = comma < 0 ? n : comma;
-            if (end > start) hiddenApps.add(raw.substring(start, end));
-            start = end + 1;
-        }
+        KeymapStore.parseHiddenApps(raw, hiddenApps::add);
     }
 
     /** Persist the in-memory hiddenApps set. Called synchronously from
      *  every toggle in the hide-manager so the user never has to confirm. */
     private void saveHiddenApps() {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < hiddenApps.size(); i++) {
-            if (sb.length() > 0) sb.append(',');
-            sb.append(hiddenApps.valueAt(i));
+        // ArraySet doesn't implement Iterable<String> via the typed
+        // signature KeymapStore expects — wrap with a tiny ArrayList.
+        // The wrapper is created at most once per toggle (rare event).
+        ArrayList<String> snapshot = new ArrayList<>(hiddenApps.size());
+        for (int i = 0, m = hiddenApps.size(); i < m; i++) {
+            snapshot.add(hiddenApps.valueAt(i));
         }
         getSharedPreferences(PREFS, MODE_PRIVATE)
-                .edit().putString(KEY_HIDDEN, sb.toString()).apply();
+                .edit().putString(KEY_HIDDEN,
+                        KeymapStore.serializeHiddenApps(snapshot)).apply();
     }
 
     /** Drop hidden-set entries whose package is no longer installed.
@@ -3937,155 +3819,13 @@ public class LauncherActivity extends Activity {
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
     }
 
+    /** Single-line entry point — the entire icon-bitmap pipeline lives in
+     *  {@link IconRenderer}. The wrapper exists so the activity's call sites
+     *  (preWarmIcon / loadIconAsync) keep their {@code processIcon(d)}
+     *  signature unchanged: dp(ICON_DP) is computed here so {@link IconRenderer}
+     *  itself stays Activity-free. */
     private Bitmap processIcon(Drawable d) {
-        if (d == null) return null;
-        int sz = dp(ICON_DP);
-        // AdaptiveIconDrawable was introduced in API 26 (O); minSdk is 30,
-        // so the SDK guard is redundant — keep only the type check.
-        if (d instanceof AdaptiveIconDrawable) {
-            AdaptiveIconDrawable aid = (AdaptiveIconDrawable) d;
-            int bleed = Math.round(sz * 18f / 108f);
-            int full  = sz + bleed * 2;
-            Bitmap layers = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(layers);
-            if (aid.getBackground() != null) { aid.getBackground().setBounds(-bleed, -bleed, full - bleed, full - bleed); aid.getBackground().draw(c); }
-            if (aid.getForeground() != null) { aid.getForeground().setBounds(-bleed, -bleed, full - bleed, full - bleed); aid.getForeground().draw(c); }
-            // Adaptive icons can ship with a missing or transparent background
-            // layer. Without this check those slipped through with no plate
-            // and ended up as a clipped foreground floating in space — visually
-            // inconsistent with every other icon on the shelf. Run the same
-            // edge-sample heuristic we use for legacy logos and apply a white
-            // plate when needed.
-            if (needsFill(layers, sz)) {
-                Bitmap plated = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-                Canvas pc = new Canvas(plated);
-                pc.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
-                int inset = Math.round(sz * 0.14f);
-                Matrix mx = sMatrixTL.get();
-                float s = (float)(sz - inset * 2) / sz;
-                mx.setScale(s, s);
-                mx.postTranslate(inset, inset);
-                pc.drawBitmap(layers, mx, sDrawPaint);
-                layers.recycle();
-                return clipToCircle(plated, sz);
-            }
-            return clipToCircle(layers, sz);
-        }
-        Bitmap raw = renderDrawable(d, sz);
-        if (raw == null) return null;
-        boolean fill = needsFill(raw, sz);
-        // Fast path when no white plate is needed: csz==sz and inset==0 means
-        // the matrix transform was an identity, the saveLayer/canvas was a
-        // pointless copy, and the intermediate `out` bitmap was a clone of
-        // `raw`. Just clip the rendered drawable to a circle and return —
-        // saves one ARGB_8888 allocation (~iconPx²·4 bytes ≈ 18 KB at 68 dp
-        // on hdpi, more on xxxhdpi) and one full-size canvas draw per icon.
-        if (!fill) return clipToCircle(raw, sz);
-        int  csz   = Math.round(sz * 0.72f);
-        int  inset = (sz - csz) / 2;
-        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(out);
-        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
-        Matrix mx = sMatrixTL.get();
-        mx.setScale((float) csz / sz, (float) csz / sz);
-        mx.postTranslate(inset, inset);
-        canvas.drawBitmap(raw, mx, sDrawPaint);
-        raw.recycle();
-        return clipToCircle(out, sz);
-    }
-
-    private boolean needsFill(Bitmap src, int sz) {
-        // Premium consistency rule: an icon whose CORNERS / EDGES are mostly
-        // transparent is a "logo on transparent background" — those need a
-        // white plate behind them so the launcher has a uniform look.
-        //
-        // The previous heuristic sampled only the centre quadrant. Many
-        // logo-style icons (Disney+, Spotify, etc.) have an opaque centre
-        // and transparent corners — they were silently slipping through and
-        // ending up clipped to a ragged circle. Sampling edges instead
-        // catches those reliably.
-        boolean fast = src.getConfig() == Bitmap.Config.ARGB_8888;
-        int rowBytes = src.getRowBytes();
-        byte[] px = null;
-        if (fast) {
-            int needed = rowBytes * src.getHeight();
-            px = sPixelBuf.get();
-            if (px == null || px.length < needed) { px = new byte[needed]; sPixelBuf.set(px); }
-            ByteBuffer buf = ByteBuffer.wrap(px);
-            buf.order(java.nio.ByteOrder.nativeOrder()).rewind();
-            src.copyPixelsToBuffer(buf);
-        }
-
-        // Sample 12 points laid out as 4 outer corners + 4 edge midpoints +
-        // 4 deeper-inset corners. Coordinates packed into a flat int[24]
-        // (stride 2: x,y,x,y,...) reused across calls via ThreadLocal —
-        // the previous int[][] form allocated 13 arrays (1 outer + 12 inner)
-        // every time processIcon ran, which is once per app icon at startup.
-        int inset = Math.max(1, sz / 16);
-        int e    = sz - 1 - inset;   // edge index after inset
-        int q    = sz / 8;
-        int qe   = sz - q - 1;       // far inset
-        int[] pts = sFillPts.get();
-        if (pts == null) { pts = new int[24]; sFillPts.set(pts); }
-        // 4 outer corners
-        pts[ 0] = inset; pts[ 1] = inset;
-        pts[ 2] = e;     pts[ 3] = inset;
-        pts[ 4] = inset; pts[ 5] = e;
-        pts[ 6] = e;     pts[ 7] = e;
-        // 4 edge midpoints
-        pts[ 8] = sz/2;  pts[ 9] = inset;
-        pts[10] = inset; pts[11] = sz/2;
-        pts[12] = e;     pts[13] = sz/2;
-        pts[14] = sz/2;  pts[15] = e;
-        // 4 deeper inset corners — guard against icons whose first ring of
-        // pixels is anti-aliased (alpha 0..30) but real content is just inside
-        pts[16] = q;     pts[17] = q;
-        pts[18] = qe;    pts[19] = q;
-        pts[20] = q;     pts[21] = qe;
-        pts[22] = qe;    pts[23] = qe;
-        int trans = 0;
-        for (int i = 0; i < 24; i += 2) {
-            int x = pts[i], y = pts[i + 1];
-            int a = fast
-                ? (px[y * rowBytes + x * 4 + 3] & 0xFF)
-                : Color.alpha(src.getPixel(x, y));
-            if (a < 30) trans++;
-        }
-        // 6+ of 12 transparent (50%) → icon has a transparent background → fill.
-        return trans >= 6;
-    }
-
-    private Bitmap renderDrawable(Drawable d, int sz) {
-        if (d instanceof BitmapDrawable) {
-            Bitmap src = ((BitmapDrawable) d).getBitmap();
-            if (src != null && !src.isRecycled() && src.getWidth() > 0 && src.getHeight() > 0) {
-                Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-                Matrix mx = sMatrixTL.get();
-                mx.setScale((float) sz / src.getWidth(), (float) sz / src.getHeight());
-                new Canvas(out).drawBitmap(src, mx, sDrawPaint);
-                return out;
-            }
-        }
-        int w = d.getIntrinsicWidth() > 0 ? d.getIntrinsicWidth() : sz;
-        int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : sz;
-        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        d.setBounds(0, 0, w, h); d.draw(new Canvas(bmp));
-        if (w == sz && h == sz) return bmp;
-        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Matrix mx = sMatrixTL.get();
-        mx.setScale((float) sz / w, (float) sz / h);
-        new Canvas(out).drawBitmap(bmp, mx, sDrawPaint);
-        bmp.recycle(); return out;
-    }
-
-    private Bitmap clipToCircle(Bitmap src, int sz) {
-        if (src == null) return null;
-        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(out);
-        int sc = c.saveLayer(0, 0, sz, sz, null);
-        c.drawCircle(sz / 2f, sz / 2f, sz / 2f, sMaskPaint);
-        c.drawBitmap(src, 0, 0, sSrcInPaint);
-        c.restoreToCount(sc); src.recycle(); return out;
+        return IconRenderer.process(d, dp(ICON_DP));
     }
 
     private void positionRing(View cell) {
@@ -4130,154 +3870,31 @@ public class LauncherActivity extends Activity {
             clockRunning = true;
             // Fresh start — reset the minute tracker so the very first paint
             // uses the no-fade cold-render path (no spurious pulse on entry).
-            lastShownMinute = -1;
+            clockFmt.reset();
             long now = System.currentTimeMillis();
             tickClock(now);
-            uiHandler.postDelayed(clockTick, CLOCK_MS - (now % CLOCK_MS) + 50L);
+            uiHandler.postDelayed(clockTick, ClockFormatter.nextMinuteDelay(now));
         }
     }
 
     private void stopClock() { clockRunning = false; uiHandler.removeCallbacks(clockTick); }
 
+    // Wallpaper subsystem — the entire bitmap-loading / cross-fade / decode
+    // state machine lives in {@link WallpaperController}. The controller is
+    // built in {@link #buildLayout()} after the two stacked ImageViews are
+    // attached, and torn down in {@link #onDestroy()}. Activity now only
+    // forwards the four lifecycle / interaction calls below.
+
     private void loadWallpaper() {
-        String uri = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_WP_URI, null);
-        if (uri != null) applyWallpaperFromUri(Uri.parse(uri)); else loadSystemWallpaper();
+        if (wallpaperCtl != null) wallpaperCtl.loadStored();
     }
 
     private void loadSystemWallpaper() {
-        if (!systemWpLoading.compareAndSet(false, true)) return;
-        wpExecutor.execute(() -> {
-            Bitmap bmp = null;
-            try { Drawable d = WallpaperManager.getInstance(this).getDrawable(); if (d != null) bmp = wpDrawable(d); }
-            catch (Exception ignored) {}
-            final Bitmap fb = bmp; systemWpLoading.set(false);
-            if (!destroyed) runOnUiThread(() -> {
-                if (fb != null) crossfadeWallpaper(fb);
-            });
-        });
+        if (wallpaperCtl != null) wallpaperCtl.loadSystem();
     }
 
     private void applyWallpaperFromUri(Uri uri) {
-        if (!userWpLoading.compareAndSet(false, true)) return;
-        wpExecutor.execute(() -> {
-            Bitmap bmp = null;
-            try {
-                BitmapFactory.Options opts = new BitmapFactory.Options();
-                opts.inJustDecodeBounds = true;
-                try (InputStream is = getContentResolver().openInputStream(uri)) { BitmapFactory.decodeStream(is, null, opts); }
-                if (opts.outWidth <= 0 || opts.outHeight <= 0) { userWpLoading.set(false); return; }
-                opts.inSampleSize = calcSampleSize(opts.outWidth, opts.outHeight);
-                opts.inJustDecodeBounds = false;
-                opts.inPreferredConfig  = Bitmap.Config.ARGB_8888;
-                try (InputStream is = getContentResolver().openInputStream(uri)) { if (is != null) bmp = BitmapFactory.decodeStream(is, null, opts); }
-            } catch (Exception | OutOfMemoryError ignored) { bmp = null; }
-            final Bitmap fb = bmp; userWpLoading.set(false);
-            if (!destroyed) runOnUiThread(() -> {
-                if (fb != null) {
-                    crossfadeWallpaper(fb);
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_WP_URI, uri.toString()).apply();
-                } else { showToast(getString(R.string.toast_wallpaper_load_failed)); loadSystemWallpaper(); }
-            });
-        });
-    }
-
-    /** Cross-fade a new wallpaper bitmap onto the screen.
-     *
-     *  The wallpaper sits in two stacked ImageViews PERMANENTLY at the bottom
-     *  of the root z-order (added before any UI). We never touch z-order to
-     *  avoid the bug where bringToFront() lifted a wallpaper ImageView ABOVE
-     *  the shelf/clock/buttons and hid the home screen.
-     *
-     *  How the fade works without z-swaps:
-     *    • wallpaperFront is on top (always), wallpaperBack is below it.
-     *    • To show a new bitmap we put it on BACK (already there, alpha 1)
-     *      then fade FRONT out — the user sees the new image revealed
-     *      beneath. Once the fade ends we copy the bitmap up to FRONT,
-     *      restore FRONT alpha to 1, and clear BACK. Roles never swap so
-     *      shelf/clock/buttons are never hidden.
-     *
-     *  Memory hygiene: the previous bitmap on FRONT is recycled after the
-     *  cross-fade ends. Wallpaper bitmaps are screen-sized ARGB_8888 (~8 MB
-     *  for 1080p, up to ~32 MB for 4K), so leaving the old one for GC after
-     *  every change is a real footprint win on TV ROMs with no largeHeap. */
-    private void crossfadeWallpaper(Bitmap fb) {
-        ImageView front = wallpaperFront, back = wallpaperBack;
-        if (front == null || back == null || fb == null) return;
-        boolean coldStart = front.getDrawable() == null;
-        if (coldStart) {
-            front.setImageBitmap(fb);
-            front.setAlpha(1f);
-            return;
-        }
-        // Cancel any in-flight fade so rapid wallpaper changes don't leave
-        // a half-faded view on screen.
-        front.animate().cancel();
-        back.animate().cancel();
-        // Capture the bitmap currently on FRONT so we can recycle it after
-        // promotion. Skip recycle if it happens to be the same instance as
-        // the new bitmap (wallpaper observer resending the same drawable).
-        final Bitmap oldBmp;
-        android.graphics.drawable.Drawable oldDrawable = front.getDrawable();
-        if (oldDrawable instanceof BitmapDrawable) {
-            Bitmap b = ((BitmapDrawable) oldDrawable).getBitmap();
-            oldBmp = (b != null && !b.isRecycled() && b != fb) ? b : null;
-        } else {
-            oldBmp = null;
-        }
-        // Recycle the bitmap that was on BACK before the previous swap (if
-        // any). After a previous cross-fade we cleared BACK's drawable to
-        // null but didn't recycle its bitmap; do it now before reusing the
-        // slot. In steady state this is a no-op.
-        android.graphics.drawable.Drawable oldBackDrawable = back.getDrawable();
-        if (oldBackDrawable instanceof BitmapDrawable) {
-            Bitmap b = ((BitmapDrawable) oldBackDrawable).getBitmap();
-            if (b != null && !b.isRecycled() && b != fb && b != oldBmp) b.recycle();
-        }
-        back.setImageBitmap(fb);
-        back.setAlpha(1f);
-        final ImageView fFront = front;
-        final ImageView fBack  = back;
-        final Bitmap    fNew   = fb;
-        front.animate()
-                .alpha(0f)
-                .setDuration(200)
-                .setInterpolator(FOCUS_EASE)
-                .withEndAction(() -> {
-                    if (destroyed) return;
-                    // Promote the new bitmap up to FRONT. Role/z-order
-                    // unchanged: front is still on top, back is still below.
-                    fFront.setImageBitmap(fNew);
-                    fFront.setAlpha(1f);
-                    fBack.setImageDrawable(null);
-                    fBack.setAlpha(1f);
-                    // Free the previous wallpaper bitmap. Safe: at this
-                    // point no ImageView still references it.
-                    if (oldBmp != null && !oldBmp.isRecycled()) oldBmp.recycle();
-                })
-                .start();
-    }
-
-    private Bitmap wpDrawable(Drawable d) {
-        // Cap the rendered wallpaper bitmap at ONE screen's worth of pixels.
-        // The previous 2x cap meant a 4K panel allocated up to 7680x4320 ARGB
-        // (~127 MB) — guaranteed OOM on any TV with largeHeap=false. The
-        // ImageView is sized to the screen and uses CENTER_CROP, so a bitmap
-        // larger than the display gives no perceptible quality benefit.
-        int sw = screenW, sh = screenH;
-        int w = d.getIntrinsicWidth()  > 0 ? Math.min(d.getIntrinsicWidth(),  sw) : sw;
-        int h = d.getIntrinsicHeight() > 0 ? Math.min(d.getIntrinsicHeight(), sh) : sh;
-        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        d.setBounds(0, 0, w, h); d.draw(new Canvas(bmp));
-        return bmp;
-    }
-
-    private int calcSampleSize(int srcW, int srcH) {
-        // Match wpDrawable's cap: stop subsampling once we're at ~1x the
-        // display. The old 2x cap led to massive bitmaps for high-res photos.
-        int sw = screenW, sh = screenH;
-        int ss = 1;
-        while ((srcH / ss > sh && srcW / ss > sw) && ss < 0x8000) ss *= 2;
-        return ss;
+        if (wallpaperCtl != null) wallpaperCtl.applyFromUri(uri);
     }
 
     @SuppressWarnings("deprecation")
@@ -4297,8 +3914,10 @@ public class LauncherActivity extends Activity {
             if (uri != null) {
                 try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
                 catch (SecurityException e) { showToast(getString(R.string.toast_wallpaper_no_permission)); return; }
-                userWpLoading.set(false);
-                applyWallpaperFromUri(uri);
+                if (wallpaperCtl != null) {
+                    wallpaperCtl.resetUserLoadingGuard();
+                    wallpaperCtl.applyFromUri(uri);
+                }
             }
         }
     }
@@ -4339,7 +3958,9 @@ public class LauncherActivity extends Activity {
         int cores = Runtime.getRuntime().availableProcessors();
         iconExecutor = new ThreadPoolExecutor(Math.max(2, cores - 1), cores, 30L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(128), new ThreadPoolExecutor.DiscardOldestPolicy());
-        wpExecutor  = Executors.newSingleThreadExecutor();
+        // Wallpaper executor is now owned by {@link WallpaperController}
+        // (constructed later inside {@link #buildLayout()}). The activity
+        // no longer manages the wallpaper-thread lifecycle directly.
         appExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
     }

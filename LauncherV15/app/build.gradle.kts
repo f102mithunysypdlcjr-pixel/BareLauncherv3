@@ -4,14 +4,25 @@ plugins {
 
 android {
     namespace  = "com.bare.launcher"
-    compileSdk = 35
+    // API 36 (Android 16). AGP 8.10+ supports compiling against API 36 —
+    // see https://developer.android.com/build/releases/agp-8-10-0-release-notes
+    // "The maximum API level that Android Gradle Plugin 8.10 supports is API
+    // level 36." We're on 8.10.1 in libs.versions.toml so no AGP bump needed.
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.bare.launcher"
         minSdk        = 30
-        targetSdk     = 35
-        versionCode   = 1
-        versionName   = "1.0.0"
+        // targetSdk = 36 to opt into Android 16 platform behaviours (and to
+        // satisfy Play Store's evergreen target-API requirements). The
+        // launcher does not use any APIs that changed semantics between
+        // 35 and 36; the bump is a target-only change.
+        targetSdk     = 36
+        // 1.1.0: first public-release-ready cut. Production-readiness pass
+        // (split activity into focused helpers, instrumentation CI on real
+        // emulator, crash logger, SDK 36).
+        versionCode   = 2
+        versionName   = "1.1.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
