@@ -2571,10 +2571,12 @@ public class LauncherActivity extends Activity {
         col.setOrientation(android.widget.LinearLayout.VERTICAL);
 
         // Each row: [tag dot][name (fixed col)][icon][app label] — left-flow,
-        // no flex spacer. All rows share rowW so the selection pill aligns
-        // and reads as a coherent menu, not a ragged list.
-        final int rowW     = dp(252);
-        final int nameColW = dp(60);
+        // no flex spacer. Rows use WRAP_CONTENT and are equalised to the
+        // widest row's measured width in equalizeKeymapRowWidths() after
+        // every binding update — that way the menu shrinks to fit the
+        // longest visible app name (no dead space on the right) but the
+        // selection pill still aligns across all rows.
+        final int nameColW = dp(56);
         for (int i = 0; i < SHORTCUT_LABELS.length; i++) {
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
             row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
@@ -2627,11 +2629,16 @@ public class LauncherActivity extends Activity {
             val.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
             val.setSingleLine(true);
             val.setEllipsize(TextUtils.TruncateAt.END);
-            val.setMaxWidth(dp(150));
+            val.setMaxWidth(dp(130));
             row.addView(val, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
 
+            // Row width starts as WRAP_CONTENT; equalizeKeymapRowWidths()
+            // resizes every row to the widest one after refreshKeymapRows()
+            // re-binds the value text. This eliminates the ~70 dp of right-
+            // side dead space the old fixed dp(252) layout had for short
+            // app names while keeping selection pills perfectly aligned.
             android.widget.LinearLayout.LayoutParams rlp =
-                    new android.widget.LinearLayout.LayoutParams(rowW, WRAP);
+                    new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
             rlp.bottomMargin = dp(2);
             col.addView(row, rlp);
         }
@@ -2855,6 +2862,46 @@ public class LauncherActivity extends Activity {
                         .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
             }
         }
+        // Equalise row widths to the widest row so the menu is exactly as
+        // wide as it needs to be (no dead space) AND the selection pill
+        // aligns across all rows. Cheap: 6 measure() passes on tiny rows.
+        equalizeKeymapRowWidths(col, rows);
+    }
+
+    /** Measure every slot row and snap them all to the widest measured width.
+     *  Called from refreshKeymapRows() after every binding/text change so
+     *  the menu auto-fits the longest app label currently shown. */
+    private void equalizeKeymapRowWidths(android.widget.LinearLayout col, int rows) {
+        int spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        int max = 0;
+        for (int i = 0; i < rows; i++) {
+            View child = col.getChildAt(i);
+            if (child == null) continue;
+            // Force measurement against current content. We pass UNSPECIFIED
+            // on width so each row reports its natural intrinsic width.
+            ViewGroup.LayoutParams clp = child.getLayoutParams();
+            int prevW = clp != null ? clp.width : ViewGroup.LayoutParams.WRAP_CONTENT;
+            if (clp != null && clp.width != ViewGroup.LayoutParams.WRAP_CONTENT) {
+                clp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                child.setLayoutParams(clp);
+            }
+            child.measure(spec, spec);
+            int w = child.getMeasuredWidth();
+            if (w > max) max = w;
+            if (clp != null && prevW != ViewGroup.LayoutParams.WRAP_CONTENT) {
+                clp.width = prevW;
+                child.setLayoutParams(clp);
+            }
+        }
+        if (max <= 0) return;
+        for (int i = 0; i < rows; i++) {
+            View child = col.getChildAt(i);
+            if (child == null) continue;
+            ViewGroup.LayoutParams clp = child.getLayoutParams();
+            if (clp == null || clp.width == max) continue;
+            clp.width = max;
+            child.setLayoutParams(clp);
+        }
     }
 
     // ── App picker mode ──────────────────────────────────────────
@@ -2983,8 +3030,18 @@ public class LauncherActivity extends Activity {
     }
 
     /** Repaint chip styles to reflect the current selection and scroll the
-     *  selected chip into the viewport. Optimised: only the previously-
-     *  selected and newly-selected chips are mutated, not the whole strip. */
+     *  selected chip into the viewport.
+     *
+     *  Two paint modes:
+     *    • prev < 0 → first paint after entering picker mode. We must do a
+     *      FULL sweep here, instantly resetting every chip's pill colour /
+     *      text colour / scale to the idle state and then highlighting only
+     *      the current one. This is the fix for the "2 or 3 selectors at
+     *      once" bug: previous picker sessions left their selected chip
+     *      scaled-up + bright-pilled, and the cheap two-chip diff path
+     *      below could not undo those stale highlights.
+     *    • prev ≥ 0 → in-session navigation. Only the two chips that
+     *      changed are touched (animated), keeping per-keypress work O(1). */
     private void refreshKeymapPicker() {
         android.widget.LinearLayout strip = keymapPickerStrip;
         if (strip == null) return;
@@ -2992,19 +3049,27 @@ public class LauncherActivity extends Activity {
         if (n == 0) return;
         int prev = keymapPickerLastIdx;
         int curr = keymapPickerIdx;
-        if (prev == curr) {
-            // First paint after enterAppPicker resets prev to -1, so we
-            // still need to style the current chip the first time.
-            paintPickerChip(strip.getChildAt(curr), true);
-        } else {
-            if (prev >= 0 && prev < n) paintPickerChip(strip.getChildAt(prev), false);
-            if (curr >= 0 && curr < n) paintPickerChip(strip.getChildAt(curr), true);
+        if (prev < 0) {
+            // Full reset — instant (no animation) so we don't trigger N
+            // simultaneous spring animations across the whole strip.
+            for (int i = 0; i < n; i++) {
+                if (i == curr) continue;
+                paintPickerChip(strip.getChildAt(i), false, false);
+            }
+            if (curr >= 0 && curr < n) {
+                // Animate just the new selection in for a subtle pop.
+                paintPickerChip(strip.getChildAt(curr), true, true);
+            }
+        } else if (prev != curr) {
+            if (prev < n) paintPickerChip(strip.getChildAt(prev), false, true);
+            if (curr >= 0 && curr < n) paintPickerChip(strip.getChildAt(curr), true, true);
         }
+        // prev == curr (and ≥ 0): nothing visual changed — skip work.
         keymapPickerLastIdx = curr;
         scrollPickerToSelection();
     }
 
-    private void paintPickerChip(View chip, boolean sel) {
+    private void paintPickerChip(View chip, boolean sel, boolean animate) {
         if (chip == null) return;
         // Apple-TV inverted pill: selected chip is bright frosted-white with
         // dark text; idle chips are transparent with light text. Same
@@ -3022,11 +3087,17 @@ public class LauncherActivity extends Activity {
             }
         }
         chip.animate().cancel();
-        chip.animate()
-                .scaleX(sel ? 1.05f : 1f).scaleY(sel ? 1.05f : 1f)
-                .setDuration(140)
-                .setInterpolator(FOCUS_EASE)
-                .start();
+        float targetScale = sel ? 1.05f : 1f;
+        if (animate) {
+            chip.animate()
+                    .scaleX(targetScale).scaleY(targetScale)
+                    .setDuration(140)
+                    .setInterpolator(FOCUS_EASE)
+                    .start();
+        } else {
+            chip.setScaleX(targetScale);
+            chip.setScaleY(targetScale);
+        }
     }
 
     /** Auto-scroll the horizontal strip so the selected chip is visible
