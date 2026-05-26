@@ -1,0 +1,56 @@
+name: Build BareLauncher Release APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Sign Release APK
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.1"
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > /tmp/release.jks
+
+      - name: Generate Gradle wrapper
+        working-directory: LauncherV15
+        run: |
+          gradle wrapper --gradle-version 8.14.1
+          chmod +x gradlew
+
+      - name: Build and sign release APK
+        working-directory: LauncherV15
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
+        run: |
+          ./gradlew :app:assembleRelease \
+            -Pandroid.injected.signing.store.file=/tmp/release.jks \
+            -Pandroid.injected.signing.store.password=${{ secrets.KEYSTORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }} \
+            -Pandroid.injected.signing.store.type=JKS \
+            --no-daemon --stacktrace
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BareLauncher-release-${{ github.run_number }}
+          path: LauncherV15/app/build/outputs/apk/release/*.apk
+          retention-days: 90
