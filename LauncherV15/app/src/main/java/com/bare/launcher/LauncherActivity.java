@@ -54,6 +54,9 @@ import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
 import android.view.Window;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.Interpolator;
+import android.view.animation.PathInterpolator;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.widget.FrameLayout;
@@ -80,7 +83,10 @@ public class LauncherActivity extends Activity {
     private static final int    CELL_W_DP      = 90;
     private static final int    CELL_H_DP      = 100;
     private static final int    RING_STROKE_DP = 3;
-    private static final long   CLOCK_MS       = 1_000L;
+    // Tick once per minute. The clock has no seconds, so a 1Hz tick was 59 wakeups
+    // per minute of pure waste. Re-scheduling now uses (next-minute - now) so the
+    // tick lands exactly on the minute boundary, giving us the smooth-tween hook.
+    private static final long   CLOCK_MS       = 60_000L;
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
@@ -88,6 +94,25 @@ public class LauncherActivity extends Activity {
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
+
+    // Apple-TV style focus scale — slightly larger pop than before for the
+    // premium "lift" feel, paired with a subtle Y translation so the focused
+    // app appears to rise off the shelf rather than just inflate in place.
+    private static final float  FOCUS_SCALE    = 1.10f;
+    private static final int    FOCUS_LIFT_DP  = 3;
+    private static final int    FOCUS_DUR_MS   = 220;
+    private static final int    UNFOCUS_DUR_MS = 160;
+
+    // Easing curves. Defined once, reused everywhere — no per-animation alloc.
+    //   FOCUS_EASE   — decelerate-out, the canonical "press / lift" curve
+    //   SCROLL_EASE  — Material standard ease-in-out for shelf scrolling
+    //   REORDER_EASE — quick decelerate for the swap slide
+    //   MENU_IN      — gentle overshoot-free pop-in for the context menu
+    private static final Interpolator FOCUS_EASE   = new DecelerateInterpolator(1.6f);
+    private static final Interpolator SCROLL_EASE  = new PathInterpolator(0.33f, 0f, 0.2f, 1f);
+    private static final Interpolator REORDER_EASE = new PathInterpolator(0.25f, 0.1f, 0.2f, 1f);
+    private static final Interpolator MENU_IN      = new PathInterpolator(0.18f, 0.7f, 0.25f, 1f);
+    private static final Interpolator MENU_OUT     = new PathInterpolator(0.4f, 0f, 0.7f, 0.3f);
 
     private static final ThreadLocal<Matrix> sMatrixTL = new ThreadLocal<Matrix>() {
         @Override protected Matrix initialValue() { return new Matrix(); }
@@ -110,7 +135,10 @@ public class LauncherActivity extends Activity {
     }
 
     private volatile float      density;
-    private          int        screenW, screenH;
+    // Volatile: read from background threads (wallpaper executor) inside
+    // wpDrawable() and calcSampleSize(). Without volatile, weak-memory-model
+    // CPUs could observe stale zeros and produce a 1px-tall wallpaper bitmap.
+    private volatile int        screenW, screenH;
     private volatile boolean    destroyed       = false;
     private final AtomicBoolean systemWpLoading = new AtomicBoolean(false);
     private final AtomicBoolean userWpLoading   = new AtomicBoolean(false);
@@ -119,7 +147,11 @@ public class LauncherActivity extends Activity {
     private PackageManager      pm;
 
     private RecyclingShelfView shelf;
-    private ImageView          wallpaperView;
+    // Cross-fade pair. wallpaperFront is whatever the user currently sees;
+    // wallpaperBack is the staging slot for the next wallpaper. After every
+    // fade the two roles swap so we never recreate views.
+    private ImageView          wallpaperFront;
+    private ImageView          wallpaperBack;
     private TextView           clockView;
     private View               netBtn;
     private View               wpBtnView;
@@ -127,9 +159,12 @@ public class LauncherActivity extends Activity {
     private FrameLayout        root;
     private Toast              currentToast;
 
+    // Single Handler on the main looper — was previously two (uiHandler +
+    // clockHandler). The clock runnable is the only "named" callback; we
+    // use clockTick as the token for removeCallbacks.
     private final Handler uiHandler    = new Handler(Looper.getMainLooper());
-    private final Handler clockHandler = new Handler(Looper.getMainLooper());
     private       boolean clockRunning = false;
+    private       int     lastShownMinute = -1;
 
     private final java.util.Calendar       clockCal   = java.util.Calendar.getInstance();
     private final char[]                   clockChars = new char[8];
@@ -143,11 +178,53 @@ public class LauncherActivity extends Activity {
         @Override public void run() {
             if (destroyed || !clockRunning) return;
             long now = System.currentTimeMillis();
-            TextView cv = clockView;
-            if (cv != null) cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
-            clockHandler.postDelayed(this, CLOCK_MS - (now % CLOCK_MS));
+            tickClock(now);
+            // Schedule the next tick for the next minute boundary, with a
+            // tiny 50 ms cushion so we land just AFTER :00 rather than just
+            // before (avoids a tick firing twice in the same minute on a
+            // slightly-fast wall-clock).
+            long delay = CLOCK_MS - (now % CLOCK_MS) + 50L;
+            uiHandler.postDelayed(this, delay);
         }
     };
+
+    /** Refresh the clock TextView. Triggers a soft alpha cross-fade only on
+     *  the minute boundary so the digit change reads as a smooth tween. */
+    private void tickClock(long now) {
+        TextView cv = clockView;
+        if (cv == null) return;
+        clockCal.setTimeInMillis(now);
+        int currentMinute = clockCal.get(java.util.Calendar.MINUTE);
+        if (currentMinute == lastShownMinute) return; // no visible change
+        boolean firstRender = lastShownMinute < 0;
+        lastShownMinute = currentMinute;
+        if (firstRender) {
+            // Cold render — no fade, just paint the time.
+            cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
+            return;
+        }
+        // Soft cross-fade. We don't fully fade to 0 — dropping to 0.45 keeps
+        // the clock a continuous presence on screen. The text swap happens
+        // at the dip so the user perceives a single smooth pulse rather than
+        // a fade-out / pop-in.
+        final TextView fcv = cv;
+        fcv.animate().cancel();
+        fcv.animate()
+                .alpha(0.45f)
+                .setDuration(180)
+                .setInterpolator(FOCUS_EASE)
+                .withEndAction(() -> {
+                    if (destroyed || fcv != clockView) return;
+                    fcv.setText(buildClock(System.currentTimeMillis()),
+                            TextView.BufferType.SPANNABLE);
+                    fcv.animate()
+                            .alpha(1f)
+                            .setDuration(220)
+                            .setInterpolator(FOCUS_EASE)
+                            .start();
+                })
+                .start();
+    }
 
     private CharSequence buildClock(long ms) {
         clockCal.setTimeInMillis(ms);
@@ -166,6 +243,13 @@ public class LauncherActivity extends Activity {
         clockChars[pos++] = ampm == java.util.Calendar.AM ? 'A' : 'P';
         clockChars[pos++] = 'M';
         clockSsb.clear(); clockSsb.clearSpans();
+        // String.valueOf builds a tiny throwaway String, but tickClock now
+        // fires once per minute (not per second), so this is 1 small alloc /
+        // minute — far below GC pressure. We tried bypassing it via
+        // append(char[],int,int) but SpannableStringBuilder only accepts
+        // CharSequence on append, so the only zero-alloc path would be a
+        // wrapper class around clockChars implementing CharSequence — not
+        // worth the complexity for this savings.
         clockSsb.append(String.valueOf(clockChars, 0, pos));
         // Time portion (digits) inherits the TextView's heavy base typeface.
         // AM/PM gets thinner family + smaller size for a refined Apple-TV look.
@@ -250,7 +334,12 @@ public class LauncherActivity extends Activity {
             if (ra != null && rb != null) return ra - rb;
             if (ra != null) return -1;
             if (rb != null) return  1;
-            return a.label.compareToIgnoreCase(b.label);
+            // Use the JDK's locale-independent case-insensitive comparator.
+            // String.compareToIgnoreCase uses the default Locale and famously
+            // mis-orders Turkish "I"/"i" vs ASCII letters — we don't want that
+            // for an app launcher whose order should be deterministic across
+            // locales.
+            return String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label);
         });
     }
 
@@ -286,6 +375,11 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** Pending saved scroll index — applied as soon as appList is populated.
+     *  Kept as field so the cold-start path (where appList is empty in onResume)
+     *  doesn't silently drop the user's last-focused position. */
+    private int pendingScrollIdx = -1;
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -295,7 +389,20 @@ public class LauncherActivity extends Activity {
         RecyclingShelfView s = shelf;
         if (s != null) {
             int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_SCROLL_IDX, 0);
-            if (!appList.isEmpty()) s.focusedIndex = Math.min(saved, appList.size() - 1);
+            if (!appList.isEmpty()) {
+                s.focusedIndex = Math.min(saved, appList.size() - 1);
+            } else {
+                // Cold start: apps haven't loaded yet. Stash the index;
+                // loadApps's UI callback will apply it once the shelf is populated.
+                pendingScrollIdx = saved;
+            }
+            // Dedupe — onResume can fire twice without an intervening onPause
+            // during fast configuration transitions on some TV ROMs.
+            if (focusRestoreListener != null) {
+                ViewTreeObserver vto0 = s.getViewTreeObserver();
+                if (vto0.isAlive()) vto0.removeOnGlobalLayoutListener(focusRestoreListener);
+                focusRestoreListener = null;
+            }
             focusRestoreListener = new ViewTreeObserver.OnGlobalLayoutListener() {
                 @Override public void onGlobalLayout() {
                     ViewTreeObserver vto = s.getViewTreeObserver();
@@ -339,13 +446,12 @@ public class LauncherActivity extends Activity {
     protected void onDestroy() {
         destroyed = true;
         stopClock();
-        clockHandler.removeCallbacksAndMessages(null);
         uiHandler.removeCallbacksAndMessages(null);
         unregisterPkgReceiver();
         shutdown(iconExecutor); shutdown(wpExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
-        wallpaperView = null; clockView = null; shelf = null;
+        wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
         wpBtnView = null; netBtn = null; ringView = null; root = null;
         super.onDestroy();
     }
@@ -413,8 +519,24 @@ public class LauncherActivity extends Activity {
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        // Refresh display metrics. The activity declares configChanges so it
+        // survives DPI/screen-size changes (HDMI swap on TV, system font scale
+        // change, multi-window enter on tablet). Without this refresh, dp(...)
+        // and the background wallpaper sizing would silently keep stale values.
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        density = dm.density;
+        screenW = dm.widthPixels;
+        screenH = dm.heightPixels;
         TextView cv = clockView;
-        if (cv != null) cv.setText(buildClock(System.currentTimeMillis()), TextView.BufferType.SPANNABLE);
+        if (cv != null) {
+            // Bypass the per-minute fade — config change is rare and an
+            // immediate re-render is cheaper / less surprising. Resetting
+            // lastShownMinute drives tickClock down the firstRender path
+            // which sets the text without animating.
+            lastShownMinute = -1;
+            cv.setAlpha(1f);
+            tickClock(System.currentTimeMillis());
+        }
     }
 
     private View buildLayout() {
@@ -425,11 +547,21 @@ public class LauncherActivity extends Activity {
         root.setClipToPadding(false);
         root.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
 
-        wallpaperView = new ImageView(this);
-        wallpaperView.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
-        wallpaperView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        wallpaperView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        root.addView(wallpaperView);
+        wallpaperBack = new ImageView(this);
+        wallpaperBack.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        wallpaperBack.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        wallpaperBack.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        wallpaperBack.setAlpha(0f);
+        // Stack order: BACK is added first (drawn below), FRONT on top. We
+        // cross-fade by raising BACK's alpha to 1 then swapping references
+        // so the new wallpaper becomes the FRONT for the next change.
+        root.addView(wallpaperBack);
+
+        wallpaperFront = new ImageView(this);
+        wallpaperFront.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        wallpaperFront.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        wallpaperFront.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        root.addView(wallpaperFront);
 
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
@@ -595,7 +727,11 @@ public class LauncherActivity extends Activity {
 
         // Prefer above the icon; fall back to below if it would clip the top
         int menuY = iconTopInRoot - dp(6) - mh;
-        if (menuY < dp(8)) menuY = iconBotInRoot + dp(6);
+        boolean menuAbove = true;
+        if (menuY < dp(8)) {
+            menuY = iconBotInRoot + dp(6);
+            menuAbove = false;
+        }
         // Clamp so it never escapes the bottom either
         menuY = Math.min(menuY, r.getHeight() - mh - dp(8));
         menuY = Math.max(menuY, dp(8));
@@ -607,12 +743,64 @@ public class LauncherActivity extends Activity {
         lp.leftMargin = menuX; lp.topMargin = menuY;
         lp.gravity = Gravity.TOP | Gravity.START;
         menuOverlay.setLayoutParams(lp);
+
+        // Pivot: anchor the scale-up at the edge facing the icon so the menu
+        // appears to "pop out" of the focused cell rather than inflate from
+        // its own centre. Pivot X tracks the icon's horizontal centre relative
+        // to the overlay so off-centre menus (clamped to screen edge) still
+        // grow toward the right place.
+        float pivotX = (cellCx - menuX);
+        pivotX = Math.max(0f, Math.min(pivotX, mw));
+        menuOverlay.setPivotX(pivotX);
+        menuOverlay.setPivotY(menuAbove ? mh : 0f);
+
+        boolean wasVisible = menuOverlay.getVisibility() == View.VISIBLE;
+        menuOverlay.animate().cancel();
         menuOverlay.setVisibility(View.VISIBLE);
+        if (!wasVisible) {
+            menuOverlay.setAlpha(0f);
+            menuOverlay.setScaleX(0.84f);
+            menuOverlay.setScaleY(0.84f);
+            menuOverlay.animate()
+                    .alpha(1f)
+                    .scaleX(1f).scaleY(1f)
+                    .setDuration(190)
+                    .setInterpolator(MENU_IN)
+                    .start();
+        } else {
+            // Already visible (e.g. re-anchored after a reorder swap) — just
+            // make sure the transform is at rest.
+            menuOverlay.setAlpha(1f);
+            menuOverlay.setScaleX(1f);
+            menuOverlay.setScaleY(1f);
+        }
         updateMenuHighlight();
     }
 
     void hideContextMenu() {
-        if (menuOverlay != null) menuOverlay.setVisibility(View.GONE);
+        if (menuOverlay == null) return;
+        if (menuOverlay.getVisibility() != View.VISIBLE) return;
+        final FrameLayout fm = menuOverlay;
+        fm.animate().cancel();
+        fm.animate()
+                .alpha(0f)
+                .scaleX(0.84f).scaleY(0.84f)
+                .setDuration(140)
+                .setInterpolator(MENU_OUT)
+                .withEndAction(() -> {
+                    if (fm != menuOverlay) return;
+                    // Guard against the cancellation race: showContextMenu
+                    // cancels the in-flight fade-out, which on some Android
+                    // versions still runs withEndAction. Only commit GONE if
+                    // the fade actually reached its near-zero target.
+                    if (fm.getAlpha() > 0.05f) return;
+                    fm.setVisibility(View.GONE);
+                    // Reset transform so the next show() starts from a known state.
+                    fm.setAlpha(1f);
+                    fm.setScaleX(1f);
+                    fm.setScaleY(1f);
+                })
+                .start();
     }
 
     void updateMenuHighlight() {
@@ -631,10 +819,14 @@ public class LauncherActivity extends Activity {
             // the system already surfaces connectivity in its own UI; mirroring
             // it here creates two sources of truth that can disagree.
             //
-            // Glyph: iOS-style WiFi fan — a filled wedge built from 3 stacked
-            // arc bands plus a dot apex. Stroke caps are ROUND so the bands
-            // read as smooth ribbons rather than line-art.
-            private final Paint stroke    = makeBtnPaint(false);
+            // Glyph: bold "3 thick bar" WiFi fan matching the reference image.
+            // Three concentric arcs with ROUND caps so the band ends read as
+            // smooth pill tips rather than chiselled edges. A small solid
+            // wedge sits at the apex as the fan's source.
+            //
+            // Colour rule unchanged: dark-glass plate idle, frosted-white plate
+            // on focus, glyph inverts (white→dark) so the symbol always reads.
+            private final Paint stroke    = makeBtnStrokePaint();   // ROUND caps
             private final Paint dot       = makeBtnPaint(true);
             private final Paint bgIdle    = makeBgIdlePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
@@ -656,29 +848,32 @@ public class LauncherActivity extends Activity {
                 stroke.setColor(symbolColor);
                 dot.setColor(symbolColor);
 
-                // Bold solid WiFi fan — matches the "after" reference: three
-                // chunky stacked arcs with FLAT ends (BUTT caps) plus a small
-                // wedge dot at the apex. No rounded caps, no wireframe feel.
-                //
-                //   ay    arc-anchor (below cell centre so dot+arcs cluster low)
-                //   sw    band thickness — bumped to ~20% of icon size for the
-                //         heavy-ribbon look you see in the reference image
-                //   radii 0.36 / 0.62 / 0.88 of the icon size — even spacing
-                //   sweep 150° centred on 270° (up): 195°→345°  (slightly tighter
-                //         than before so the bands taper into a fan shape)
+                // Geometry tuned to match the reference image:
+                //   ic    icon "container" radius
+                //   sw    band thickness — 22% of ic gives a chunky bar feel
+                //         without crowding the arcs together
+                //   ay    arc anchor — sits below cell centre so the fan
+                //         radiates upward from a low source point
+                //   radii 0.40 / 0.66 / 0.92 — slightly wider outer ring than
+                //         before so the largest bar reads as a confident band
+                //   sweep 110° centred on top (235°→345°) — narrower fan than
+                //         the previous 150° so the arcs taper into a tight,
+                //         logo-like silhouette
+                //   apex  small solid wedge (filled circle) anchored just above
+                //         the inner-most band's endpoints
                 float ic         = r * 0.96f;
-                float sw         = ic * 0.20f;
-                float ay         = cy + ic * 0.34f;
-                float dotR       = sw * 0.70f;
-                float dotY       = ay - sw * 0.10f;
-                float startAngle = 195f, sweep = 150f;
+                float sw         = ic * 0.22f;
+                float ay         = cy + ic * 0.36f;
+                float dotR       = sw * 0.55f;
+                float dotY       = ay - sw * 0.05f;
+                float startAngle = 235f, sweep = 110f;
 
                 stroke.setStrokeWidth(sw);
-                stroke.setStrokeJoin(Paint.Join.MITER);
-                stroke.setStrokeCap(Paint.Cap.BUTT);   // FLAT band ends — key to the bold look
+                stroke.setStrokeJoin(Paint.Join.ROUND);
+                stroke.setStrokeCap(Paint.Cap.ROUND);   // ROUND caps for the soft pill-tip look
 
                 c.drawCircle(cx, dotY, dotR, dot);
-                float[] radii = { ic * 0.36f, ic * 0.62f, ic * 0.88f };
+                float[] radii = { ic * 0.40f, ic * 0.66f, ic * 0.92f };
                 for (float rr : radii) {
                     oval.set(cx - rr, ay - rr, cx + rr, ay + rr);
                     c.drawArc(oval, startAngle, sweep, false, stroke);
@@ -689,7 +884,8 @@ public class LauncherActivity extends Activity {
         v.setOnClickListener(view -> openNetSettings());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(140).start();
+            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f)
+                    .setDuration(160).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
         v.setOnKeyListener((view, kc, ev) -> {
@@ -756,7 +952,8 @@ public class LauncherActivity extends Activity {
         v.setOnClickListener(view -> openStoragePicker());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f).setDuration(140).start();
+            view.animate().scaleX(f ? 1.10f : 1f).scaleY(f ? 1.10f : 1f)
+                    .setDuration(160).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
         v.setOnKeyListener((view, kc, ev) -> {
@@ -886,7 +1083,12 @@ public class LauncherActivity extends Activity {
 
         RecyclingShelfView(Context ctx) {
             super(ctx);
-            scroller = new OverScroller(ctx);
+            // Pass SCROLL_EASE so startScroll() honours our Material-style
+            // ease-in-out curve. Fling deceleration uses the framework's
+            // own SplineOverScroller and is unaffected by this interpolator —
+            // exactly the right split: programmatic d-pad scrolls feel
+            // premium, touch-fling keeps native physics.
+            scroller = new OverScroller(ctx, SCROLL_EASE);
             cellW  = dp(CELL_W_DP);
             cellH  = dp(CELL_H_DP);
             stride = cellW + dp(10) * 2;
@@ -930,17 +1132,56 @@ public class LauncherActivity extends Activity {
 
         void swapWithNeighbour(int targetIdx) {
             if (targetIdx < 0 || targetIdx >= appList.size() || targetIdx == dragIndex) return;
-            Collections.swap(appList, dragIndex, targetIdx);
+            // Capture the from/to so the post-swap slide animation knows the
+            // visual delta between each cell's old and new screen positions.
+            int oldDragIdx = dragIndex;
+            Collections.swap(appList, oldDragIdx, targetIdx);
             dragIndex    = targetIdx;
             focusedIndex = dragIndex;
-            ensureVisible(dragIndex);   // scroll + repositionAttached — fully synchronous
-            rebindAll();                // bindCell → layout() — cell positions final now
+            ensureVisibleSync(dragIndex);   // sync scroll — swap-slide animates cleanly off final layout
+            rebindAll();                    // bindCell → layout() — cell positions final now
+
+            // Slide animation: the cell now occupying targetIdx (showing the
+            // dragged app) appears to glide FROM its old visual position to
+            // the new one. The displaced neighbour, now at oldDragIdx, glides
+            // the opposite way. Implementation trick: rebindAll() has already
+            // placed both cells at their FINAL layout positions, so we offset
+            // them via translationX (which doesn't affect layout) and animate
+            // that offset back to zero.
+            int slidePx = (oldDragIdx - targetIdx) * stride;
+            CellView movedCell     = attached.get(targetIdx);
+            CellView neighbourCell = attached.get(oldDragIdx);
+            if (movedCell != null) {
+                movedCell.animate().cancel();
+                movedCell.setTranslationX(slidePx);
+                movedCell.animate()
+                        .translationX(0f)
+                        .setDuration(220)
+                        .setInterpolator(REORDER_EASE)
+                        // Per-frame ring track: the dragged cell carries the
+                        // selection ring, so the halo follows the slide.
+                        .setUpdateListener(anim -> {
+                            if (movedCell.isAttachedToWindow())
+                                LauncherActivity.this.positionRing(movedCell);
+                        })
+                        .start();
+            }
+            if (neighbourCell != null) {
+                neighbourCell.animate().cancel();
+                neighbourCell.setTranslationX(-slidePx);
+                neighbourCell.animate()
+                        .translationX(0f)
+                        .setDuration(220)
+                        .setInterpolator(REORDER_EASE)
+                        .setUpdateListener(null)
+                        .start();
+            }
+
             CellView cv = attached.get(dragIndex);
             if (cv != null) LauncherActivity.this.showContextMenu(cv);
             // Direct call — cell.mLeft is already updated by repositionAttached() above,
             // so getLocationOnScreen() returns the correct coordinate immediately.
-            // post() would race: focus listener's post(positionRing) fires first at the
-            // pre-scroll position, producing a 1-frame left-shift artifact.
+            // The animation's update listener keeps it tracking through the slide.
             LauncherActivity.this.updateRingAfterMove();
         }
 
@@ -1067,6 +1308,8 @@ public class LauncherActivity extends Activity {
                 cv.animate().cancel();          // cancel any in-flight scale animation
                 cv.animate().setUpdateListener(null).setListener(null); // drop captured lambdas before reuse
                 cv.setScaleX(1f); cv.setScaleY(1f); // reset scale before reuse
+                cv.setTranslationX(0f);         // reorder slide leftover
+                cv.setTranslationY(0f);         // focus-lift leftover
                 cv.setAlpha(1f);                // reset alpha
                 cv.iconBitmap = null;           // clear stale bitmap — prevents ghost icons
                 cv.boundApp   = null;           // clear stale binding
@@ -1107,10 +1350,42 @@ public class LauncherActivity extends Activity {
             }
         }
 
+        /** Smooth animated scroll. Used for d-pad navigation so the shelf
+         *  glides between positions instead of snapping. The OverScroller's
+         *  computeScrollOffset path delivers per-frame updates which we route
+         *  through doScrollTo, so the ring naturally tracks the moving cells. */
+        private void smoothScrollTo(int x) {
+            int max = Math.max(0, totalW - getWidth());
+            int target = Math.max(0, Math.min(x, max));
+            int dx = target - scrollX;
+            if (dx == 0) return;
+            scroller.abortAnimation();
+            // Duration scales gently with distance — short hops feel snappy
+            // (180 ms) while long jumps still complete in under ~350 ms so
+            // they never feel sluggish.
+            int dist = Math.abs(dx);
+            int dur  = Math.max(180, Math.min(360, 180 + dist / 6));
+            scroller.startScroll(scrollX, 0, dx, 0, dur);
+            postInvalidateOnAnimation();
+        }
+
         private void ensureVisible(int idx) {
             int left = centerX + idx * stride + dp(10), right = left + cellW, pad = dp(48);
-            if      (left - pad < scrollX)               doScrollTo(Math.max(0, left - pad));
-            else if (right + pad > scrollX + getWidth()) doScrollTo(right + pad - getWidth());
+            // Use animated scroll for d-pad navigation so the shelf glides
+            // smoothly. Touch fling continues to use the scroller's own path
+            // via onTouchEvent, and cell-attachment scrolls during reorder
+            // use doScrollTo synchronously to avoid mid-swap visual races.
+            if      (left  - pad < scrollX)               smoothScrollTo(Math.max(0, left - pad));
+            else if (right + pad > scrollX + getWidth())  smoothScrollTo(right + pad - getWidth());
+        }
+
+        /** Synchronous variant used by reorder flow — there we need the cells
+         *  laid out at their final positions BEFORE running the swap-slide
+         *  animation, so we can't tolerate an in-flight scroll animation. */
+        private void ensureVisibleSync(int idx) {
+            int left = centerX + idx * stride + dp(10), right = left + cellW, pad = dp(48);
+            if      (left  - pad < scrollX)               doScrollTo(Math.max(0, left - pad));
+            else if (right + pad > scrollX + getWidth())  doScrollTo(right + pad - getWidth());
         }
 
         // True from ACTION_DOWN until the fling settles. While set, the ring is
@@ -1284,21 +1559,26 @@ public class LauncherActivity extends Activity {
                     if (!reorderMode) {
                         animate().cancel();
                         if (f) {
-                            // Subtle, FAST focus pop. Smaller scale (1.06) + shorter
-                            // duration (120ms) + linear interpolator means:
-                            //   • adjacent cells never visually overlap during fast
-                            //     d-pad scroll (the 1.12 + overshoot combo briefly
-                            //     pushed cells past their stride boundary, which the
-                            //     user saw as "apps overriding each other on the
-                            //     right corner")
-                            //   • the ring follows every cell snappily — no slow
-                            //     bloom that gets interrupted by the next keypress,
-                            //     so it no longer looks like the ring "skips" apps
-                            // updateListener keeps the RingView's scale in lockstep
-                            // with the cell across every animation frame.
-                            animate().scaleX(1.06f).scaleY(1.06f)
-                                     .setDuration(120)
-                                     .setInterpolator(null)
+                            // Premium Apple-TV-style focus lift:
+                            //   • scale 1.10 — confident pop, still well within
+                            //     the 110dp stride so adjacent cells never
+                            //     visually overlap during fast d-pad scroll
+                            //   • translationY -3dp — subtle "rise off the
+                            //     shelf" feel; combined with the existing
+                            //     label drop-shadow it reads as a soft lift
+                            //   • decelerate easing (FOCUS_EASE) — smooth
+                            //     out-curve, no overshoot wobble that briefly
+                            //     pushed cells past their stride boundary
+                            //   • 220 ms — generous enough for the curve to
+                            //     read as "lift" rather than "snap" but short
+                            //     enough that fast d-pad never lags
+                            // updateListener keeps the RingView's translation
+                            // and scale in lockstep with the cell across every
+                            // animation frame so the halo hugs the icon.
+                            animate().scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
+                                     .translationY(-dp(FOCUS_LIFT_DP))
+                                     .setDuration(FOCUS_DUR_MS)
+                                     .setInterpolator(FOCUS_EASE)
                                      .setUpdateListener(anim -> {
                                          if (isFocused() && isAttachedToWindow())
                                              positionRing(CellView.this);
@@ -1309,8 +1589,9 @@ public class LauncherActivity extends Activity {
                             // CellView.this) doesn't persist on ViewPropertyAnimator
                             // and fire pointlessly during the unfocus tween.
                             animate().scaleX(1f).scaleY(1f)
-                                     .setDuration(100)
-                                     .setInterpolator(null)
+                                     .translationY(0f)
+                                     .setDuration(UNFOCUS_DUR_MS)
+                                     .setInterpolator(FOCUS_EASE)
                                      .setUpdateListener(null)
                                      .start();
                         }
@@ -1428,6 +1709,12 @@ public class LauncherActivity extends Activity {
                         case KeyEvent.KEYCODE_DPAD_RIGHT: requestFocusOnIndex(boundIndex + 1); return true;
                         case KeyEvent.KEYCODE_DPAD_UP:
                             View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
+                        case KeyEvent.KEYCODE_DPAD_DOWN:
+                            // Consume — there's nothing below the shelf. Without this,
+                            // the platform's focus-search may jump to an unrelated
+                            // descendant or trigger an audible "focus-blocked" beep on
+                            // some TV ROMs. Returning true keeps focus on the cell.
+                            return true;
                         default: return false;
                     }
                 });
@@ -1562,7 +1849,23 @@ public class LauncherActivity extends Activity {
                         if (changed) {
                             appList.clear(); appList.addAll(fresh);
                             RecyclingShelfView s = shelf;
-                            if (s != null) s.setApps(appList);
+                            if (s != null) {
+                                // Apply any pending scroll-index restore (cold start path).
+                                // onResume stashes it when appList was empty.
+                                if (pendingScrollIdx >= 0 && !fresh.isEmpty()) {
+                                    s.focusedIndex = Math.min(pendingScrollIdx, fresh.size() - 1);
+                                    pendingScrollIdx = -1;
+                                }
+                                s.setApps(appList);
+                            }
+                        } else if (pendingScrollIdx >= 0) {
+                            // App list unchanged but a pending index is waiting —
+                            // honour it. setApps wasn't called, so manually request focus.
+                            RecyclingShelfView s = shelf;
+                            if (s != null && !appList.isEmpty()) {
+                                s.requestFocusOnIndex(Math.min(pendingScrollIdx, appList.size() - 1));
+                            }
+                            pendingScrollIdx = -1;
                         }
                     });
                 } else { appsLoading.set(false); }
@@ -1584,7 +1887,7 @@ public class LauncherActivity extends Activity {
             //noinspection deprecation
             addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0), self, seen, out);
         }
-        Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label));
+        Collections.sort(out, (a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label));
         return out;
     }
 
@@ -1633,7 +1936,13 @@ public class LauncherActivity extends Activity {
                     if (pending == null || fb == null) return;
                     for (int i = 0, n = pending.size(); i < n; i++) {
                         RecyclingShelfView.CellView cell = pending.get(i);
-                        if (key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
+                        // Guard: only deliver to a cell that is still attached
+                        // and bound to this package. A cell that's been recycled
+                        // back to the pool has visibility GONE and a null
+                        // boundApp — delivering would invalidate a hidden view
+                        // for nothing.
+                        if (cell.getVisibility() == View.VISIBLE
+                                && key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
                             cell.setIconBitmap(fb);
                     }
                 });
@@ -1665,8 +1974,10 @@ public class LauncherActivity extends Activity {
                     if (destroyed) return;
                     iconInflight.remove(key);
                     for (RecyclingShelfView.CellView cell : fw) {
-                        // Guard: only deliver if cell is still bound to this package
-                        if (key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
+                        // Same guard as preWarmIcon: only deliver if the cell
+                        // is still on screen and still bound to this package.
+                        if (cell.getVisibility() == View.VISIBLE
+                                && key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
                             cell.setIconBitmap(fb);
                     }
                 });
@@ -1681,11 +1992,30 @@ public class LauncherActivity extends Activity {
             AdaptiveIconDrawable aid = (AdaptiveIconDrawable) d;
             int bleed = Math.round(sz * 18f / 108f);
             int full  = sz + bleed * 2;
-            Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(out);
+            Bitmap layers = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(layers);
             if (aid.getBackground() != null) { aid.getBackground().setBounds(-bleed, -bleed, full - bleed, full - bleed); aid.getBackground().draw(c); }
             if (aid.getForeground() != null) { aid.getForeground().setBounds(-bleed, -bleed, full - bleed, full - bleed); aid.getForeground().draw(c); }
-            return clipToCircle(out, sz);
+            // Adaptive icons can ship with a missing or transparent background
+            // layer. Without this check those slipped through with no plate
+            // and ended up as a clipped foreground floating in space — visually
+            // inconsistent with every other icon on the shelf. Run the same
+            // edge-sample heuristic we use for legacy logos and apply a white
+            // plate when needed.
+            if (needsFill(layers, sz)) {
+                Bitmap plated = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+                Canvas pc = new Canvas(plated);
+                pc.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
+                int inset = Math.round(sz * 0.14f);
+                Matrix mx = sMatrixTL.get();
+                float s = (float)(sz - inset * 2) / sz;
+                mx.setScale(s, s);
+                mx.postTranslate(inset, inset);
+                pc.drawBitmap(layers, mx, sDrawPaint);
+                layers.recycle();
+                return clipToCircle(plated, sz);
+            }
+            return clipToCircle(layers, sz);
         }
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
@@ -1786,10 +2116,11 @@ public class LauncherActivity extends Activity {
         if (cell.getWidth() == 0) return;
         cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
 
-        // Cells animate to scaleX/Y = 1.12 on focus around the center pivot.
-        // getLocationOnScreen returns the post-transform VISUAL top-left, so
-        // simply adding cell.getWidth()/2 lands ~6% off-center. The icon's
-        // visual position must be projected via the cell's scale:
+        // Cells animate to scaleX/Y = FOCUS_SCALE on focus around the center
+        // pivot AND translate up by FOCUS_LIFT_DP. getLocationOnScreen returns
+        // the post-transform VISUAL top-left, which already includes both
+        // translation and scale offsets. We just project the icon centre via
+        // the cell's scale to find the visual icon centre:
         //   visualIconCx = visualTopLeftX + cell.getWidth() * scaleX / 2
         //   visualIconCy = visualTopLeftY + cachedIcyOffset * scaleY
         float sx = cell.getScaleX();
@@ -1797,14 +2128,14 @@ public class LauncherActivity extends Activity {
         float cx = (ringCellLoc[0] - ringRootLoc[0]) + cell.getWidth() * sx / 2f;
         float cy = (ringCellLoc[1] - ringRootLoc[1]) + cachedIcyOffset * sy;
         // Keep the ring's own scale in lockstep with the cell so its radius
-        // hugs the focused (1.12x) icon — the previous fixed-size ring sat
-        // INSIDE the focused icon by ~2.5dp, which read as misalignment.
+        // hugs the focused icon — a fixed-size ring sat INSIDE the focused
+        // icon by ~2.5dp, which read as misalignment.
         rv.setScaleX(sx);
         rv.setScaleY(sy);
         float half = ringLayoutSize / 2f;
         rv.setX(cx - half); rv.setY(cy - half);
-        rv.setVisibility(View.VISIBLE);
-        rv.invalidate(); // force redraw in case it was already visible at this position
+        if (rv.getVisibility() != View.VISIBLE) rv.setVisibility(View.VISIBLE);
+        // No invalidate() — setX/setY/setScale already mark the view dirty.
     }
 
     /** Synchronously repositions the ring over the drag-target cell.
@@ -1819,14 +2150,16 @@ public class LauncherActivity extends Activity {
     private void startClock() {
         if (!clockRunning) {
             clockRunning = true;
+            // Fresh start — reset the minute tracker so the very first paint
+            // uses the no-fade cold-render path (no spurious pulse on entry).
+            lastShownMinute = -1;
             long now = System.currentTimeMillis();
-            TextView cv = clockView;
-            if (cv != null) cv.setText(buildClock(now), TextView.BufferType.SPANNABLE);
-            clockHandler.postDelayed(clockTick, CLOCK_MS - (now % CLOCK_MS));
+            tickClock(now);
+            uiHandler.postDelayed(clockTick, CLOCK_MS - (now % CLOCK_MS) + 50L);
         }
     }
 
-    private void stopClock() { clockRunning = false; clockHandler.removeCallbacks(clockTick); }
+    private void stopClock() { clockRunning = false; uiHandler.removeCallbacks(clockTick); }
 
     private void loadWallpaper() {
         String uri = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_WP_URI, null);
@@ -1841,8 +2174,7 @@ public class LauncherActivity extends Activity {
             catch (Exception ignored) {}
             final Bitmap fb = bmp; systemWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
-                ImageView wv = wallpaperView;
-                if (fb != null && wv != null) { recyclePrev(wv); wv.setImageBitmap(fb); }
+                if (fb != null) crossfadeWallpaper(fb);
             });
         });
     }
@@ -1863,34 +2195,77 @@ public class LauncherActivity extends Activity {
             } catch (Exception | OutOfMemoryError ignored) { bmp = null; }
             final Bitmap fb = bmp; userWpLoading.set(false);
             if (!destroyed) runOnUiThread(() -> {
-                ImageView wv = wallpaperView;
-                if (fb != null && wv != null) {
-                    recyclePrev(wv); wv.setImageBitmap(fb);
+                if (fb != null) {
+                    crossfadeWallpaper(fb);
                     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_WP_URI, uri.toString()).apply();
                 } else { showToast("Could not load wallpaper"); loadSystemWallpaper(); }
             });
         });
     }
 
-    private void recyclePrev(ImageView iv) {
-        // Do not recycle the old bitmap — GPU may still hold a reference to the
-        // texture. Setting null drops the ImageView reference; GC handles cleanup.
-        iv.setImageDrawable(null);
+    /** Cross-fade a new wallpaper bitmap onto the screen.
+     *
+     *  Uses two stacked ImageViews. The new bitmap is set on the BACK view
+     *  (alpha 0) then animated to alpha 1 over 360 ms. When the fade ends we
+     *  swap the FRONT/BACK references, hand the old bitmap to the new BACK
+     *  for GC, and reset alphas. The first call (no prior wallpaper) skips
+     *  the fade — we don't want a black-to-image fade on app launch. */
+    private void crossfadeWallpaper(Bitmap fb) {
+        ImageView front = wallpaperFront, back = wallpaperBack;
+        if (front == null || back == null || fb == null) return;
+        boolean coldStart = front.getDrawable() == null;
+        if (coldStart) {
+            front.setImageBitmap(fb);
+            front.setAlpha(1f);
+            return;
+        }
+        // Cancel any in-flight fade so rapid wallpaper changes don't leave
+        // a half-faded back view stuck on screen.
+        back.animate().cancel();
+        back.setImageBitmap(fb);
+        back.setAlpha(0f);
+        back.animate()
+                .alpha(1f)
+                .setDuration(360)
+                .setInterpolator(FOCUS_EASE)
+                .withEndAction(() -> {
+                    if (destroyed) return;
+                    // Promote BACK to FRONT, demote old FRONT to BACK with its
+                    // drawable cleared (next change will populate it).
+                    ImageView newFront = back;
+                    ImageView newBack  = front;
+                    newBack.setImageDrawable(null);
+                    newBack.setAlpha(0f);
+                    // Bring new front to top of z-order so subsequent fades
+                    // composite correctly. bringToFront() invalidates the
+                    // parent so this is enough.
+                    newFront.bringToFront();
+                    wallpaperFront = newFront;
+                    wallpaperBack  = newBack;
+                })
+                .start();
     }
 
     private Bitmap wpDrawable(Drawable d) {
-        // Draw at screen resolution max for best quality — no downsampling.
-        // CENTER_CROP on the ImageView handles display scaling.
-        int w = d.getIntrinsicWidth()  > 0 ? Math.min(d.getIntrinsicWidth(),  screenW * 2) : screenW;
-        int h = d.getIntrinsicHeight() > 0 ? Math.min(d.getIntrinsicHeight(), screenH * 2) : screenH;
+        // Cap the rendered wallpaper bitmap at ONE screen's worth of pixels.
+        // The previous 2x cap meant a 4K panel allocated up to 7680x4320 ARGB
+        // (~127 MB) — guaranteed OOM on any TV with largeHeap=false. The
+        // ImageView is sized to the screen and uses CENTER_CROP, so a bitmap
+        // larger than the display gives no perceptible quality benefit.
+        int sw = screenW, sh = screenH;
+        int w = d.getIntrinsicWidth()  > 0 ? Math.min(d.getIntrinsicWidth(),  sw) : sw;
+        int h = d.getIntrinsicHeight() > 0 ? Math.min(d.getIntrinsicHeight(), sh) : sh;
         Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         d.setBounds(0, 0, w, h); d.draw(new Canvas(bmp));
         return bmp;
     }
 
     private int calcSampleSize(int srcW, int srcH) {
+        // Match wpDrawable's cap: stop subsampling once we're at ~1x the
+        // display. The old 2x cap led to massive bitmaps for high-res photos.
+        int sw = screenW, sh = screenH;
         int ss = 1;
-        while ((srcH / ss > screenH * 2 && srcW / ss > screenW * 2) && ss < 0x8000) ss *= 2;
+        while ((srcH / ss > sh && srcW / ss > sw) && ss < 0x8000) ss *= 2;
         return ss;
     }
 
