@@ -18,11 +18,13 @@ android {
         // launcher does not use any APIs that changed semantics between
         // 35 and 36; the bump is a target-only change.
         targetSdk     = 36
-        // 1.1.0: first public-release-ready cut. Production-readiness pass
-        // (split activity into focused helpers, instrumentation CI on real
-        // emulator, crash logger, SDK 36).
-        versionCode   = 2
-        versionName   = "1.1.0"
+        // 1.1.1: public-release polish. Bug-fix pass over LauncherActivity
+        // (volume/power keys passing through during keymap configuration,
+        // predictive-back closing the overlay/menu, package-manager fault
+        // tolerance) and a license change from MIT to PolyForm Noncommercial
+        // 1.0.0 to reserve future commercial edition rights.
+        versionCode   = 3
+        versionName   = "1.1.1"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

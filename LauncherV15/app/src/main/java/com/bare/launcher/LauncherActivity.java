@@ -171,6 +171,14 @@ public class LauncherActivity extends Activity {
     private RingView           ringView;
     private FrameLayout        root;
     private Toast              currentToast;
+    /** Holds the predictive-back callback registered on Android 13+ so
+     *  {@link #onDestroy()} can unregister it explicitly. The callback is
+     *  the one source of BACK handling on devices that route gestures
+     *  through the platform's OnBackInvokedDispatcher (instead of via
+     *  {@link #dispatchKeyEvent} / {@link #onBackPressed}). It must mirror
+     *  the legacy back-priority chain: keymap overlay → context menu /
+     *  reorder mode → no-op (the launcher is HOME so it never finishes). */
+    private android.window.OnBackInvokedCallback backInvokedCallback;
 
     // Single Handler on the main looper — was previously two (uiHandler +
     // clockHandler). The clock runnable is the only "named" callback; we
@@ -451,11 +459,31 @@ public class LauncherActivity extends Activity {
         loadHiddenApps();
         registerPkgReceiver();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Predictive-back routes BACK gestures here INSTEAD of through
+            // dispatchKeyEvent / onBackPressed on supported devices. The
+            // callback must mirror the legacy back-priority chain so the
+            // user-visible behaviour stays identical regardless of which
+            // delivery path the platform chose.
+            backInvokedCallback = () -> {
+                // 1. Keymap overlay open → close it.
+                FrameLayout ko = keymapOverlay;
+                if (ko != null && ko.getVisibility() == View.VISIBLE) {
+                    if (keymapMode == KEYMAP_MODE_PICKER) { exitAppPicker();   return; }
+                    if (keymapMode == KEYMAP_MODE_HIDE)   { exitHideManager(); return; }
+                    hideKeymapOverlay();
+                    return;
+                }
+                // 2. Context menu / reorder mode open → exit it. The context
+                //    menu lives inside reorder mode in this design, so a
+                //    single exitReorderMode call hides both.
+                RecyclingShelfView s = shelf;
+                if (s != null && s.reorderMode) { s.exitReorderMode(false); return; }
+                // 3. Otherwise no-op: the launcher is HOME — back from the
+                //    home screen should stay home.
+            };
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, () -> {
-                        RecyclingShelfView s = shelf;
-                        if (s != null && s.reorderMode) s.exitReorderMode(false);
-                    });
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    backInvokedCallback);
         }
     }
 
@@ -505,7 +533,16 @@ public class LauncherActivity extends Activity {
         FrameLayout r = root;
         if (r != null) {
             ViewTreeObserver rvto = r.getViewTreeObserver();
-            if (rvto.isAlive()) rvto.addOnGlobalFocusChangeListener(globalFocusListener);
+            if (rvto.isAlive()) {
+                // Dedupe — onResume can fire twice on some TV ROMs without an
+                // intervening onPause during fast configuration transitions.
+                // ViewTreeObserver does NOT dedupe the same listener instance,
+                // so a second registration would leak a strong reference to
+                // this activity through the lambda's outer-this capture and
+                // only one of the two would be removed by onPause.
+                rvto.removeOnGlobalFocusChangeListener(globalFocusListener);
+                rvto.addOnGlobalFocusChangeListener(globalFocusListener);
+            }
         }
     }
 
@@ -536,6 +573,21 @@ public class LauncherActivity extends Activity {
         stopClock();
         uiHandler.removeCallbacksAndMessages(null);
         unregisterPkgReceiver();
+        // Cancel any in-flight toast. Toast.makeText(this, ...) holds a
+        // strong reference to the activity through its TN binder on older
+        // ROMs; without an explicit cancel a 3.5 s "long" toast in flight
+        // when the user navigates away pins the destroyed activity until
+        // the system clears the queue.
+        if (currentToast != null) { currentToast.cancel(); currentToast = null; }
+        // Unregister the predictive-back callback (Android 13+). Conventionally
+        // safe to skip because the dispatcher is owned by the activity, but
+        // unregistering explicitly avoids any chance of a stale callback
+        // surviving across a partial recreate.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backInvokedCallback != null) {
+            try { getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backInvokedCallback); }
+            catch (Throwable ignored) { /* best-effort */ }
+            backInvokedCallback = null;
+        }
         shutdown(iconExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
@@ -1806,10 +1858,30 @@ public class LauncherActivity extends Activity {
         }
 
         private void repositionAttached() {
+            // Per-frame hot path during fling / programmatic scroll. We only
+            // ever change horizontal position here — sizes are fixed at
+            // bind time. Using offsetLeftAndRight (a pure mLeft/mRight
+            // mutation + parent invalidate) skips the full layout pipeline
+            // (onSizeChanged plumbing, requestLayout chains) that
+            // View.layout(l,t,r,b) triggers even when the size hasn't
+            // actually changed. Visibly reduces dropped frames during
+            // fast scrolls on cheap TV ROMs. Cells whose width/height
+            // somehow drifted (defensive — should never happen with the
+            // recycler) are repaired with a full layout call.
+            int top = (getMeasuredHeight() - cellH) / 2;
+            int bot = top + cellH;
             for (int i = 0; i < attached.size(); i++) {
                 int idx = attached.keyAt(i); CellView cv = attached.valueAt(i);
-                int left = cellLeft(idx), top = (getMeasuredHeight() - cellH) / 2;
-                cv.layout(left, top, left + cellW, top + cellH);
+                int targetLeft = cellLeft(idx);
+                if (cv.getWidth() == cellW && cv.getHeight() == cellH
+                        && cv.getTop() == top) {
+                    int curLeft = cv.getLeft();
+                    if (curLeft != targetLeft) {
+                        cv.offsetLeftAndRight(targetLeft - curLeft);
+                    }
+                } else {
+                    cv.layout(targetLeft, top, targetLeft + cellW, bot);
+                }
             }
         }
 
@@ -2354,58 +2426,74 @@ public class LauncherActivity extends Activity {
         if (!appsLoading.compareAndSet(false, true)) return;
         try {
             appExecutor.execute(() -> {
-                List<AppInfo> fresh = queryApps();
-                applyStoredOrder(fresh);
-                if (!destroyed) {
-                    runOnUiThread(() -> {
-                        appsLoading.set(false);
-                        LruCache<String, Bitmap> cache = iconCache;
-                        if (cache != null) {
-                            ArraySet<String> pkgs = new ArraySet<>(fresh.size());
-                            for (AppInfo a : fresh) pkgs.add(a.packageName);
-                            for (AppInfo old : appList)
-                                if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
-                        }
-                        // GC stale hidden-set entries before any other consumer
-                        // sees the new appList — keeps the saved set in sync
-                        // with the actually-installed packages without a
-                        // separate scheduling step.
-                        pruneHiddenApps(fresh);
-                        boolean changed = fresh.size() != appList.size();
-                        if (!changed) {
-                            for (int i = 0; i < fresh.size(); i++) {
-                                if (!fresh.get(i).packageName.equals(appList.get(i).packageName)) {
-                                    changed = true; break;
-                                }
+                List<AppInfo> fresh;
+                try {
+                    fresh = queryApps();
+                    applyStoredOrder(fresh);
+                } catch (Throwable t) {
+                    // Belt-and-braces: PackageManager binder errors, dead
+                    // ResolveInfo, or any other unexpected exception inside
+                    // queryApps / applyStoredOrder must NOT strand the
+                    // appsLoading flag. If we ever leak `true` to the flag
+                    // then every subsequent loadApps() call (including the
+                    // one fired by a package-add broadcast) becomes a silent
+                    // no-op for the lifetime of the activity. Reset the
+                    // flag and bail; logcat surfaces the trace via the
+                    // CrashLogger sink installed in onCreate.
+                    appsLoading.set(false);
+                    return;
+                }
+                if (destroyed) { appsLoading.set(false); return; }
+                final List<AppInfo> freshFinal = fresh;
+                runOnUiThread(() -> {
+                    if (destroyed) { appsLoading.set(false); return; }
+                    appsLoading.set(false);
+                    LruCache<String, Bitmap> cache = iconCache;
+                    if (cache != null) {
+                        ArraySet<String> pkgs = new ArraySet<>(freshFinal.size());
+                        for (AppInfo a : freshFinal) pkgs.add(a.packageName);
+                        for (AppInfo old : appList)
+                            if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
+                    }
+                    // GC stale hidden-set entries before any other consumer
+                    // sees the new appList — keeps the saved set in sync
+                    // with the actually-installed packages without a
+                    // separate scheduling step.
+                    pruneHiddenApps(freshFinal);
+                    boolean changed = freshFinal.size() != appList.size();
+                    if (!changed) {
+                        for (int i = 0; i < freshFinal.size(); i++) {
+                            if (!freshFinal.get(i).packageName.equals(appList.get(i).packageName)) {
+                                changed = true; break;
                             }
                         }
-                        if (changed) {
-                            appList.clear(); appList.addAll(fresh);
-                            RecyclingShelfView s = shelf;
-                            if (s != null) {
-                                // Apply any pending scroll-index restore (cold start path).
-                                // onResume stashes it when appList was empty.
-                                if (pendingScrollIdx >= 0 && !fresh.isEmpty()) {
-                                    s.focusedIndex = Math.min(pendingScrollIdx, fresh.size() - 1);
-                                    pendingScrollIdx = -1;
-                                }
-                                applyShelfApps(s);
+                    }
+                    if (changed) {
+                        appList.clear(); appList.addAll(freshFinal);
+                        RecyclingShelfView s = shelf;
+                        if (s != null) {
+                            // Apply any pending scroll-index restore (cold start path).
+                            // onResume stashes it when appList was empty.
+                            if (pendingScrollIdx >= 0 && !freshFinal.isEmpty()) {
+                                s.focusedIndex = Math.min(pendingScrollIdx, freshFinal.size() - 1);
+                                pendingScrollIdx = -1;
                             }
-                        } else if (pendingScrollIdx >= 0) {
-                            // App list unchanged but a pending index is waiting —
-                            // honour it. setApps wasn't called, so manually request focus.
-                            // Clamp against the shelf's currently-rendered size (not
-                            // appList.size()) — when hide-apps is filtering, the saved
-                            // index could exceed the visible list and requestFocusOnIndex
-                            // would otherwise interpret it as an out-of-bounds wrap.
-                            RecyclingShelfView s = shelf;
-                            if (s != null && !appList.isEmpty()) {
-                                s.requestFocusOnIndex(Math.min(pendingScrollIdx, s.lastIndex()));
-                            }
-                            pendingScrollIdx = -1;
+                            applyShelfApps(s);
                         }
-                    });
-                } else { appsLoading.set(false); }
+                    } else if (pendingScrollIdx >= 0) {
+                        // App list unchanged but a pending index is waiting —
+                        // honour it. setApps wasn't called, so manually request focus.
+                        // Clamp against the shelf's currently-rendered size (not
+                        // appList.size()) — when hide-apps is filtering, the saved
+                        // index could exceed the visible list and requestFocusOnIndex
+                        // would otherwise interpret it as an out-of-bounds wrap.
+                        RecyclingShelfView s = shelf;
+                        if (s != null && !appList.isEmpty()) {
+                            s.requestFocusOnIndex(Math.min(pendingScrollIdx, s.lastIndex()));
+                        }
+                        pendingScrollIdx = -1;
+                    }
+                });
             });
         } catch (java.util.concurrent.RejectedExecutionException e) { appsLoading.set(false); }
     }
@@ -2429,6 +2517,12 @@ public class LauncherActivity extends Activity {
     }
 
     private void addApps(List<ResolveInfo> list, String self, ArraySet<String> seen, List<AppInfo> out) {
+        // PackageManager.queryIntentActivities is documented non-null but
+        // several real-world ROMs (Amazon Fire TV in particular) return
+        // null after a system process restart or a SELinux denial. Without
+        // this guard the for-each below NPEs, which would propagate up
+        // through queryApps and bubble into loadApps' executor body.
+        if (list == null) return;
         for (ResolveInfo ri : list) {
             ActivityInfo ai = ri.activityInfo;
             if (ai == null || ai.packageName.equals(self)) continue;
@@ -2609,6 +2703,7 @@ public class LauncherActivity extends Activity {
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN
                 && event.getRepeatCount() == 0
+                && keyMap.size() > 0
                 && !isCoreNavKey(event.getKeyCode())) {
             String pkg = keyMap.get(event.getKeyCode());
             if (pkg != null) {
@@ -3420,11 +3515,47 @@ public class LauncherActivity extends Activity {
      *  bleed through and trigger their (potentially mapped) shortcut
      *  while the user is configuring shortcuts. */
     private boolean handleKeymapOverlayKey(KeyEvent ev) {
-        if (ev.getAction() != KeyEvent.ACTION_DOWN) return true;  // eat KEY_UP for handled keys
+        if (ev.getAction() != KeyEvent.ACTION_DOWN) {
+            // Eat KEY_UP only for keys we actually consume on KEY_DOWN. Volume,
+            // power, and the system keys below stay routed to the platform so
+            // the user can still control the device while configuring shortcuts.
+            return !isLetThroughKey(ev.getKeyCode());
+        }
         int kc = ev.getKeyCode();
+        // Volume / mute / power / system keys must keep working even while
+        // the overlay is open — the overlay is a launcher-level dropdown,
+        // not a hardware-blocking modal. Returning false here lets
+        // dispatchKeyEvent fall through to super so the platform delivers
+        // the key to its global handler (AudioService, PowerManager, etc.).
+        if (isLetThroughKey(kc)) return false;
         if (keymapMode == KEYMAP_MODE_PICKER) return handleKeymapPickerKey(kc);
         if (keymapMode == KEYMAP_MODE_HIDE)   return handleKeymapHideKey(kc);
         return handleKeymapSlotsKey(kc);
+    }
+
+    /** Keys the keymap overlay must NOT swallow. Volume / mute / power are
+     *  device-control concerns the launcher has no business eating; HOME
+     *  already delivers via the platform's HOME route (we are HOME) so
+     *  letting it through is harmless and consistent. */
+    private static boolean isLetThroughKey(int kc) {
+        switch (kc) {
+            case KeyEvent.KEYCODE_VOLUME_UP:
+            case KeyEvent.KEYCODE_VOLUME_DOWN:
+            case KeyEvent.KEYCODE_VOLUME_MUTE:
+            case KeyEvent.KEYCODE_POWER:
+            case KeyEvent.KEYCODE_SLEEP:
+            case KeyEvent.KEYCODE_WAKEUP:
+            case KeyEvent.KEYCODE_HOME:
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+            case KeyEvent.KEYCODE_MEDIA_PLAY:
+            case KeyEvent.KEYCODE_MEDIA_PAUSE:
+            case KeyEvent.KEYCODE_MEDIA_STOP:
+            case KeyEvent.KEYCODE_MEDIA_NEXT:
+            case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+                return true;
+            default:
+                return false;
+        }
     }
 
     private boolean handleKeymapSlotsKey(int kc) {
