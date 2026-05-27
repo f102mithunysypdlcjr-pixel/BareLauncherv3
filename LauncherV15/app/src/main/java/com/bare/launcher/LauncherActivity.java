@@ -98,6 +98,11 @@ public class LauncherActivity extends Activity {
     // visual jitter on slow TV ROMs). Scale is small enough to read as
     // "selected" without dominating the shelf.
     private static final float  FOCUS_SCALE    = 1.06f;
+    // Toolbar pill (network / mapper / wallpaper) focus pop. Smaller than
+    // FOCUS_SCALE because the toolbar plates are themselves smaller — at
+    // 1.06× the pop read as too aggressive against a 40 dp box. 1.04 is
+    // enough for "this is selected" without dominating the corner.
+    private static final float  BTN_FOCUS_SCALE = 1.04f;
     // Bumped 130 -> 150 ms so the bounce has enough frames to be perceived
     // (at 130 ms the spring barely registered on 60 Hz panels). Still well
     // under the 200 ms threshold where animations start to feel sluggish.
@@ -762,11 +767,35 @@ public class LauncherActivity extends Activity {
         clockView.setLetterSpacing(0.02f);
         root.addView(clockView);
 
-        final int BTN_SZ  = dp(36);
-        final int BTN_VIEW_SZ = dp(52);  // larger to accommodate glow without clipping
-        final int BTN_GAP = dp(6);
-        final int MARG_T  = dp(18);
-        final int MARG_E  = dp(20);
+        // Minimal-pill sizing. Earlier values (52 / 36 / 6 / 18 / 20) read
+        // chunky against the rest of the launcher's "bare" identity; the
+        // smaller cluster sits more quietly in the top-right and gives the
+        // wallpaper more presence. Numbers below are tuned together:
+        //
+        //   BTN_VIEW_SZ — the layer/clip-outline diameter, which also caps
+        //                 the focused plate (drawn at scale 1.0). Picked so
+        //                 (BTN_VIEW_SZ * 1.04 focus-pop) is still well
+        //                 under the dp(48) "minimum touch target" guide
+        //                 only for layout-density purposes; the actual
+        //                 touch hit-test extends across the full layer box.
+        //   BTN_SZ      — semantic glyph hint passed to the factory. The
+        //                 factories don't read it directly (they size from
+        //                 getWidth/getHeight), but it pins intent for any
+        //                 future caller and keeps the public signature.
+        //   BTN_GAP     — tight cluster: 4 dp reads as "set" not "stack".
+        //   MARG_T/MARG_E — top-right corner inset, slightly tighter so
+        //                 the smaller buttons hug the screen edge.
+        //
+        // Color philosophy is unchanged: dark glass idle plate, frosted
+        // near-white focused plate, hairline white rim, glyph inverts on
+        // focus. See AppleStyle.makeBgIdlePaint / makeBgFocusPaint /
+        // makeRimPaint — every paint factory remains untouched, so the
+        // visual vocabulary is identical, just smaller.
+        final int BTN_SZ      = dp(28);
+        final int BTN_VIEW_SZ = dp(40);  // 1.04× focus pop = 41.6 dp; clip outline scales with the view
+        final int BTN_GAP     = dp(4);
+        final int MARG_T      = dp(14);
+        final int MARG_E      = dp(16);
 
         // Top-right toolbar buttons. Layout left-to-right is:
         //   [mapper] [wifi] [wallpaper]
@@ -1176,7 +1205,7 @@ public class LauncherActivity extends Activity {
         v.setOnClickListener(view -> openNetSettings());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.06f : 1f).scaleY(f ? 1.06f : 1f)
+            view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
                     .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
@@ -1249,7 +1278,7 @@ public class LauncherActivity extends Activity {
         v.setOnClickListener(view -> openStoragePicker());
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.06f : 1f).scaleY(f ? 1.06f : 1f)
+            view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
                     .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
@@ -1302,15 +1331,21 @@ public class LauncherActivity extends Activity {
 
                 // 3 horizontal bars with circular knobs at varied positions —
                 // reads as "sliders" / "configure" at a glance. Knob ordering
-                // (25%, 70%, 50%) gives an asymmetric, hand-tuned look that
+                // (28%, 70%, 46%) gives an asymmetric, hand-tuned look that
                 // never collides with the bar end-caps.
+                //
+                // Geometry tuned for the smaller minimal pill: bar length
+                // 1.12× ic (was 1.30) so the bars sit comfortably within
+                // the plate — at 1.30 they nearly touched the rim on the
+                // 40 dp box. Stroke and knob proportions reduced in step
+                // so the symbol stays balanced rather than ink-heavy.
                 float ic       = r * 0.96f;
-                float lineW    = ic * 1.30f;
+                float lineW    = ic * 1.12f;
                 float lineL    = cx - lineW / 2f;
                 float lineR    = cx + lineW / 2f;
-                float strokeW  = ic * 0.18f;
-                float spacing  = ic * 0.55f;
-                float knobR    = strokeW * 0.95f;
+                float strokeW  = ic * 0.16f;
+                float spacing  = ic * 0.50f;
+                float knobR    = strokeW * 0.90f;
                 stroke.setStrokeWidth(strokeW);
                 stroke.setStrokeCap(Paint.Cap.ROUND);
                 stroke.setStrokeJoin(Paint.Join.ROUND);
@@ -1335,7 +1370,7 @@ public class LauncherActivity extends Activity {
         });
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
-            view.animate().scaleX(f ? 1.06f : 1f).scaleY(f ? 1.06f : 1f)
+            view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
                     .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
@@ -2446,52 +2481,64 @@ public class LauncherActivity extends Activity {
                 if (destroyed) { appsLoading.set(false); return; }
                 final List<AppInfo> freshFinal = fresh;
                 runOnUiThread(() -> {
-                    if (destroyed) { appsLoading.set(false); return; }
-                    appsLoading.set(false);
-                    LruCache<String, Bitmap> cache = iconCache;
-                    if (cache != null) {
-                        ArraySet<String> pkgs = new ArraySet<>(freshFinal.size());
-                        for (AppInfo a : freshFinal) pkgs.add(a.packageName);
-                        for (AppInfo old : appList)
-                            if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
-                    }
-                    // GC stale hidden-set entries before any other consumer
-                    // sees the new appList — keeps the saved set in sync
-                    // with the actually-installed packages without a
-                    // separate scheduling step.
-                    pruneHiddenApps(freshFinal);
-                    boolean changed = freshFinal.size() != appList.size();
-                    if (!changed) {
-                        for (int i = 0; i < freshFinal.size(); i++) {
-                            if (!freshFinal.get(i).packageName.equals(appList.get(i).packageName)) {
-                                changed = true; break;
+                    // Wrap the whole UI body in try/finally so a faulting
+                    // helper (pruneHiddenApps prefs write, applyShelfApps,
+                    // requestFocusOnIndex) cannot strand the appsLoading
+                    // flag at `true`. Belt-and-braces companion to the
+                    // background-side guard above: if either path fails,
+                    // the flag converges back to false and the next
+                    // package-broadcast triggers a fresh refresh instead
+                    // of becoming a silent no-op for the activity's
+                    // lifetime.
+                    try {
+                        if (destroyed) return;
+                        LruCache<String, Bitmap> cache = iconCache;
+                        if (cache != null) {
+                            ArraySet<String> pkgs = new ArraySet<>(freshFinal.size());
+                            for (AppInfo a : freshFinal) pkgs.add(a.packageName);
+                            for (AppInfo old : appList)
+                                if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
+                        }
+                        // GC stale hidden-set entries before any other consumer
+                        // sees the new appList — keeps the saved set in sync
+                        // with the actually-installed packages without a
+                        // separate scheduling step.
+                        pruneHiddenApps(freshFinal);
+                        boolean changed = freshFinal.size() != appList.size();
+                        if (!changed) {
+                            for (int i = 0; i < freshFinal.size(); i++) {
+                                if (!freshFinal.get(i).packageName.equals(appList.get(i).packageName)) {
+                                    changed = true; break;
+                                }
                             }
                         }
-                    }
-                    if (changed) {
-                        appList.clear(); appList.addAll(freshFinal);
-                        RecyclingShelfView s = shelf;
-                        if (s != null) {
-                            // Apply any pending scroll-index restore (cold start path).
-                            // onResume stashes it when appList was empty.
-                            if (pendingScrollIdx >= 0 && !freshFinal.isEmpty()) {
-                                s.focusedIndex = Math.min(pendingScrollIdx, freshFinal.size() - 1);
-                                pendingScrollIdx = -1;
+                        if (changed) {
+                            appList.clear(); appList.addAll(freshFinal);
+                            RecyclingShelfView s = shelf;
+                            if (s != null) {
+                                // Apply any pending scroll-index restore (cold start path).
+                                // onResume stashes it when appList was empty.
+                                if (pendingScrollIdx >= 0 && !freshFinal.isEmpty()) {
+                                    s.focusedIndex = Math.min(pendingScrollIdx, freshFinal.size() - 1);
+                                    pendingScrollIdx = -1;
+                                }
+                                applyShelfApps(s);
                             }
-                            applyShelfApps(s);
+                        } else if (pendingScrollIdx >= 0) {
+                            // App list unchanged but a pending index is waiting —
+                            // honour it. setApps wasn't called, so manually request focus.
+                            // Clamp against the shelf's currently-rendered size (not
+                            // appList.size()) — when hide-apps is filtering, the saved
+                            // index could exceed the visible list and requestFocusOnIndex
+                            // would otherwise interpret it as an out-of-bounds wrap.
+                            RecyclingShelfView s = shelf;
+                            if (s != null && !appList.isEmpty()) {
+                                s.requestFocusOnIndex(Math.min(pendingScrollIdx, s.lastIndex()));
+                            }
+                            pendingScrollIdx = -1;
                         }
-                    } else if (pendingScrollIdx >= 0) {
-                        // App list unchanged but a pending index is waiting —
-                        // honour it. setApps wasn't called, so manually request focus.
-                        // Clamp against the shelf's currently-rendered size (not
-                        // appList.size()) — when hide-apps is filtering, the saved
-                        // index could exceed the visible list and requestFocusOnIndex
-                        // would otherwise interpret it as an out-of-bounds wrap.
-                        RecyclingShelfView s = shelf;
-                        if (s != null && !appList.isEmpty()) {
-                            s.requestFocusOnIndex(Math.min(pendingScrollIdx, s.lastIndex()));
-                        }
-                        pendingScrollIdx = -1;
+                    } finally {
+                        appsLoading.set(false);
                     }
                 });
             });
@@ -2527,7 +2574,15 @@ public class LauncherActivity extends Activity {
             ActivityInfo ai = ri.activityInfo;
             if (ai == null || ai.packageName.equals(self)) continue;
             if (!seen.add(ai.packageName + '/' + ai.name)) continue;
-            out.add(new AppInfo(ai.packageName, ri.loadLabel(pm).toString(),
+            // ri.loadLabel() returns null on stripped-down Fire-TV ROMs that
+            // ship apps without a recoverable user-visible label (typically
+            // OEM packages with broken AndroidManifest <application> labels).
+            // Skip rather than NPE on .toString() — these apps would render
+            // as a blank cell anyway, and we'd rather let the rest of the
+            // shelf populate cleanly.
+            CharSequence rawLabel = ri.loadLabel(pm);
+            String label = rawLabel != null ? rawLabel.toString() : ai.packageName;
+            out.add(new AppInfo(ai.packageName, label,
                     new ComponentName(ai.packageName, ai.name), ri));
         }
     }
@@ -3891,8 +3946,16 @@ public class LauncherActivity extends Activity {
             iconExecutor.execute(() -> {
                 if (destroyed) return;
                 Bitmap bmp = null;
-                try { bmp = processIcon(app.ri.loadIcon(pm)); if (bmp != null) iconCache.put(key, bmp); }
-                catch (OutOfMemoryError | RuntimeException ignored) {}
+                try {
+                    // ResolveInfo.loadIcon throws on a few stripped-down TV ROMs
+                    // when the ResolveInfo was returned with null activityInfo
+                    // fields — caught below as RuntimeException. Guarding `ri`
+                    // explicitly makes the intent obvious and lets the rest of
+                    // the pipeline run for installed-but-iconless apps.
+                    Drawable d = app.ri != null ? app.ri.loadIcon(pm) : null;
+                    bmp = processIcon(d);
+                    if (bmp != null) iconCache.put(key, bmp);
+                } catch (OutOfMemoryError | RuntimeException ignored) {}
                 if (destroyed) return;
                 final Bitmap fb = bmp;
                 runOnUiThread(() -> {
@@ -3931,13 +3994,22 @@ public class LauncherActivity extends Activity {
             iconExecutor.execute(() -> {
                 if (destroyed) return;
                 Bitmap bmp = null;
-                try { bmp = processIcon(app.ri.loadIcon(pm)); if (bmp != null) iconCache.put(key, bmp); }
-                catch (OutOfMemoryError | RuntimeException ignored) {}
+                try {
+                    // Same `ri` null-guard as preWarmIcon — see the comment there.
+                    Drawable d = app.ri != null ? app.ri.loadIcon(pm) : null;
+                    bmp = processIcon(d);
+                    if (bmp != null) iconCache.put(key, bmp);
+                } catch (OutOfMemoryError | RuntimeException ignored) {}
                 if (destroyed) return;
                 final Bitmap fb = bmp;
                 runOnUiThread(() -> {
                     if (destroyed) return;
                     iconInflight.remove(key);
+                    // Deliver only when we got a bitmap. A null result still has
+                    // to clear the inflight entry (above) so the next bind for
+                    // the same package can retry; the placeholder ring stays
+                    // until a future pkg broadcast / cache refresh succeeds.
+                    if (fb == null) return;
                     for (RecyclingShelfView.CellView cell : fw) {
                         // Same guard as preWarmIcon: only deliver if the cell
                         // is still on screen and still bound to this package.

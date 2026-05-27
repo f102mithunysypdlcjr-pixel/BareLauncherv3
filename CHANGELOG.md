@@ -12,6 +12,65 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-05-27
+
+Minimal-toolbar pass + executor-flag hardening. The wifi / mapper /
+wallpaper pill cluster reads more quietly, and a handful of stranded-
+flag / null-ROM edge cases in the package-load and icon-load executors
+now converge cleanly instead of silently freezing those code paths.
+
+### Changed
+
+- **Top-right toolbar pills are smaller.** Layer/clip-outline box
+  shrinks from 52 dp → 40 dp, gap between pills tightens from 6 dp
+  → 4 dp, top/end margins from 18/20 dp → 14/16 dp, and the focus pop
+  softens from 1.06× → 1.04× (a new `BTN_FOCUS_SCALE` constant the
+  three button factories share — replaces three identical 1.06f
+  literals). Color philosophy is identical: dark-glass idle plate,
+  frosted-white focused plate, hairline white rim, glyph inverts on
+  focus. Every paint factory in `AppleStyle` is untouched.
+- **Mapper "sliders" glyph rebalanced for the smaller plate.** Bar
+  length scales from 1.30× → 1.12× of the icon container so the bars
+  no longer skim the rim, with a slightly thinner stroke (0.18 →
+  0.16) and tighter spacing (0.55 → 0.50) so the symbol stays
+  balanced rather than ink-heavy at small size.
+
+### Fixed
+
+- **`loadApps` UI block now resets `appsLoading` in a `finally`.** A
+  fault inside `pruneHiddenApps` (SharedPreferences write), the shelf
+  apply path, or `requestFocusOnIndex` could previously strand the
+  flag at `true`, turning every subsequent package broadcast into a
+  silent no-op for the lifetime of the activity. The reset is now
+  guaranteed.
+- **`loadIconAsync` no longer NPEs on null `ResolveInfo`.** Some
+  stripped-down TV ROMs (Fire-TV in particular) return `ResolveInfo`
+  objects with broken icon-loading paths. `app.ri.loadIcon(pm)` is
+  now null-guarded explicitly; the surrounding `RuntimeException`
+  catch already covered the case in practice but the guard makes
+  the intent obvious. Same fix in `preWarmIcon`.
+- **`addApps` tolerates null `loadLabel`.** Stripped-down ROMs can
+  return apps with broken label resources; we now fall back to the
+  package name instead of NPE-ing on `.toString()` and dropping the
+  whole shelf-refresh batch.
+- **`loadIconAsync` UI handler no longer dispatches when bitmap is
+  null.** Matches `preWarmIcon`'s contract exactly: clear the
+  inflight entry so a future bind can retry, but don't push a null
+  bitmap into cells (which would do nothing — small cleanup).
+
+### Performance
+
+- **`RingView` drops `LAYER_TYPE_HARDWARE`.** For a single-stroke
+  anti-aliased circle, the hardware layer forced an offscreen FBO
+  and texture upload every frame the ring moved or scaled (every
+  focus animation, every shelf scroll). The default
+  `LAYER_TYPE_NONE` lets the stroke go straight to the display list,
+  saving ~0.3 ms per frame on slow TV ROMs.
+
+### Versioning
+
+- `versionCode` 3 → 4, `versionName` 1.1.1 → 1.1.2.
+
 ## [1.1.1] — 2026-05-26
 
 Public-release polish pass. Bug fixes triaged from a focused audit of

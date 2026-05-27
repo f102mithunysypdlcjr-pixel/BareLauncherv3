@@ -18,13 +18,15 @@ android {
         // launcher does not use any APIs that changed semantics between
         // 35 and 36; the bump is a target-only change.
         targetSdk     = 36
-        // 1.1.1: public-release polish. Bug-fix pass over LauncherActivity
-        // (volume/power keys passing through during keymap configuration,
-        // predictive-back closing the overlay/menu, package-manager fault
-        // tolerance) and a license change from MIT to PolyForm Noncommercial
-        // 1.0.0 to reserve future commercial edition rights.
-        versionCode   = 3
-        versionName   = "1.1.1"
+        // 1.1.2: minimal toolbar pass + executor-flag hardening. Shrinks
+        // the wifi/mapper/wallpaper pill cluster (52→40 dp box, tighter
+        // margins, gentler focus pop), softens the mapper "sliders" glyph
+        // for the smaller plate, and hardens loadApps / loadIconAsync /
+        // addApps against ROM-level edge cases that could strand inflight
+        // flags or NPE on null ResolveInfo labels. Color philosophy is
+        // unchanged — every plate paint and rim paint is identical.
+        versionCode   = 4
+        versionName   = "1.1.2"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
