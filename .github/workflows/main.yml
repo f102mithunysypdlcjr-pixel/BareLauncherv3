@@ -343,27 +343,54 @@ jobs:
         id: notes
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"          # e.g. v1.1.0
-          VER="${TAG#v}"                    # e.g. 1.1.0
+          TAG="${GITHUB_REF_NAME}"          # e.g. v1.1.0  or  v1.1.3-pre1
+          VER="${TAG#v}"                    # e.g. 1.1.0   or  1.1.3-pre1
 
-          # Pull everything between `## [<VER>]` and the next `## [` heading.
-          awk -v ver="$VER" '
-            BEGIN { found = 0 }
-            /^## \[/ {
-              if (found) exit
-              if ($0 ~ "^## \\[" ver "\\]") { found = 1; print; next }
-            }
-            found { print }
-          ' CHANGELOG.md > release-notes.md
+          # Semver pre-release identifier: anything with a hyphen after the
+          # numeric core (v1.2.3-pre1, v1.2.3-rc.1, v1.2.3-beta) is treated
+          # as a GitHub "prerelease". Plain v1.2.3 is a stable release.
+          PRERELEASE="false"
+          case "$VER" in
+            *-*) PRERELEASE="true" ;;
+          esac
+
+          # Try to pull `## [<VER>]` ... up to the next `## [` heading from
+          # CHANGELOG.md. If no matching section exists (e.g. very first
+          # release before the changelog has caught up), we fall back to
+          # auto-generated release notes below rather than failing the
+          # whole pipeline.
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VER" '
+              BEGIN { found = 0 }
+              /^## \[/ {
+                if (found) exit
+                if ($0 ~ "^## \\[" ver "\\]") { found = 1; print; next }
+              }
+              found { print }
+            ' CHANGELOG.md > release-notes.md
+          else
+            : > release-notes.md
+          fi
 
           if [ ! -s release-notes.md ]; then
-            echo "::error::Tag ${TAG} does not match any '## [${VER}]' section in CHANGELOG.md."
-            exit 1
+            echo "::notice::No '## [${VER}]' section in CHANGELOG.md — using fallback release notes."
+            {
+              if [ "$PRERELEASE" = "true" ]; then
+                echo "Pre-release of BareLauncher ${VER}."
+                echo
+                echo "Early build for testing. Install instructions are in the [README](../../#install)."
+              else
+                echo "Release of BareLauncher ${VER}."
+                echo
+                echo "Install instructions are in the [README](../../#install)."
+              fi
+            } > release-notes.md
           fi
 
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
 
-          echo "── release notes ───────────────────────────────────────"
+          echo "── release notes (prerelease=${PRERELEASE}) ───────────"
           cat release-notes.md
           echo "── end release notes ───────────────────────────────────"
 
@@ -383,6 +410,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           VER: ${{ steps.notes.outputs.version }}
+          PRERELEASE: ${{ steps.notes.outputs.prerelease }}
         run: |
           set -euo pipefail
           # Idempotency: if a Release for this tag already exists (e.g. the
@@ -392,8 +420,13 @@ jobs:
             echo "Release $TAG already exists — uploading assets with --clobber."
             gh release upload "$TAG" dist/BareLauncher-*.apk --clobber
           else
+            PRE_FLAG=()
+            if [ "$PRERELEASE" = "true" ]; then
+              PRE_FLAG=(--prerelease)
+            fi
             gh release create "$TAG" \
               --title "BareLauncher $VER" \
               --notes-file release-notes.md \
+              "${PRE_FLAG[@]}" \
               dist/BareLauncher-*.apk
           fi
