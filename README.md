@@ -3,14 +3,15 @@
 > The launcher Android TV deserves.
 
 A minimal, fast, ad-free, telemetry-free launcher for Android TV, Google
-TV, and Fire TV. Built for low-end TV boxes and old TVs where every
+TV, and Fire TV. Built for TV boxes and TVs where every
 megabyte of RAM and every dropped frame is felt.
 
 - Pure Java. Zero runtime dependencies in the production APK.
 - No ads. No telemetry. No trackers. No analytics. No background services.
 - Smooth D-pad navigation, optimised scrolling, instant app launching.
 - Hide apps, reorder apps, and remap remote shortcut keys (Red / Green /
-  Yellow / Blue / Menu / Subtitle) without an Accessibility Service.
+  Yellow / Blue / Menu / Subtitle) without an Accessibility Service (works only when you are on home screen).
+  
 
 ---
 
@@ -30,14 +31,11 @@ There is no Play Store / Amazon Appstore listing. Sideload only.
 ### Set BareLauncher as the default launcher
 
 BareLauncher does not use Accessibility Services to override the stock
-launcher. To make it your default home app, use a third-party launcher
-chooser:
+launcher. To make it your default home app, use Launcher Manager:
 
 - **Launcher Manager (XDA)** – works on Google TV, Android TV, and Fire
-  TV Stick.
-- **Settings → Apps → Default apps → Home app** – on Android TV / phones
-  where the OEM exposes this option directly.
-
+  TV Stick.(Recommended)
+- **Button-mapper** - to map home button for bareLauncher.
 ### Supported platforms
 
 - Android TV / Google TV (API 30 / Android 11 and newer)
@@ -46,7 +44,27 @@ chooser:
   D-pad / remote-first navigation.
 
 ---
+## Performance & privacy posture
 
+- One-activity, programmatic-UI design — no XML inflation overhead, no
+  fragments.
+- Zero external dependencies in the shipped APK (no AndroidX, no
+  Material, no appcompat, no Kotlin runtime).
+- Per-tick allocation hygiene in the clock, icon pipeline, and shelf
+  recycler so steady-state operation produces almost no GC pressure.
+- No background services, no broadcast receivers staying alive when the
+  launcher is not the foreground app, no scheduled jobs.
+- No internet permission. No telemetry endpoint. No crash reporting SDK
+  (a tiny on-device log at `<internalFiles>/crash.log` is the only
+  diagnostic sink — see `CrashLogger.java`).
+- ProGuard / R8 in full mode, resource shrinking on, ABI cap to
+  `armeabi-v7a` + `arm64-v8a`.
+
+The full set of techniques the codebase uses to stay fast on cheap TV
+ROMs is documented in `CHANGELOG.md` and inline javadoc on each helper
+class (`IconRenderer`, `ClockFormatter`, `WallpaperController`).
+
+---
 ## Build from source
 
 Requirements:
@@ -106,25 +124,7 @@ BareLauncherv3/
 
 ---
 
-## Performance & privacy posture
 
-- One-activity, programmatic-UI design — no XML inflation overhead, no
-  fragments.
-- Zero external dependencies in the shipped APK (no AndroidX, no
-  Material, no appcompat, no Kotlin runtime).
-- Per-tick allocation hygiene in the clock, icon pipeline, and shelf
-  recycler so steady-state operation produces almost no GC pressure.
-- No background services, no broadcast receivers staying alive when the
-  launcher is not the foreground app, no scheduled jobs.
-- No internet permission. No telemetry endpoint. No crash reporting SDK
-  (a tiny on-device log at `<internalFiles>/crash.log` is the only
-  diagnostic sink — see `CrashLogger.java`).
-- ProGuard / R8 in full mode, resource shrinking on, ABI cap to
-  `armeabi-v7a` + `arm64-v8a`.
-
-The full set of techniques the codebase uses to stay fast on cheap TV
-ROMs is documented in `CHANGELOG.md` and inline javadoc on each helper
-class (`IconRenderer`, `ClockFormatter`, `WallpaperController`).
 
 ---
 
