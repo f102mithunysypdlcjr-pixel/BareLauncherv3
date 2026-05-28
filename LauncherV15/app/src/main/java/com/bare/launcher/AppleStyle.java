@@ -1,8 +1,14 @@
 package com.bare.launcher;
 
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorFilter;
 import android.graphics.Outline;
 import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.drawable.Drawable;
 import android.view.View;
 import android.view.ViewOutlineProvider;
 
@@ -144,4 +150,48 @@ final class AppleStyle {
      *  literals across their {@code onDraw}. */
     static final int SYMBOL_FOCUSED = 0xFF0F0F12;
     static final int SYMBOL_IDLE    = Color.WHITE;
+
+    /**
+     * Pill background drawable that mirrors the toolbar buttons' idle plate
+     * (dark glass + hairline rim) but as a rounded rectangle whose radius
+     * is half the bound height — i.e. a true capsule that hugs whatever
+     * text or content sits inside it.
+     *
+     * <p>Used by the home-screen clock so its visual vocabulary matches the
+     * top-right toolbar pills (WiFi, mapper, wallpaper). Same fill colour,
+     * same 1 dp rim, same 0x33FFFFFF rim alpha — only the corner radius
+     * differs (full capsule vs perfect circle).
+     *
+     * <p>Each call returns a fresh {@link Drawable} because Android's
+     * {@code Drawable} state machine (bounds, alpha, level) is per-instance.
+     * The two paint factories return their own fresh paints already, so
+     * mutating one drawable's colour-filter or alpha cannot leak into
+     * another.
+     */
+    static Drawable makePillBackground(float density) {
+        final Paint bg  = makeBgIdlePaint();
+        final Paint rim = makeRimPaint(density);
+        final RectF rect = new RectF();
+        return new Drawable() {
+            @Override public void draw(Canvas c) {
+                Rect b = getBounds();
+                if (b.isEmpty()) return;
+                float r = b.height() / 2f;
+                rect.set(b.left, b.top, b.right, b.bottom);
+                c.drawRoundRect(rect, r, r, bg);
+                // Inset by half a stroke so the rim is rendered fully
+                // inside the bounds (matches the inner-rim placement of
+                // the circular plates).
+                float inset = rim.getStrokeWidth() / 2f;
+                rect.inset(inset, inset);
+                float ir = Math.max(0f, r - inset);
+                c.drawRoundRect(rect, ir, ir, rim);
+            }
+            @Override public void setAlpha(int a) { bg.setAlpha(a); rim.setAlpha(a); invalidateSelf(); }
+            @Override public void setColorFilter(ColorFilter cf) {
+                bg.setColorFilter(cf); rim.setColorFilter(cf); invalidateSelf();
+            }
+            @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+        };
+    }
 }

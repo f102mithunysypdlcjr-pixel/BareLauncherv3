@@ -18,15 +18,19 @@ android {
         // launcher does not use any APIs that changed semantics between
         // 35 and 36; the bump is a target-only change.
         targetSdk     = 36
-        // 1.1.2: minimal toolbar pass + executor-flag hardening. Shrinks
-        // the wifi/mapper/wallpaper pill cluster (52→40 dp box, tighter
-        // margins, gentler focus pop), softens the mapper "sliders" glyph
-        // for the smaller plate, and hardens loadApps / loadIconAsync /
-        // addApps against ROM-level edge cases that could strand inflight
-        // flags or NPE on null ResolveInfo labels. Color philosophy is
-        // unchanged — every plate paint and rim paint is identical.
-        versionCode   = 4
-        versionName   = "1.1.2"
+        // 1.1.3: clock pill + wifi long-press + wallpaper layer hygiene.
+        // The home-screen clock now wears the same dark-glass plate as
+        // the toolbar pills (capsule shape, 1 dp white rim) and shrinks
+        // from 44 sp + heavy shadow to a compact 22 sp pill that sits
+        // symmetric to the toolbar across the top edge. WiFi pill gains
+        // a long-press shortcut to general system Settings — short click
+        // still opens WiFi/network settings exactly as before. Wallpaper
+        // ImageViews drop their permanent LAYER_TYPE_HARDWARE which was
+        // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
+        // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
+        // that could survive onDestroy() in the looper queue.
+        versionCode   = 5
+        versionName   = "1.1.3"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

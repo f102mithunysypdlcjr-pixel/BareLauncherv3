@@ -596,6 +596,16 @@ public class LauncherActivity extends Activity {
         shutdown(iconExecutor); shutdown(appExecutor);
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
+        // Drop any deferred package-reload runnable that may still be
+        // queued on the shelf's looper. The shelf field gets nulled below
+        // and {@link #loadApps()} short-circuits on {@code destroyed}, so
+        // this is hygiene rather than a hard correctness fix — but a
+        // strayed runnable holds an implicit reference to the activity
+        // (it's a method-reference: this::loadApps) until the looper
+        // drains it, which on a slow ROM can be several hundred ms after
+        // the user navigates away.
+        RecyclingShelfView sd = shelf;
+        if (sd != null) sd.removeCallbacks(pkgReloadRunnable);
         // Wallpaper teardown — controller recycles its own bitmaps and
         // clears the ImageView drawables. Keeps the activity from having
         // to know about wallpaper memory hygiene at all.
@@ -713,7 +723,16 @@ public class LauncherActivity extends Activity {
         wallpaperBack = new ImageView(this);
         wallpaperBack.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
         wallpaperBack.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        wallpaperBack.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // No persistent hardware layer here. Earlier versions forced
+        // LAYER_TYPE_HARDWARE so the cross-fade alpha animation got an
+        // offscreen FBO — but that allocates a screen-sized GPU buffer
+        // (~8 MB at 1080p, ~32 MB at 4K) for both ImageViews continuously,
+        // for the sole benefit of a 200 ms transition. An ImageView is a
+        // leaf with a single drawable: alpha applies directly via the
+        // BitmapDrawable's paint, so software/none-layer alpha is just
+        // as fast and frees ~16 MB / ~64 MB of GPU memory for everything
+        // else (icon textures, app thumbnails, system overlays).
+        wallpaperBack.setLayerType(View.LAYER_TYPE_NONE, null);
         wallpaperBack.setAlpha(0f);
         // Stack order: BACK is added first (drawn below), FRONT on top. We
         // cross-fade by raising BACK's alpha to 1 then swapping references
@@ -723,7 +742,8 @@ public class LauncherActivity extends Activity {
         wallpaperFront = new ImageView(this);
         wallpaperFront.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
         wallpaperFront.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        wallpaperFront.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // See LAYER_TYPE_NONE rationale on wallpaperBack above.
+        wallpaperFront.setLayerType(View.LAYER_TYPE_NONE, null);
         root.addView(wallpaperFront);
 
         // Stand up the wallpaper subsystem now that both ImageViews are
@@ -749,21 +769,42 @@ public class LauncherActivity extends Activity {
         root.addView(shelf);
 
         clockView = new TextView(this);
-        clockView.setShadowLayer(dp(14), 0, dp(3), 0xCC000000);
-        clockView.setPadding(dp(22), dp(11), dp(22), dp(11));
+        // Clock now wears the same visual vocabulary as the top-right toolbar
+        // pills: dark-glass plate + 1 dp white rim, drawn as a capsule
+        // (round-rect with radius = height/2). The plate provides clean
+        // separation from the wallpaper, so the heavy 14 dp drop shadow that
+        // used to sit behind the digits is gone — it was only there because
+        // the bare digits had no other contrast. With a real plate the
+        // shadow becomes redundant ink that smudges the look on bright
+        // wallpapers.
+        clockView.setBackground(AppleStyle.makePillBackground(density));
+        // Symmetric padding gives the capsule a balanced "premium" feel.
+        // Vertical inset matches the toolbar plates' visual weight; the
+        // resulting pill height (~ dp(40)) lines up with BTN_VIEW_SZ so
+        // the clock and the toolbar buttons sit on the same horizontal
+        // baseline at the top of the screen.
+        clockView.setPadding(dp(16), dp(7), dp(16), dp(7));
         clockView.setIncludeFontPadding(false);
         clockView.setContentDescription(getString(R.string.cd_clock));
         clockView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
         clkLp.gravity = Gravity.TOP | Gravity.START;
-        clkLp.setMarginStart(dp(32));
-        clkLp.topMargin = dp(24);
+        // Mirror the toolbar's MARG_E (dp 16) on the start side, and use
+        // the same MARG_T (dp 14) on top, so the left-edge clock and the
+        // right-edge toolbar are visually symmetric.
+        clkLp.setMarginStart(dp(16));
+        clkLp.topMargin = dp(14);
         clockView.setLayoutParams(clkLp);
         clockView.setTextColor(Color.WHITE);
-        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
-        // Heavy base typeface — time digits read thick. AM/PM is overridden
-        // back to sans-serif-thin via a TypefaceSpan in {@link ClockFormatter}.
-        clockView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        // Compact 22 sp — was 44 sp. The plate frames the digits now,
+        // so the text doesn't need to carry all the visual weight on
+        // its own. 22 sp keeps the time legible from across a TV room
+        // while sitting quietly in the corner.
+        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 22);
+        // sans-serif-medium reads as confident without the chunkiness
+        // of BOLD inside a smaller pill. AM/PM still drops to thin via
+        // the TypefaceSpan in {@link ClockFormatter}.
+        clockView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         clockView.setLetterSpacing(0.02f);
         root.addView(clockView);
 
@@ -1203,6 +1244,16 @@ public class LauncherActivity extends Activity {
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
+        // Long-press → general system Settings. Discoverable via the
+        // standard "press and hold" gesture (TV remote: hold DPAD_CENTER;
+        // touch: long-press). The short click still opens WiFi/network
+        // settings as before — long-press is purely an additional
+        // shortcut, never replaces the primary action.
+        v.setOnLongClickListener(view -> {
+            view.playSoundEffect(SoundEffectConstants.CLICK);
+            openSystemSettings();
+            return true;
+        });
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
             view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
@@ -1212,10 +1263,14 @@ public class LauncherActivity extends Activity {
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
-                case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A:
-                    view.playSoundEffect(SoundEffectConstants.CLICK);
-                    view.performClick(); return true;
+                // DPAD_CENTER / ENTER / BUTTON_A intentionally NOT intercepted
+                // here. Letting them fall through to the platform's default
+                // View key handling preserves long-press detection (which
+                // fires our OnLongClickListener after the system long-press
+                // timeout) while still triggering the short OnClickListener
+                // on key UP. The other toolbar buttons keep their snappier
+                // ACTION_DOWN-fires-click behaviour because they don't
+                // expose a long-press action.
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                     RecyclingShelfView sd = shelf; if (sd != null) sd.requestFocusOnIndex(0); return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -1442,6 +1497,19 @@ public class LauncherActivity extends Activity {
             catch (Exception ignored) {}
         }
         showToast(getString(R.string.toast_no_network_settings));
+    }
+
+    /** Open the device's general system Settings. Bound to the WiFi
+     *  pill's long-press so the most-needed-second-tier shortcut is
+     *  one gesture away from the most-used first-tier shortcut. Falls
+     *  back to a toast if the device has no Settings activity (very
+     *  unusual, mostly stripped Android Auto / kiosk ROMs). */
+    private void openSystemSettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception ignored) {
+            showToast(getString(R.string.toast_no_settings));
+        }
     }
 
     final class RecyclingShelfView extends ViewGroup {
