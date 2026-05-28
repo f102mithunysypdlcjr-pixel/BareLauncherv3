@@ -14,35 +14,43 @@
 
 ---
 
-BareLauncher is a **fast, lightweight, minimal** Android TV launcher for people who just want a clean home screen — without ads, telemetry, recommendations, or unnecessary bloat.
+BareLauncher is a minimal Android TV launcher for people who just want a clean home screen — without ads, telemetry, sponsored content, or recommendations they never asked for.
 
-Most TV launchers today are heavy, slow, internet-dependent, and filled with sponsored content. BareLauncher brings back a simple, performance-focused TV experience.
+Most TV launchers today are heavy, network-dependent, and crowded with promotions. BareLauncher brings back a quiet, performance-focused TV home screen.
 
-> **fast navigation · clean UI · low memory · zero distractions**
+> **instant navigation · clean UI · low memory · zero distractions**
 
 ## Screenshots
 
-<sub><i>Swipe / scroll horizontally →</i></sub>
+<sub><i>Click any image to open full size · scroll horizontally →</i></sub>
 
 <div align="center">
 
 <table>
   <tr>
     <td align="center">
-      <img src="https://github.com/user-attachments/assets/48a3ac80-d467-47ba-b264-838db271ceaf" alt="BareLauncher home screen" width="480" height="270" loading="lazy" />
+      <a href="https://github.com/user-attachments/assets/48a3ac80-d467-47ba-b264-838db271ceaf" target="_blank" rel="noopener">
+        <img src="https://github.com/user-attachments/assets/48a3ac80-d467-47ba-b264-838db271ceaf" alt="BareLauncher home screen" width="480" loading="lazy" />
+      </a>
       <br/><sub><b>Home</b></sub>
     </td>
     <td align="center">
-      <img src="https://github.com/user-attachments/assets/5b402ada-94e0-4d23-a890-0e3528ca3714" alt="BareLauncher app drawer" width="480" height="270" loading="lazy" />
+      <a href="https://github.com/user-attachments/assets/5b402ada-94e0-4d23-a890-0e3528ca3714" target="_blank" rel="noopener">
+        <img src="https://github.com/user-attachments/assets/5b402ada-94e0-4d23-a890-0e3528ca3714" alt="BareLauncher app drawer" width="480" loading="lazy" />
+      </a>
       <br/><sub><b>App drawer</b></sub>
     </td>
     <td align="center">
-      <img src="https://github.com/user-attachments/assets/f07f346a-eb6f-462a-b168-5dbf6160c164" alt="BareLauncher reorder & manage" width="480" height="270" loading="lazy" />
+      <a href="https://github.com/user-attachments/assets/f07f346a-eb6f-462a-b168-5dbf6160c164" target="_blank" rel="noopener">
+        <img src="https://github.com/user-attachments/assets/f07f346a-eb6f-462a-b168-5dbf6160c164" alt="BareLauncher reorder and manage" width="480" loading="lazy" />
+      </a>
       <br/><sub><b>Reorder &amp; manage</b></sub>
     </td>
     <td align="center">
-      <img src="https://github.com/user-attachments/assets/5a8b4e3a-493c-47e4-9495-c8320fe9d32f" alt="BareLauncher wallpaper & clock" width="480" height="270" loading="lazy" />
-      <br/><sub><b>Minimal button remapper</b></sub>
+      <a href="https://github.com/user-attachments/assets/5a8b4e3a-493c-47e4-9495-c8320fe9d32f" target="_blank" rel="noopener">
+        <img src="https://github.com/user-attachments/assets/5a8b4e3a-493c-47e4-9495-c8320fe9d32f" alt="BareLauncher button remapper" width="480" loading="lazy" />
+      </a>
+      <br/><sub><b>Button remapper</b></sub>
     </td>
   </tr>
 </table>
@@ -51,21 +59,34 @@ Most TV launchers today are heavy, slow, internet-dependent, and filled with spo
 
 ---
 
-## Features
+## At a glance
 
 - Ultra lightweight
-- Very fast app scrolling
-- Clean minimal interface
-- No ads
-- No telemetry
-- No premium restrictions
-- Hide apps
-- Move and reorder apps
-- Quick uninstall & app info shortcuts
-- Wallpaper support
-- Wi-Fi indicator shortcut
-- 12-hour clock
-- Minimal button remapper *(works on the home screen, no Accessibility Service needed)*
+- Smooth, instant app scrolling on a TV remote
+- Clean interface, fully programmatic UI
+- Zero ads, zero telemetry, zero premium tier
+- Hide apps from the home screen
+- Move and reorder apps freely
+- One-press shortcuts to uninstall and to app info
+- Wallpaper support with low-memory rendering
+- Wi-Fi shortcut pill on the home screen (long-press for general system settings)
+- 12-hour clock that refreshes immediately on time and timezone changes
+- Built-in button remapper — works on the home screen, no Accessibility Service required
+
+---
+
+## Footprint
+
+Single universal APK, **~138 KB**, runs on every Android architecture.
+
+The size is a consequence of the engineering choices, not a goal:
+
+- Zero runtime AndroidX dependencies — no AppCompat, Material, RecyclerView, ConstraintLayout, Lifecycle.
+- Programmatic UI — no XML layouts, no inflated resource bloat.
+- Custom recycling shelf instead of `RecyclerView`.
+- R8 minification and resource shrinking on every release build.
+- Pure Java; no Kotlin standard library shipped.
+- No native code, no `lib/` folder — the same APK runs on ARMv7, ARMv8.
 
 ---
 
@@ -73,7 +94,7 @@ Most TV launchers today are heavy, slow, internet-dependent, and filled with spo
 
 - Android TV / Google TV
 - Fire TV Stick & Fire TV Cube
-- Anyone who prefers **speed over fancy animations**
+- Anyone who prefers speed over fancy animations
 
 ---
 
@@ -97,7 +118,7 @@ BareLauncher doesn't use Accessibility Services to hijack your home button. To s
 
 ## Philosophy
 
-Every feature in BareLauncher must justify its performance cost.
+Every line of code in BareLauncher must justify its performance cost.
 
 - No unnecessary animations.
 - No background junk.
@@ -126,8 +147,6 @@ If it makes your TV feel fast again and you'd like to say thanks, you can buy me
 ## License
 
 Licensed under the **PolyForm Noncommercial License 1.0.0** — free for personal and non-commercial use. See [LICENSE](./LICENSE) and [NOTICE.md](./NOTICE.md) for details.
-
-
 
 ---
 
