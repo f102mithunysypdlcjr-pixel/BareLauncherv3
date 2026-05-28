@@ -183,7 +183,10 @@ jobs:
       # snapshot survives in the cache until this key is bumped, so
       # every run on the same key keeps failing the same way.
       # History: -v1 (initial, recommended pattern) saw one bad
-      # snapshot in late May 2026 -> -v2 (clean re-seed).
+      # snapshot in late May 2026 -> -v2 (clean re-seed). -v2 then
+      # produced the same poisoned snapshot during the v1.1.3 release
+      # tag run on 2026-05-28 (input keyevent 82 raced past
+      # InputManagerService registration again) -> -v3 (clean re-seed).
       - name: AVD cache
         uses: actions/cache@v4
         id: avd-cache
@@ -191,7 +194,7 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v2
+          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v3
 
       # On a cold cache: boot a fresh AVD once, save the snapshot, exit.
       # The next step reuses that snapshot so the smoke test starts
