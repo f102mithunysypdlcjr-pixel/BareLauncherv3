@@ -59,7 +59,6 @@ Most TV launchers today are heavy, slow, internet-dependent, and filled with spo
 - No ads
 - No telemetry
 - No premium restrictions
-- Works great on low-end TVs and TV boxes
 - Hide apps
 - Move and reorder apps
 - Quick uninstall & app info shortcuts
