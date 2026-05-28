@@ -19,6 +19,10 @@ BareLauncher is a **fast, lightweight, minimal** Android TV launcher for people 
 Most TV launchers today are heavy, slow, internet-dependent, and filled with sponsored content. BareLauncher brings back a simple, performance-focused TV experience.
 
 > **fast navigation · clean UI · low memory · zero distractions**
+<img width="1280" height="720" alt="screen4" src="https://github.com/user-attachments/assets/5b402ada-94e0-4d23-a890-0e3528ca3714" />
+<img width="1280" height="720" alt="screen" src="https://github.com/user-attachments/assets/f07f346a-eb6f-462a-b168-5dbf6160c164" />
+<img width="1280" height="720" alt="screen3" src="https://github.com/user-attachments/assets/48a3ac80-d467-47ba-b264-838db271ceaf" />
+<img width="1280" height="720" alt="screen2" src="https://github.com/user-attachments/assets/5a8b4e3a-493c-47e4-9495-c8320fe9d32f" />
 
 ---
 
