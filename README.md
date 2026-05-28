@@ -29,20 +29,20 @@ Most TV launchers today are heavy, slow, internet-dependent, and filled with spo
 <table>
   <tr>
     <td align="center">
-      <img src="https://github.com/user-attachments/assets/5b402ada-94e0-4d23-a890-0e3528ca3714" alt="BareLauncher home screen" width="480" height="270" loading="lazy" />
+      <img src="https://github.com/user-attachments/assets/48a3ac80-d467-47ba-b264-838db271ceaf" alt="BareLauncher home screen" width="480" height="270" loading="lazy" />
       <br/><sub><b>Home</b></sub>
     </td>
     <td align="center">
-      <img src="https://github.com/user-attachments/assets/f07f346a-eb6f-462a-b168-5dbf6160c164" alt="BareLauncher app drawer" width="480" height="270" loading="lazy" />
+      <img src="https://github.com/user-attachments/assets/5b402ada-94e0-4d23-a890-0e3528ca3714" alt="BareLauncher app drawer" width="480" height="270" loading="lazy" />
       <br/><sub><b>App drawer</b></sub>
     </td>
     <td align="center">
-      <img src="https://github.com/user-attachments/assets/48a3ac80-d467-47ba-b264-838db271ceaf" alt="BareLauncher reorder & manage" width="480" height="270" loading="lazy" />
+      <img src="https://github.com/user-attachments/assets/f07f346a-eb6f-462a-b168-5dbf6160c164" alt="BareLauncher reorder & manage" width="480" height="270" loading="lazy" />
       <br/><sub><b>Reorder &amp; manage</b></sub>
     </td>
     <td align="center">
       <img src="https://github.com/user-attachments/assets/5a8b4e3a-493c-47e4-9495-c8320fe9d32f" alt="BareLauncher wallpaper & clock" width="480" height="270" loading="lazy" />
-      <br/><sub><b>Wallpaper &amp; clock</b></sub>
+      <br/><sub><b>Minimal button remapper</b></sub>
     </td>
   </tr>
 </table>
