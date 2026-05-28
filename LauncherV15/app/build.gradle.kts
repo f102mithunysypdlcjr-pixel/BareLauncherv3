@@ -18,6 +18,19 @@ android {
         // launcher does not use any APIs that changed semantics between
         // 35 and 36; the bump is a target-only change.
         targetSdk     = 36
+        // 1.1.4: pre-public-release audit pass (5 fixes).
+        // Wallpaper sub-sampling now caps memory on every aspect ratio
+        // (calcSampleSize uses || not && — extreme-aspect panoramas could
+        // previously skip sub-sampling and burn ~8 MB of bitmap memory
+        // CENTER_CROP scaled away). Home-screen clock refreshes
+        // immediately on time / timezone / date-changed broadcasts
+        // (was up to 60 s stale after a flight, train, or DST
+        // transition). addApps null-guards ActivityInfo.packageName so
+        // stripped-down TV ROMs with malformed ResolveInfo don't NPE
+        // their way into a blank shelf. CHANGELOG.md de-duplicated and
+        // [1.1.3] section added so the tag-triggered release pipeline
+        // emits the correct notes. Repository .gitignore added.
+        //
         // 1.1.3: clock pill + wifi long-press + wallpaper layer hygiene.
         // The home-screen clock now wears the same dark-glass plate as
         // the toolbar pills (capsule shape, 1 dp white rim) and shrinks
@@ -29,8 +42,8 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
-        versionCode   = 5
-        versionName   = "1.1.3"
+        versionCode   = 6
+        versionName   = "1.1.4"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
