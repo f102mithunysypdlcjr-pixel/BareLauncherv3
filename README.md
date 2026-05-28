@@ -35,7 +35,7 @@ Most TV launchers today are heavy, slow, internet-dependent, and filled with spo
 - Move and reorder apps
 - Quick uninstall & app info shortcuts
 - Wallpaper support
-- Wi-Fi indicator
+- Wi-Fi indicator shortcut
 - 12-hour clock
 - Minimal button remapper *(works on the home screen, no Accessibility Service needed)*
 
@@ -45,7 +45,6 @@ Most TV launchers today are heavy, slow, internet-dependent, and filled with spo
 
 - Android TV / Google TV
 - Fire TV Stick & Fire TV Cube
-- Low-end TV boxes and older hardware
 - Anyone who prefers **speed over fancy animations**
 
 ---
@@ -100,9 +99,7 @@ If it makes your TV feel fast again and you'd like to say thanks, you can buy me
 
 Licensed under the **PolyForm Noncommercial License 1.0.0** — free for personal and non-commercial use. See [LICENSE](./LICENSE) and [NOTICE.md](./NOTICE.md) for details.
 
-## Contributing
 
-Issues and pull requests are welcome. By contributing, you agree to the terms in [NOTICE.md](./NOTICE.md).
 
 ---
 
