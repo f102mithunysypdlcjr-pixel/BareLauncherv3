@@ -5,12 +5,139 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-# Changelog
+## [1.1.4] — 2026-05-28
 
-All notable changes to BareLauncher land here.
+Pre-public-release audit pass. Five real bug fixes triaged from a deep
+scan of every source file ahead of opening the repository to the world.
+Nothing visible to existing users on the home screen — but each fix
+removes a class of "wrong on edge devices" failure that would have shown
+up as a "BareLauncher OOMs / shows the wrong time / crashes" report
+once the install base widened.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+### Fixed
+
+- **Wallpaper sub-sampling now caps memory on every aspect ratio.**
+  `WallpaperController.calcSampleSize` used `&&` (keep halving while
+  BOTH source dimensions exceed the screen) instead of `||` (keep
+  halving while EITHER dimension exceeds). On a panorama-aspect
+  source — say a 4000 × 500 photo on a 1920 × 1080 screen — the loop
+  saw `srcH (500) > screenH (1080)` evaluate to false on the very
+  first iteration and exited at `inSampleSize = 1`, allocating a
+  ~8 MB bitmap instead of a ~1.5 MB one. `CENTER_CROP` then scaled
+  it down anyway, so the bug was invisible — but on a 4K panel with
+  a high-resolution wallpaper, it could push the launcher over the
+  per-process memory ceiling and trigger a `BitmapFactory` OOM that
+  the surrounding `catch (OutOfMemoryError)` swallowed silently. Now
+  the loop halves until the smaller-fitting axis fits, matching the
+  intent of the existing `wpDrawable` cap.
+- **Home-screen clock refreshes immediately on time / timezone
+  changes.** A new lightweight `BroadcastReceiver` listens for
+  `ACTION_TIME_CHANGED`, `ACTION_TIMEZONE_CHANGED` and
+  `ACTION_DATE_CHANGED`. On any of those, the clock formatter's
+  per-minute idempotency sentinel is reset and the next paint runs
+  unconditionally. Without this, after a flight or a DST transition
+  the clock kept showing the old time for up to 60 seconds. Receiver
+  registers in `onResume` and unregisters in `onPause` so it costs
+  zero while the launcher is in the background.
+- **`addApps` null-guards `ActivityInfo.packageName`.** Stripped-down
+  TV ROMs (Fire TV in particular) have been observed returning
+  `ResolveInfo` objects with a non-null `activityInfo` whose
+  `packageName` is `null`. The previous `ai.packageName.equals(self)`
+  would NPE inside the icon-load executor body, propagate up through
+  `queryApps`, and bubble into the `loadApps` `catch (Throwable)`
+  that resets `appsLoading=false` — the user-visible effect was a
+  blank shelf until the next package broadcast retried. Same kind of
+  defensive guard 1.1.2 added for `loadLabel`.
+
+### Documentation
+
+- **`CHANGELOG.md` header de-duplicated.** The "# Changelog ..."
+  preamble appeared twice at the top of the file. Cosmetic, but the
+  release pipeline's `awk` script that extracts a version's section
+  scans top-down and would have skipped the second header on parse —
+  no functional impact, just noise.
+- **`CHANGELOG.md` `[1.1.3]` section added.** The 1.1.3 work landed
+  in `app/build.gradle.kts` as a comment block but was never lifted
+  into the changelog. Filled in retroactively so the tag-triggered
+  release pipeline emits the correct notes when `v1.1.3` is pushed.
+- **Repository `.gitignore` added.** Covers `build/`, `.gradle/`,
+  `local.properties` (which leaks the contributor's absolute SDK
+  path), IDE noise (`.idea/`, `*.iml`, `.vscode/`), and any
+  accidentally-dropped `*.jks` / `*.keystore`. The CI runner
+  generates the gradle wrapper on the fly so `gradlew*` and
+  `gradle-wrapper.jar` are also gitignored — only
+  `gradle-wrapper.properties` is tracked.
+
+### Versioning
+
+- `versionCode` 5 → 6, `versionName` 1.1.3 → 1.1.4.
+
+## [1.1.3] — 2026-05-28
+
+Top-bar visual unification + wallpaper memory hygiene. The home-screen
+clock now wears the same dark-glass plate as the toolbar pills, the
+WiFi pill gains a long-press shortcut to general system Settings, and
+the wallpaper crossfade no longer keeps a permanent screen-sized GPU
+buffer alive for both `ImageView`s.
+
+### Changed
+
+- **Home-screen clock is now a pill that matches the toolbar.** The
+  clock wears the same vocabulary as the top-right toolbar buttons:
+  dark-glass plate (~40 % black), 1 dp white hairline rim, capsule
+  corner radius (= height / 2). The bare digits used to lean on a
+  heavy 14 dp drop shadow for contrast against the wallpaper; with
+  a real plate the shadow is redundant and gone. Text drops from
+  44 sp + bold-with-shadow to a compact 22 sp `sans-serif-medium`
+  pill that lines up with the toolbar buttons across the top edge,
+  giving the home screen a single horizontal baseline for time +
+  toolbar instead of two.
+- **WiFi pill long-press opens general system Settings.** Short
+  click is unchanged (WiFi / network settings). Long-press
+  (TV remote: hold DPAD_CENTER; touch: long-press) opens
+  `Settings.ACTION_SETTINGS` so the second-tier "I want all the
+  system settings" shortcut is exactly one gesture away from the
+  first-tier WiFi shortcut. Discoverable via the standard
+  press-and-hold gesture; falls back to a toast on stripped ROMs
+  that have no Settings activity.
+- **`AppleStyle.makePillBackground(density)`** factory added so the
+  clock pill and the toolbar plates draw with the same code (one
+  paint set, one rounded-rect path). Each call produces a fresh
+  `Drawable` because `Drawable` state (bounds / alpha / level) is
+  per-instance, but the underlying paints are not shared across
+  drawables, so mutating one cannot leak into another.
+
+### Fixed
+
+- **`pkgReloadRunnable` is dropped on activity destroy.** A package
+  broadcast scheduling a deferred 400 ms reload via
+  `shelf.postDelayed(pkgReloadRunnable, 400)` could leave a method-
+  reference (`this::loadApps`) queued on the looper after the
+  activity went away. `loadApps` short-circuits on `destroyed` so
+  the runnable was harmless, but it implicitly held a reference to
+  the activity until the looper drained it — on a slow ROM that
+  stretched the activity's lifetime by a few hundred milliseconds
+  past the user navigating away. `onDestroy` now removes the
+  callback explicitly.
+
+### Performance
+
+- **Wallpaper `ImageView`s drop their permanent
+  `LAYER_TYPE_HARDWARE`.** Earlier versions forced both stacked
+  wallpaper views into a hardware layer so the cross-fade alpha
+  animation could run on an offscreen FBO. The cost: a screen-sized
+  GPU buffer for each view, *continuously*, in service of a 200 ms
+  transition that fires only when the user actually changes the
+  wallpaper. On 1080p that's ~16 MB of GPU memory burned for nothing
+  steady-state; on 4K it's ~64 MB. `ImageView` is a leaf with a
+  single drawable — alpha applies directly via the `BitmapDrawable`'s
+  paint, so the hardware layer was buying nothing. Default
+  `LAYER_TYPE_NONE` is now used and the wallpaper subsystem returns
+  ~16–64 MB of GPU memory to the rest of the device.
+
+### Versioning
+
+- `versionCode` 4 → 5, `versionName` 1.1.2 → 1.1.3.
 
 ## [1.1.2] — 2026-05-27
 

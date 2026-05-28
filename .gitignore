@@ -1,0 +1,52 @@
+# Build artefacts ──────────────────────────────────────────────────────
+# Gradle outputs and caches. Regenerated on every build.
+build/
+.gradle/
+out/
+
+# Per-developer local config — contains absolute SDK paths and is never
+# the same across machines. Must never be committed.
+local.properties
+
+# Gradle wrapper jar/scripts — CI generates them on the fly via
+# `gradle wrapper --gradle-version "$GRADLE_VERSION"` (see
+# .github/workflows/main.yml). Only the wrapper *properties* file is
+# tracked. If you generate the wrapper locally, do not commit it.
+gradlew
+gradlew.bat
+gradle/wrapper/gradle-wrapper.jar
+LauncherV15/gradlew
+LauncherV15/gradlew.bat
+LauncherV15/gradle/wrapper/gradle-wrapper.jar
+
+# IDE noise ──────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.fleet/
+
+# Android Studio
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing material — must NEVER be committed. The release pipeline
+# decodes the keystore from a base64 GitHub Actions secret instead.
+*.jks
+*.keystore
+keystore.properties
+release.properties
+
+# OS clutter ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Generated reports / logs (rare locally, but block them anyway) ────────
+*.log
+*.hprof
+test-results/
+reports/

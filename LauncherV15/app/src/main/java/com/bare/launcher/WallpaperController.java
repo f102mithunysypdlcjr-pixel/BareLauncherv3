@@ -300,12 +300,18 @@ final class WallpaperController {
     }
 
     /** Match {@link #wpDrawable}'s cap: stop sub-sampling once we're at
-     *  ~1× the display. The previous 2× cap led to massive bitmaps for
-     *  high-res photos. */
+     *  ~1× the display. Halves {@code inSampleSize} until the source
+     *  fits the screen on BOTH axes. The previous {@code &&} short-
+     *  circuited the loop the moment one axis fit, leaving extreme
+     *  aspect-ratio sources (e.g. a 4000 × 500 panorama on a 1920 × 1080
+     *  panel) at full source resolution and burning ~8 MB of bitmap
+     *  memory that {@code CENTER_CROP} immediately scaled away. {@code ||}
+     *  is the right operator: keep halving while EITHER dimension still
+     *  exceeds the screen. */
     private int calcSampleSize(int srcW, int srcH) {
         int sw = screenW, sh = screenH;
         int ss = 1;
-        while ((srcH / ss > sh && srcW / ss > sw) && ss < 0x8000) ss *= 2;
+        while ((srcH / ss > sh || srcW / ss > sw) && ss < 0x8000) ss *= 2;
         return ss;
     }
 

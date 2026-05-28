@@ -378,6 +378,39 @@ public class LauncherActivity extends Activity {
                 }
             };
 
+    /** Refresh the visible clock the moment the device clock advances —
+     *  user changed the time manually, crossed a timezone boundary
+     *  (flight, train), or DST flipped. Without this receiver the clock
+     *  could show the old time for up to 60 seconds (until the next
+     *  minute-aligned tick fires). The receiver is registered ONLY while
+     *  the launcher is in the foreground (registered in {@link #onResume},
+     *  unregistered in {@link #onPause}) — it has no business waking the
+     *  process when the user is somewhere else. */
+    private final BroadcastReceiver timeReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context ctx, Intent intent) {
+            if (destroyed) return;
+            // Reset the per-minute idempotency sentinel so the next paint
+            // is unconditional, then paint and re-anchor the next tick to
+            // the (possibly NEW) minute boundary. tickClock walks through
+            // the no-op guard internally; calling it here also covers the
+            // "minute boundary in the OLD timezone is 7 minutes off the
+            // boundary in the NEW timezone" case where the next scheduled
+            // tick would otherwise have fired at the wrong instant.
+            clockFmt.reset();
+            long now = System.currentTimeMillis();
+            tickClock(now);
+            if (clockRunning) {
+                uiHandler.removeCallbacks(clockTick);
+                uiHandler.postDelayed(clockTick, ClockFormatter.nextMinuteDelay(now));
+            }
+        }
+    };
+    /** Tracks whether {@link #timeReceiver} is currently registered so the
+     *  unregister call in {@link #onPause} is idempotent against the
+     *  rare double-resume / double-pause sequences some TV ROMs emit
+     *  during fast configuration transitions. */
+    private boolean timeReceiverRegistered = false;
+
     private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
             String action = intent.getAction();
@@ -502,6 +535,7 @@ public class LauncherActivity extends Activity {
         super.onResume();
         hideSystemUI();
         startClock();
+        registerTimeReceiver();
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         RecyclingShelfView s = shelf;
         if (s != null) {
@@ -555,6 +589,7 @@ public class LauncherActivity extends Activity {
     protected void onPause() {
         super.onPause();
         stopClock();
+        unregisterTimeReceiver();
         FrameLayout r = root;
         if (r != null) {
             ViewTreeObserver rvto = r.getViewTreeObserver();
@@ -578,6 +613,7 @@ public class LauncherActivity extends Activity {
         stopClock();
         uiHandler.removeCallbacksAndMessages(null);
         unregisterPkgReceiver();
+        unregisterTimeReceiver();
         // Cancel any in-flight toast. Toast.makeText(this, ...) holds a
         // strong reference to the activity through its TN binder on older
         // ROMs; without an explicit cancel a 3.5 s "long" toast in flight
@@ -2640,7 +2676,21 @@ public class LauncherActivity extends Activity {
         if (list == null) return;
         for (ResolveInfo ri : list) {
             ActivityInfo ai = ri.activityInfo;
-            if (ai == null || ai.packageName.equals(self)) continue;
+            // Defensive nulls. ai itself is null on a malformed ResolveInfo
+            // (Fire TV has been observed returning these post-system-restart);
+            // ai.packageName is null on stripped-down ROMs that ship
+            // ActivityInfo objects whose <application> manifest entry is
+            // broken. Skip silently — equality / hash operations downstream
+            // would NPE and propagate up through the icon executor body,
+            // bouncing into loadApps' catch (Throwable) and resetting
+            // appsLoading=false; the user-visible effect would be a blank
+            // shelf until the next package broadcast retried. ai.name can
+            // be null for the same reason; the dedupe key tolerates it
+            // because String.concat on null appends the literal "null"
+            // which still uniques against any real-named activity. Same
+            // shape of guard 1.1.2 added for ri.loadLabel.
+            if (ai == null || ai.packageName == null) continue;
+            if (ai.packageName.equals(self)) continue;
             if (!seen.add(ai.packageName + '/' + ai.name)) continue;
             // ri.loadLabel() returns null on stripped-down Fire-TV ROMs that
             // ship apps without a recoverable user-visible label (typically
@@ -4206,6 +4256,34 @@ public class LauncherActivity extends Activity {
 
     private void unregisterPkgReceiver() {
         try { unregisterReceiver(packageReceiver); } catch (IllegalArgumentException ignored) {}
+    }
+
+    /** Register {@link #timeReceiver} for the system's clock-change
+     *  broadcasts. Idempotent — the registered flag prevents double
+     *  registration on rapid {@code onResume → onResume} paths some TV
+     *  ROMs emit during fast configuration transitions (the same shape
+     *  of bug the {@code globalFocusListener} dedupe defends against). */
+    private void registerTimeReceiver() {
+        if (timeReceiverRegistered) return;
+        IntentFilter f = new IntentFilter();
+        f.addAction(Intent.ACTION_TIME_CHANGED);
+        f.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+        f.addAction(Intent.ACTION_DATE_CHANGED);
+        // No data scheme — these are broadcast as plain action intents.
+        // RECEIVER_NOT_EXPORTED is appropriate on Tiramisu+ since these
+        // are system-only broadcasts; locking the receiver keeps any
+        // future third-party app from spoofing a fake clock change.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            registerReceiver(timeReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        else
+            registerReceiver(timeReceiver, f);
+        timeReceiverRegistered = true;
+    }
+
+    private void unregisterTimeReceiver() {
+        if (!timeReceiverRegistered) return;
+        try { unregisterReceiver(timeReceiver); } catch (IllegalArgumentException ignored) {}
+        timeReceiverRegistered = false;
     }
 
     /** Resolve the user-visible labels for every remappable remote key from
