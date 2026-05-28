@@ -35,8 +35,8 @@ launcher. To make it your default home app, use Launcher Manager:
 
 - **Launcher Manager (XDA)** – works on Google TV, Android TV, and Fire
   TV Stick.(Recommended)
-  **OR**
-- ** Use Button-mapper** - to map home button for bareLauncher.
+ - **OR**
+- **Use Button-mapper** - to map home button for bareLauncher.
 ### Supported platforms
 
 - Android TV / Google TV (API 30 / Android 11 and newer)
