@@ -191,6 +191,19 @@ jobs:
       # produced the same poisoned snapshot during the v1.1.3 release
       # tag run on 2026-05-28 (input keyevent 82 raced past
       # InputManagerService registration again) -> -v3 (clean re-seed).
+      # -v3 then produced the same poisoned snapshot during the v1.2.0
+      # release tag run on 2026-05-29 — API 30 row this time, the API
+      # 26 cache populated cleanly during the same release cycle. The
+      # post-merge main run on the IDENTICAL commit succeeded against
+      # the same cache, so the poisoning was timing-dependent on the
+      # save side, not deterministic on resume. The PR run + post-merge
+      # main run had clean caches; the tag run got unlucky with which
+      # snapshot the cache action had already saved. -> -v4 (clean
+      # re-seed). The pattern is clear at this point: every two-to-
+      # three release tags, the AVD cache poisons. The proper long-
+      # term fix is to NOT cache a default_boot snapshot at all and
+      # accept the 3-4 minute cold boot per CI run, but bumping the
+      # version key keeps the fast-warm-cache benefit on most runs.
       - name: AVD cache
         uses: actions/cache@v4
         id: avd-cache
@@ -198,7 +211,7 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v3
+          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v4
 
       # On a cold cache: boot a fresh AVD once, save the snapshot, exit.
       # The next step reuses that snapshot so the smoke test starts
