@@ -417,9 +417,18 @@ public class LauncherActivity extends Activity {
             if (Intent.ACTION_PACKAGE_REPLACED.equals(action) || Intent.ACTION_PACKAGE_CHANGED.equals(action)) {
                 Uri data = intent.getData();
                 if (data != null) {
+                    // SSP is documented non-null for "package:" URIs but
+                    // malformed broadcasts on stripped-down ROMs have been
+                    // observed returning null. Guard before calling cache /
+                    // inflight removers — those would NPE on a null key
+                    // and bubble up through the BroadcastReceiver, which
+                    // the system treats as a misbehaving receiver and may
+                    // tear the launcher down.
                     String pkg = data.getSchemeSpecificPart();
-                    if (iconCache != null) iconCache.remove(pkg);
-                    iconInflight.remove(pkg);
+                    if (pkg != null) {
+                        if (iconCache != null) iconCache.remove(pkg);
+                        iconInflight.remove(pkg);
+                    }
                 }
             }
             pkgChangedWhilePaused = true;
@@ -2728,10 +2737,20 @@ public class LauncherActivity extends Activity {
             // ri.loadLabel() returns null on stripped-down Fire-TV ROMs that
             // ship apps without a recoverable user-visible label (typically
             // OEM packages with broken AndroidManifest <application> labels).
-            // Skip rather than NPE on .toString() — these apps would render
-            // as a blank cell anyway, and we'd rather let the rest of the
-            // shelf populate cleanly.
-            CharSequence rawLabel = ri.loadLabel(pm);
+            // It can also THROW (Resources$NotFoundException, SecurityException,
+            // RuntimeException) on the same class of ROMs when the label
+            // string-resource id resolves to a missing or cross-user
+            // resource. Without the catch, one bad app aborts the whole
+            // queryApps batch via the outer Throwable handler in loadApps —
+            // visible to the user as a blank shelf until the next package
+            // broadcast retries. Treat throw and null identically: fall back
+            // to the package name and surface the app as a labelled cell.
+            CharSequence rawLabel;
+            try {
+                rawLabel = ri.loadLabel(pm);
+            } catch (Throwable t) {
+                rawLabel = null;
+            }
             String label = rawLabel != null ? rawLabel.toString() : ai.packageName;
             out.add(new AppInfo(ai.packageName, label,
                     new ComponentName(ai.packageName, ai.name), ri));
@@ -2803,16 +2822,14 @@ public class LauncherActivity extends Activity {
     /** Persist the in-memory hiddenApps set. Called synchronously from
      *  every toggle in the hide-manager so the user never has to confirm. */
     private void saveHiddenApps() {
-        // ArraySet doesn't implement Iterable<String> via the typed
-        // signature KeymapStore expects — wrap with a tiny ArrayList.
-        // The wrapper is created at most once per toggle (rare event).
-        ArrayList<String> snapshot = new ArrayList<>(hiddenApps.size());
-        for (int i = 0, m = hiddenApps.size(); i < m; i++) {
-            snapshot.add(hiddenApps.valueAt(i));
-        }
+        // ArraySet<String> implements Iterable<String> via the inherited
+        // Collection / Set typed signature, so it can be passed straight
+        // to KeymapStore.serializeHiddenApps without an intermediate
+        // ArrayList copy. Saves one ArrayList allocation per toggle —
+        // not a hot path, but the wrapper was strictly redundant.
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit().putString(KEY_HIDDEN,
-                        KeymapStore.serializeHiddenApps(snapshot)).apply();
+                        KeymapStore.serializeHiddenApps(hiddenApps)).apply();
     }
 
     /** Drop hidden-set entries whose package is no longer installed.
@@ -3979,9 +3996,11 @@ public class LauncherActivity extends Activity {
                 // Hidden idle is dimmer than visible idle (0x66FFFFFF vs
                 // 0x99FFFFFF) so the strike-through reads as "muted /
                 // hidden" at a glance. Selected hidden stays at full dark
-                // text — the strike-through still distinguishes it.
+                // text — the strike-through still distinguishes it. Both
+                // sel branches resolve to the same colour; kept as a flat
+                // assignment instead of a self-referential ternary.
                 if (sel) {
-                    tv.setTextColor(hidden ? 0xFF111114 : 0xFF111114);
+                    tv.setTextColor(0xFF111114);
                 } else {
                     tv.setTextColor(hidden ? 0x66FFFFFF : 0x99FFFFFF);
                 }
@@ -4281,14 +4300,34 @@ public class LauncherActivity extends Activity {
         f.addAction(Intent.ACTION_PACKAGE_ADDED); f.addAction(Intent.ACTION_PACKAGE_REMOVED);
         f.addAction(Intent.ACTION_PACKAGE_CHANGED); f.addAction(Intent.ACTION_PACKAGE_REPLACED);
         f.addDataScheme("package");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-            registerReceiver(packageReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        else
-            registerReceiver(packageReceiver, f);
+        // Best-effort registration. Hardened TV ROMs (and rare cases after
+        // a system_server restart) have been observed throwing
+        // SecurityException out of registerReceiver even though the
+        // launcher is the active home and the receiver is RECEIVER_NOT_EXPORTED.
+        // Without this catch the throwable bubbles up through onCreate
+        // and the activity dies before setContentView's view tree is
+        // visible — which on TV ROMs flashes the system home picker.
+        // Catching here lets the launcher come up; the user-visible
+        // consequence is that package-add / -remove won't auto-refresh
+        // the shelf until the next onResume (which retries the listener
+        // wiring via the standard lifecycle).
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                registerReceiver(packageReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+            else
+                registerReceiver(packageReceiver, f);
+        } catch (SecurityException | IllegalStateException ignored) {
+            // logged via CrashLogger if it fires anywhere above this frame
+        }
     }
 
     private void unregisterPkgReceiver() {
-        try { unregisterReceiver(packageReceiver); } catch (IllegalArgumentException ignored) {}
+        // Catch IllegalArgumentException for "receiver not registered"
+        // (the normal case if registration above failed) AND catch
+        // SecurityException for parity with the register path on the
+        // same hardened ROMs that throw on the receive side.
+        try { unregisterReceiver(packageReceiver); }
+        catch (IllegalArgumentException | SecurityException ignored) {}
     }
 
     /** Register {@link #timeReceiver} for the system's clock-change
@@ -4306,16 +4345,28 @@ public class LauncherActivity extends Activity {
         // RECEIVER_NOT_EXPORTED is appropriate on Tiramisu+ since these
         // are system-only broadcasts; locking the receiver keeps any
         // future third-party app from spoofing a fake clock change.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-            registerReceiver(timeReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        else
-            registerReceiver(timeReceiver, f);
-        timeReceiverRegistered = true;
+        //
+        // Best-effort registration — same defensive pattern as
+        // registerPkgReceiver. If the system refuses (very rare; some
+        // hardened ROMs gate even system-only broadcasts on a SELinux
+        // domain) the launcher still runs; the user-visible consequence
+        // is a clock that lags a flight / DST transition by up to 60 s
+        // (the natural one-minute tick still fires).
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                registerReceiver(timeReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+            else
+                registerReceiver(timeReceiver, f);
+            timeReceiverRegistered = true;
+        } catch (SecurityException | IllegalStateException ignored) {
+            timeReceiverRegistered = false;
+        }
     }
 
     private void unregisterTimeReceiver() {
         if (!timeReceiverRegistered) return;
-        try { unregisterReceiver(timeReceiver); } catch (IllegalArgumentException ignored) {}
+        try { unregisterReceiver(timeReceiver); }
+        catch (IllegalArgumentException | SecurityException ignored) {}
         timeReceiverRegistered = false;
     }
 
