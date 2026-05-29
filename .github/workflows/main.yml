@@ -170,72 +170,59 @@ jobs:
           gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
 
-      # Cache the booted AVD so subsequent runs skip the ~3-4 min boot
-      # animation. The cache key is api-level + target + arch + a manual
-      # version suffix; the matrix expansion automatically gets
-      # independent caches.
+      # AVD caching is intentionally disabled.
       #
-      # Bump the trailing -vN whenever a CI run hits the
-      #   "android.os.ServiceManager$ServiceNotFoundException:
-      #    No service published for: input"
-      # error during the post-boot keyevent unlock. That message means
-      # a previously cached AVD snapshot was saved at a race window
-      # where sys.boot_completed=1 is true but InputManagerService is
-      # not yet registered. Resuming from that snapshot lets the
-      # emulator-runner action's auto-unlock keyevent fire too early
-      # and the action treats the non-zero adb exit as fatal. The
-      # snapshot survives in the cache until this key is bumped, so
-      # every run on the same key keeps failing the same way.
-      # History: -v1 (initial, recommended pattern) saw one bad
-      # snapshot in late May 2026 -> -v2 (clean re-seed). -v2 then
-      # produced the same poisoned snapshot during the v1.1.3 release
-      # tag run on 2026-05-28 (input keyevent 82 raced past
-      # InputManagerService registration again) -> -v3 (clean re-seed).
-      # -v3 then produced the same poisoned snapshot during the v1.2.0
-      # release tag run on 2026-05-29 — API 30 row this time, the API
-      # 26 cache populated cleanly during the same release cycle. The
-      # post-merge main run on the IDENTICAL commit succeeded against
-      # the same cache, so the poisoning was timing-dependent on the
-      # save side, not deterministic on resume. The PR run + post-merge
-      # main run had clean caches; the tag run got unlucky with which
-      # snapshot the cache action had already saved. -> -v4 (clean
-      # re-seed). The pattern is clear at this point: every two-to-
-      # three release tags, the AVD cache poisons. The proper long-
-      # term fix is to NOT cache a default_boot snapshot at all and
-      # accept the 3-4 minute cold boot per CI run, but bumping the
-      # version key keeps the fast-warm-cache benefit on most runs.
-      - name: AVD cache
-        uses: actions/cache@v4
-        id: avd-cache
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          key: avd-${{ matrix.api-level }}-google_apis-x86_64-v4
-
-      # On a cold cache: boot a fresh AVD once, save the snapshot, exit.
-      # The next step reuses that snapshot so the smoke test starts
-      # against an already-booted emulator. Pinned to the v2.37.0 commit
-      # SHA rather than the floating v2 tag for supply-chain safety.
-      - name: Create AVD and generate snapshot for caching
-        if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
-        with:
-          api-level: ${{ matrix.api-level }}
-          target: google_apis
-          arch: x86_64
-          force-avd-creation: false
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          disable-animations: true
-          script: echo "Generated AVD snapshot for caching"
-
+      # We previously cached a `default_boot` snapshot via actions/cache@v4
+      # plus a separate "Create AVD and generate snapshot for caching"
+      # warm-up step, then resumed from that snapshot in the actual smoke-
+      # test step. The save side of that flow has a documented race
+      # window: when the warm-up step's emulator exits, the snapshot is
+      # captured at whatever point the boot reached, and on roughly every
+      # second-to-third release tag run the snapshot landed at the moment
+      # `sys.boot_completed=1` is true but `InputManagerService` is not
+      # yet registered. Resuming from a snapshot saved during that window
+      # makes reactivecircus/android-emulator-runner's auto-unlock
+      # `keyevent 82` fire before the input service exists; adb returns
+      # non-zero and the action treats it as fatal. Failure surfaces as:
+      #
+      #   java.lang.IllegalStateException:
+      #     android.os.ServiceManager$ServiceNotFoundException:
+      #       No service published for: input
+      #
+      # We chased this by bumping the cache key version four times
+      # (-v1 → -v2 → -v3 → -v4 over the v1.1.3 / v1.2.0 release cycles).
+      # Each bump bought 1-2 successful runs before the next save landed
+      # in the bad window. The pattern made it clear that the save side
+      # of the cache flow is the unreliable component, and version-
+      # bumping is just deck-chair-shifting.
+      #
+      # Permanent fix: don't cache a snapshot at all. Cold-boot the
+      # emulator on every CI run via `force-avd-creation: true` and
+      # `-no-snapshot-save`. Cost is ~3-4 minutes added per matrix-row
+      # per run (cold boot vs warm-cache resume); benefit is deterministic
+      # CI on every release tag. For a project that ships every few
+      # weeks, this tradeoff is correct — release-day flakes are far
+      # more expensive than a few minutes of CI runtime.
+      #
+      # If this becomes painful (e.g. CI quota, expanded matrix), the
+      # next steps to investigate are: (1) `actions/cache` for the
+      # Android SDK system images themselves (the per-API tarball is
+      # ~1 GB and currently re-downloaded each run via sdkmanager —
+      # safe to cache because system images are immutable per version);
+      # (2) running tests via Firebase Test Lab or an external device-
+      # farm runner that doesn't have the snapshot-save race.
       - name: Run instrumentation smoke test
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: ${{ matrix.api-level }}
           target: google_apis
           arch: x86_64
-          force-avd-creation: false
+          # force-avd-creation: true — always create a fresh AVD; no
+          # state carries between runs, no snapshot to be poisoned.
+          force-avd-creation: true
+          # -no-snapshot-save — don't write a default_boot.snapshot
+          # on shutdown. Pairs with force-avd-creation: true to keep
+          # every CI run a clean cold boot of a freshly-created AVD.
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           working-directory: LauncherV15
