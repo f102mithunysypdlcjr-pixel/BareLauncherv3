@@ -18,6 +18,19 @@ android {
         // launcher does not use any APIs that changed semantics between
         // 35 and 36; the bump is a target-only change.
         targetSdk     = 36
+        // 1.1.5: app-shelf de-dup fix + device-aware activity selection.
+        // Apps that ship BOTH a phone-style CATEGORY_LAUNCHER activity and
+        // a TV-style CATEGORY_LEANBACK_LAUNCHER activity used to appear
+        // twice on the shelf — the dedupe key was "package/activity" so
+        // the two distinct activity names of the same package both
+        // passed. Dedupe is now by package name only, and the query
+        // ORDER is chosen at runtime: LEANBACK-first on TV, LAUNCHER-
+        // first elsewhere, so the activity that wins the dedupe race
+        // matches the device's UI tuning. Phone-only and TV-only apps
+        // continue to surface because both categories are still queried
+        // — every installed launchable app (user, system, sideloaded)
+        // shows up exactly once.
+        //
         // 1.1.4: pre-public-release audit pass (5 fixes).
         // Wallpaper sub-sampling now caps memory on every aspect ratio
         // (calcSampleSize uses || not && — extreme-aspect panoramas could
@@ -42,8 +55,8 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
-        versionCode   = 6
-        versionName   = "1.1.4"
+        versionCode   = 7
+        versionName   = "1.1.5"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
