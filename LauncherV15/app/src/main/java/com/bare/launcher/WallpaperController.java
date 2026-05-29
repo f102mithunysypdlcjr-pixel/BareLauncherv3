@@ -309,9 +309,22 @@ final class WallpaperController {
      *  is the right operator: keep halving while EITHER dimension still
      *  exceeds the screen. */
     private int calcSampleSize(int srcW, int srcH) {
-        int sw = screenW, sh = screenH;
+        return computeSampleSize(srcW, srcH, screenW, screenH);
+    }
+
+    /**
+     * Pure function — sub-sampling factor (1, 2, 4, 8, …) for an image of
+     * {@code srcW × srcH} pixels rendered into an {@code screenW × screenH}
+     * viewport with {@code CENTER_CROP}. Loop halves while EITHER axis
+     * still exceeds the screen, with a {@code 0x8000} safety cap so a
+     * pathological input (zero or near-zero screen dim) cannot infinite-
+     * loop. Package-private and static so it can be exercised by JVM
+     * unit tests — see {@code WallpaperControllerSampleSizeTest}, which
+     * pins the 1.1.4 panorama-OOM regression.
+     */
+    static int computeSampleSize(int srcW, int srcH, int screenW, int screenH) {
         int ss = 1;
-        while ((srcH / ss > sh || srcW / ss > sw) && ss < 0x8000) ss *= 2;
+        while ((srcH / ss > screenH || srcW / ss > screenW) && ss < 0x8000) ss *= 2;
         return ss;
     }
 
