@@ -5,7 +5,7 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.1] — 2026-05-29
 
 Safe perf / stability hardening pass — surgical, behaviour-preserving
 fixes triaged from a focused audit of `LauncherActivity` and the
@@ -79,9 +79,7 @@ crashing.
   in memory and the synchronous wait completes in a single
   `CountDownLatch` await. Net effect: ~5-30 ms less UI-thread
   blocking on slow ROMs at cold start, with zero behavioural
-  change — the load was always going to happen, just now in parallel.
-
- `pm.getLaunchIntentForPackage`
+- **`launchApp` direct-intent fast path.** `pm.getLaunchIntentForPackage`
   performs **two synchronous binder calls** internally
   (`queryIntentActivities` for `CATEGORY_INFO`, then `CATEGORY_LAUNCHER`)
   to discover the launcher activity — but the launcher already cached
@@ -167,6 +165,8 @@ crashing.
   on a slightly-fast wall clock.
 
 
+
+## [1.2.0] — 2026-05-29
 
 Lower the supported-Android floor from 11 (API 30) to 8 (API 26),
 unlocking roughly 25% more of the active Android-TV install base —
