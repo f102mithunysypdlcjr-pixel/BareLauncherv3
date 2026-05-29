@@ -5,6 +5,59 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-05-29
+
+Lower the supported-Android floor from 11 (API 30) to 8 (API 26),
+unlocking roughly 25% more of the active Android-TV install base —
+Mi Box S, older Fire TV sticks, many 2018-2020 Amlogic / Allwinner TV
+boxes — exactly the hardware whose stock launcher BareLauncher exists
+to replace. No performance compromise on newer Android: version-gated
+branches via `Build.VERSION.SDK_INT` are evaluated by ART's branch
+predictor in roughly one CPU cycle, and the kernel + framework
+libraries on a device running Android 14 are unchanged regardless of
+the APK's `minSdk`. The 1.1.5 dual-target dedupe fix (skipped as a
+standalone tag) ships inside this 1.2.0 release.
+
+### Changed
+
+- **`minSdk` lowered from 30 (Android 11) to 26 (Android 8).** Single
+  universal APK, no multi-APK split. The floor lands at API 26
+  specifically because Adaptive Icons were introduced there and
+  `IconRenderer` relies on `AdaptiveIconDrawable` as its primary
+  rendering path; lowering further would force a second rendering
+  strategy with a worse fallback for legacy bitmap icons. Raising
+  higher (API 28 / Android 9) would cut off the Mi-Box-S /
+  older-Fire-TV segment that's still in active daily use.
+- **`hideSystemUI` now version-gated.** API 30+ devices take the
+  modern `WindowInsetsController` branch (unchanged behaviour from
+  1.1.x); API 26-29 devices take the legacy `setSystemUiVisibility`
+  flag-based branch — same immersive-sticky / hide-bars behaviour,
+  routed through the API the platform shipped before R. Both paths
+  hide the navigation bar AND keep both bars hidden during transient
+  swipes.
+- **CI instrumentation matrix expanded** from `[30]` to `[26, 30]`.
+  The smoke test now runs against the new minimum supported Android
+  version on every PR — any future change that breaks API 26
+  compatibility fails CI before merge.
+- **Comments updated** to reflect the new floor: the lint `disable`
+  rationale for `SyntheticAccessor` and the `IconRenderer` Adaptive
+  Icon branch comment both note the 26-not-30 minimum (ART has been
+  the default Android runtime since API 21, so the "ART always"
+  invariant the synthetic-accessor argument relies on is still
+  trivially true at the new floor).
+
+### Audit (no behaviour change)
+
+A full pass over every modern Android API used in the codebase
+confirmed the only ungated API 30 surface was `hideSystemUI`. Every
+other modern API call was already correctly version-gated for
+TIRAMISU (API 33) or earlier — predictive back via
+`OnBackInvokedDispatcher`, `Context.RECEIVER_NOT_EXPORTED` on both
+the package and time receivers, `PackageManager.ResolveInfoFlags.of`
+in `queryApps`. The 1.1.5 dual-target dedupe fix (`addApps` package-
+only key, `queryApps` device-aware ordering) ships unchanged inside
+1.2.0.
+
 ## [1.1.5] — 2026-05-29
 
 App-shelf de-duplication fix and device-aware activity selection.

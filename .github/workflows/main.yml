@@ -127,9 +127,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Single API level for now; matrix is set up so adding 36 is
-        # a one-line change once we've confirmed CI throughput.
-        api-level: [30]
+        # Two API levels: API 26 (Android 8 — minSdk floor) and API 30
+        # (Android 11 — the previous floor). Running both on every PR
+        # catches version-gated regressions both ways: a code change
+        # that breaks the legacy hideSystemUI path shows up on the API
+        # 26 row; a change that breaks the modern WindowInsetsController
+        # path shows up on the API 30 row.
+        api-level: [26, 30]
 
     steps:
       - name: Checkout source

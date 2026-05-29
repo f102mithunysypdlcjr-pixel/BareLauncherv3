@@ -121,7 +121,7 @@ final class IconRenderer {
      */
     static Bitmap process(Drawable d, int sz) {
         if (d == null) return null;
-        // AdaptiveIconDrawable was introduced in API 26 (O); minSdk is 30,
+        // AdaptiveIconDrawable was introduced in API 26 (O); minSdk is 26,
         // so the SDK guard is redundant — keep only the type check.
         if (d instanceof AdaptiveIconDrawable) {
             AdaptiveIconDrawable aid = (AdaptiveIconDrawable) d;
