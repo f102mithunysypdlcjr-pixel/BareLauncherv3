@@ -5,7 +5,37 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.4] — 2026-05-28
+## [1.1.5] — 2026-05-29
+
+App-shelf de-duplication fix and device-aware activity selection.
+Closes a long-standing report on TV boxes where dual-target apps
+(those declaring BOTH a phone-style `CATEGORY_LAUNCHER` activity and
+a TV-style `CATEGORY_LEANBACK_LAUNCHER` activity) showed up twice on
+the home shelf — once per category. Side-effect of the same fix is
+that phone-only apps now reliably surface on TV and TV-only apps on
+phone, so every installed launchable app (user, system, sideloaded)
+appears exactly once regardless of which UI flavour it targets.
+
+### Fixed
+
+- **Dual-target apps no longer appear twice on the shelf.**
+  `LauncherActivity.addApps` deduped using the composite key
+  `"package/activity"`. A package that declared both a phone
+  `CATEGORY_LAUNCHER` activity and a TV `CATEGORY_LEANBACK_LAUNCHER`
+  activity has two ResolveInfo entries with the SAME package but
+  DIFFERENT activity names — both passed the dedupe and the package
+  showed twice. Switched the dedupe key to package name only: the
+  first ResolveInfo to land for a given package wins, every later
+  one is skipped.
+- **Right activity wins for the right device.** `queryApps` now
+  inspects `Configuration.uiMode` and asks the system for
+  `CATEGORY_LEANBACK_LAUNCHER` first on TV (so the TV-tuned activity
+  wins the dedupe race) and `CATEGORY_LAUNCHER` first on phones /
+  tablets (so the phone-tuned activity wins). Both categories are
+  still queried in series — apps that only declare one or the other
+  surface on the shelf as before.
+
+
 
 Pre-public-release audit pass. Five real bug fixes triaged from a deep
 scan of every source file ahead of opening the repository to the world.

@@ -2653,18 +2653,44 @@ public class LauncherActivity extends Activity {
         String self = getPackageName();
         ArraySet<String> seen = new ArraySet<>();
         List<AppInfo> out = new ArrayList<>();
+        // Query order matters because addApps dedupes by packageName: the
+        // FIRST resolved component for a given package wins, every later
+        // component for that same package is skipped. So on a TV we ask
+        // CATEGORY_LEANBACK_LAUNCHER first (the TV-tuned activity is the
+        // right target); on a phone / tablet we ask CATEGORY_LAUNCHER
+        // first (the phone-tuned activity is the right target). Either
+        // way the *other* category is queried right after, which picks
+        // up apps that only declare one or the other — phone-only apps
+        // on TV, TV-only apps on phone, system apps with either filter
+        // shape, and sideloaded APKs of any flavour. Net effect: every
+        // installed launchable app surfaces exactly once.
+        boolean tv = isTelevision();
+        Intent leanback = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        Intent regular  = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        Intent first  = tv ? leanback : regular;
+        Intent second = tv ? regular  : leanback;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             PackageManager.ResolveInfoFlags f = PackageManager.ResolveInfoFlags.of(0);
-            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), f), self, seen, out);
-            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), f), self, seen, out);
+            addApps(pm.queryIntentActivities(first,  f), self, seen, out);
+            addApps(pm.queryIntentActivities(second, f), self, seen, out);
         } else {
             //noinspection deprecation
-            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0), self, seen, out);
+            addApps(pm.queryIntentActivities(first,  0), self, seen, out);
             //noinspection deprecation
-            addApps(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0), self, seen, out);
+            addApps(pm.queryIntentActivities(second, 0), self, seen, out);
         }
         Collections.sort(out, (a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label));
         return out;
+    }
+
+    /** True when the device is running in Android-TV / leanback UI mode.
+     *  Used to decide which launcher category to query first in
+     *  {@link #queryApps()} so dual-target apps (those declaring BOTH a
+     *  phone CATEGORY_LAUNCHER activity and a TV CATEGORY_LEANBACK_LAUNCHER
+     *  activity) surface the activity tuned for the current device. */
+    private boolean isTelevision() {
+        int uiMode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_TYPE_MASK;
+        return uiMode == Configuration.UI_MODE_TYPE_TELEVISION;
     }
 
     private void addApps(List<ResolveInfo> list, String self, ArraySet<String> seen, List<AppInfo> out) {
@@ -2684,14 +2710,21 @@ public class LauncherActivity extends Activity {
             // would NPE and propagate up through the icon executor body,
             // bouncing into loadApps' catch (Throwable) and resetting
             // appsLoading=false; the user-visible effect would be a blank
-            // shelf until the next package broadcast retried. ai.name can
-            // be null for the same reason; the dedupe key tolerates it
-            // because String.concat on null appends the literal "null"
-            // which still uniques against any real-named activity. Same
-            // shape of guard 1.1.2 added for ri.loadLabel.
+            // shelf until the next package broadcast retried.
             if (ai == null || ai.packageName == null) continue;
             if (ai.packageName.equals(self)) continue;
-            if (!seen.add(ai.packageName + '/' + ai.name)) continue;
+            // Dedupe by PACKAGE NAME — not "package/activity". A single
+            // app that declares BOTH a CATEGORY_LAUNCHER (phone) and a
+            // CATEGORY_LEANBACK_LAUNCHER (TV) activity exposes two
+            // ResolveInfo entries with the SAME package but DIFFERENT
+            // activity names; the old "pkg/activity" key let both pass
+            // and the package showed up twice on the shelf. Package-only
+            // dedupe collapses them to a single entry — the one that came
+            // back from whichever category we queried first (see the
+            // TV-vs-phone ordering in queryApps above). The activity
+            // selected here drives launchApp() too, so the right UI
+            // (TV-tuned vs phone-tuned) opens on the right device.
+            if (!seen.add(ai.packageName)) continue;
             // ri.loadLabel() returns null on stripped-down Fire-TV ROMs that
             // ship apps without a recoverable user-visible label (typically
             // OEM packages with broken AndroidManifest <application> labels).
