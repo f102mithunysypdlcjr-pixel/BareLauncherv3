@@ -1,12 +1,26 @@
 name: Build BareLauncher
 
 on:
+  # Triggers tuned for low CI runtime. We only run the workflow when
+  # something actually needs validating end-to-end:
+  #
+  # - pull_request: lightweight check (lint + unit tests). The full
+  #   instrumentation + signed build is skipped on PRs because they
+  #   have explicit job-level if-conditions further down — runs ~5 min.
+  # - push of a tag matching v* : the actual release gate. Runs the
+  #   full pipeline including emulator instrumentation and the
+  #   release-publish job. Runs ~10-15 min depending on cold-boot.
+  # - workflow_dispatch: manual trigger (for re-runs or one-off
+  #   validation). Runs the full pipeline.
+  #
+  # We deliberately do NOT trigger on push to main. The previous
+  # post-merge run on main was duplicative — the PR check already
+  # validated the merge content, and the next tag push will be the
+  # next gate. Removing it saves ~13 min per release cycle. Net
+  # release-cycle CI time dropped from ~40 min (PR + post-merge +
+  # tag) to ~15-20 min (PR + tag). Tag format: v<semver>, e.g.
+  # v1.1.0; anything not matching `v*` is ignored.
   push:
-    branches: [ main ]
-    # Tag pushes ALSO trigger the workflow so the release job can publish
-    # a signed APK to a GitHub Release. Tag format: v<semver>, e.g. v1.1.0.
-    # Anything not matching `v*` (e.g. arbitrary annotation tags) is
-    # ignored.
     tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
@@ -102,27 +116,45 @@ jobs:
           retention-days: 14
 
   # ──────────────────────────────────────────────────────────────────
-  # Instrumentation smoke test on a real Android emulator. Boots an
-  # API 30 (minSdk) AVD with KVM acceleration and runs the smoke test
-  # under src/androidTest. This is the safety net the project lacked
-  # for over a year — until we wired it here, instrumentation tests
-  # only compiled, never executed.
+  # Instrumentation smoke test on a real Android emulator. Boots a
+  # google_apis x86_64 AVD with KVM acceleration and runs the smoke
+  # test under src/androidTest. This is the safety net the project
+  # lacked for over a year — until we wired it here, instrumentation
+  # tests only compiled, never executed.
   #
-  # API 30 picked over the latest (36) deliberately: it's the minSdk,
-  # so any behaviour-change between Android 11 and the launcher's
-  # programmatic UI surfaces here first. Adding API 36 to the matrix
-  # is a follow-up pass once boot-time / CI-quota numbers from real
-  # runs of this job are known.
+  # Runs only on tag pushes (release gate) and workflow_dispatch (for
+  # manual re-runs). Skipped on PRs to keep PR feedback under ~5 min:
+  # the smoke test is structural (does the activity boot, does the
+  # content view lay out), so the marginal value of running it on
+  # every PR is small relative to running it once at the actual
+  # release gate. Lint + unit tests on every PR catch the bulk of
+  # PR-time regressions; a refactor that breaks LauncherActivity
+  # construction in a non-lint-detectable way will be caught at tag
+  # time before the APK is published.
   #
-  # Cost: ~5-7 min on a cold AVD, ~2 min once the AVD cache is warm.
-  # Runs on PRs as well as main pushes — catching instrumentation
-  # regressions BEFORE merge is worth that quota.
+  # Matrix rows: API 26 (Android 8 — minSdk floor) and API 30 (Android
+  # 11 — the previous floor). Both rows exercise the version-gated
+  # hideSystemUI path: the API 26 row hits the legacy
+  # setSystemUiVisibility flag-based branch; the API 30 row hits the
+  # modern WindowInsetsController branch. A code change that breaks
+  # the legacy path shows up on the API 26 row; a change that breaks
+  # the modern path shows up on the API 30 row.
+  #
+  # Cost: ~5-7 min per matrix row on a cold boot. With AVD caching
+  # disabled (see the long comment in the smoke-test step) and only
+  # tag runs invoking instrumentation, total CI cost per release
+  # cycle is ~10-12 min for both rows on the tag run.
   # ──────────────────────────────────────────────────────────────────
   instrumentation:
     name: Instrumentation smoke test (API ${{ matrix.api-level }})
     runs-on: ubuntu-24.04
     needs: quality
     timeout-minutes: 35
+    # Skip on pull_request — emulator boot + smoke test costs ~10 min
+    # for both matrix rows, which is the bulk of PR CI time. The PR
+    # gate stays at lint + unit tests for fast feedback; the actual
+    # release gate (tag push) runs the full pipeline.
+    if: github.event_name != 'pull_request'
 
     strategy:
       fail-fast: false
@@ -169,6 +201,28 @@ jobs:
         run: |
           gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
+
+      # Cache the Android SDK system-image tarball for this matrix row.
+      # System images are immutable per API revision: when Google ships
+      # a security/bugfix revision, it goes into a new directory under
+      # system-images/android-${API}/google_apis/x86_64/ — the existing
+      # files never get overwritten in place. Caching this directory
+      # is therefore purely additive optimization with no race risk.
+      # No `default_boot.snapshot` is involved (the booted-AVD cache
+      # was the broken thing — see the long comment on the smoke-test
+      # step below); we're caching only the one-time SDK tarball that
+      # `sdkmanager --install 'system-images;android-${API};...'`
+      # otherwise re-downloads (~30-60 sec, ~1 GB) on every CI run.
+      #
+      # Cache key has no -vN suffix because system-image revisions are
+      # rare (sub-yearly per API level) and a cached older revision
+      # still works correctly — it just isn't the absolute latest. If
+      # we ever need to force-pick up a new revision, append a -vN.
+      - name: Cache Android SDK system image
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/android/sdk/system-images/android-${{ matrix.api-level }}
+          key: android-sdk-system-image-${{ matrix.api-level }}-google_apis-x86_64
 
       # AVD caching is intentionally disabled.
       #
