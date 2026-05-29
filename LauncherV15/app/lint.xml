@@ -29,7 +29,7 @@
          that draws from PackageManager.loadIcon. -->
     <issue id="VectorPath"         severity="ignore" />
 
-    <!-- minSdk = 30, targetSdk now tracks the latest platform (36 / Android
+    <!-- minSdk = 26, targetSdk now tracks the latest platform (36 / Android
          16). Keep this as a warning rather than ignored so that when a
          newer platform ships and we miss a bump, lint loudly reminds us. -->
     <issue id="OldTargetApi"       severity="warning" />

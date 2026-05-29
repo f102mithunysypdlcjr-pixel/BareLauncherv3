@@ -12,12 +12,38 @@ android {
 
     defaultConfig {
         applicationId = "com.bare.launcher"
-        minSdk        = 30
+        minSdk        = 26
         // targetSdk = 36 to opt into Android 16 platform behaviours (and to
         // satisfy Play Store's evergreen target-API requirements). The
         // launcher does not use any APIs that changed semantics between
         // 35 and 36; the bump is a target-only change.
         targetSdk     = 36
+        // 1.2.0: lower minSdk floor from 30 (Android 11) to 26 (Android 8).
+        // Performance is independent of minSdk on Android — version-gated
+        // branches via Build.VERSION.SDK_INT are evaluated by ART's branch
+        // predictor in roughly one CPU cycle, and the kernel + framework
+        // libraries on a device running Android 14 are unchanged regardless
+        // of the APK's minSdk. The expanded floor unlocks roughly 25% more
+        // of the Android-TV install base — Mi Box S, older Fire TV sticks,
+        // many 2018-2020 Amlogic / Allwinner TV boxes — which is exactly
+        // the hardware whose stock launcher is the kind of bloated thing
+        // BareLauncher exists to replace.
+        //
+        // Why API 26 and not lower: Adaptive Icons were introduced at API
+        // 26, and IconRenderer relies on AdaptiveIconDrawable as its
+        // primary path. Lowering further would force a second rendering
+        // strategy with a worse fallback for legacy bitmap icons. Raising
+        // higher (API 28 / Android 9) would cut off the Mi-Box-S /
+        // older-Fire-TV segment that's still in active daily use.
+        //
+        // Code impact: hideSystemUI now branches on R (API 30) — modern
+        // WindowInsetsController path on R+, legacy SystemUiVisibility
+        // flag path on API 26-29. Every other modern API surface in the
+        // codebase was already correctly gated for TIRAMISU (API 33) or
+        // earlier — predictive back, RECEIVER_NOT_EXPORTED, ResolveInfoFlags
+        // — so the rest of the source compiles cleanly against the new
+        // floor without further conditional code.
+        //
         // 1.1.5: app-shelf de-dup fix + device-aware activity selection.
         // Apps that ship BOTH a phone-style CATEGORY_LAUNCHER activity and
         // a TV-style CATEGORY_LEANBACK_LAUNCHER activity used to appear
@@ -55,8 +81,8 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
-        versionCode   = 7
-        versionName   = "1.1.5"
+        versionCode   = 8
+        versionName   = "1.2.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
@@ -71,12 +97,40 @@ android {
         // runs on every Android ABI. This `abiFilters` block is therefore a
         // no-op against the current dependency set — but it is a defensive
         // cap: if a future transitive dependency ever brings in a native
-        // library, R8 / AGP will package only `armeabi-v7a` (32-bit ARM,
-        // legacy Android TV boxes) and `arm64-v8a` (every modern phone /
-        // tablet / TV). x86 and x86_64 binaries — which we do not test
-        // against — can never bloat the APK without an explicit edit here.
+        // library, R8 / AGP will package only the ABIs listed here.
+        //
+        // ABIs we cap to:
+        //   armeabi-v7a — 32-bit ARM (legacy Android TV boxes, ancient
+        //                 phones, the long tail of Amlogic / Allwinner
+        //                 hardware that BareLauncher specifically wants
+        //                 to support after the 1.2.0 minSdk-26 expansion).
+        //   arm64-v8a   — 64-bit ARM (every modern phone, tablet, TV box,
+        //                 streaming stick — the dominant Android ABI).
+        //   x86_64      — 64-bit x86. Two reasons it MUST stay in the cap:
+        //                 (1) Chromebooks running ARC++ and the small
+        //                 segment of x86 Android tablets are real
+        //                 production targets; cutting them off would be
+        //                 a regression. (2) AGP's connectedAndroidTest
+        //                 task uses this list to decide which connected
+        //                 devices count as "compatible" — it intersects
+        //                 the device's reported ABIs with this filter.
+        //                 GitHub-Actions emulators run on x86_64 hosts,
+        //                 so the AVD's reported ABIs are [x86_64, x86]
+        //                 (and on API 30+ also arm64-v8a via Google's
+        //                 binary translation). Without x86_64 in this
+        //                 filter, API 26-29 emulators are flagged
+        //                 incompatible and the smoke test fails with
+        //                 "Found 1 connected device(s), 0 of which were
+        //                 compatible." API 30+ accidentally worked
+        //                 before because the arm64 binary-translation
+        //                 layer ships in 30+ system images only — see
+        //                 https://developer.android.com/studio/run/emulator-acceleration#binary-translation
+        //                 for the version boundary.
+        // ABIs we DON'T cap (would still bloat the APK if any native dep
+        // ever arrived): x86 (32-bit, dead in 2026), riscv64 (no Android
+        // TV hardware ships it yet), mips* (long discontinued).
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
         }
     }
 
@@ -149,9 +203,10 @@ android {
         // SyntheticAccessor: this codebase intentionally uses inner classes
         // (RecyclingShelfView, CellView) that touch outer-class fields. The
         // synthetic accessors lint flags are a real cost on Dalvik but
-        // negligible on ART (minSdk 30 ⇒ ART always). Disable rather than
-        // restructure, which would be far more invasive than the saving
-        // justifies.
+        // negligible on ART (minSdk 26 ⇒ ART always — ART has been the
+        // default Android runtime since API 21 / Lollipop). Disable rather
+        // than restructure, which would be far more invasive than the
+        // saving justifies.
         disable += setOf("SyntheticAccessor")
     }
 }

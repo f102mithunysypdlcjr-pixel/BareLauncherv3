@@ -4347,15 +4347,46 @@ public class LauncherActivity extends Activity {
                 new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
     }
 
+    @SuppressWarnings("deprecation")
     private void hideSystemUI() {
         Window w = getWindow();
-        // Modern WindowInsetsController path. minSdk is 30 (R), so the
-        // legacy SystemUiVisibility branch is unreachable and removed.
-        w.setDecorFitsSystemWindows(false);
-        WindowInsetsController c = w.getInsetsController();
-        if (c != null) {
-            c.hide(WindowInsets.Type.systemBars());
-            c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Modern WindowInsetsController path (API 30+, R). Hides system
+            // bars, lets the user swipe them in transiently. The launcher
+            // needs immersive sticky because the user spends most of their
+            // foreground time on it; the bars would otherwise eat ~80 dp
+            // of vertical space on phones, and on TV would draw a visible
+            // overlay strip on top of the wallpaper during input events.
+            w.setDecorFitsSystemWindows(false);
+            WindowInsetsController c = w.getInsetsController();
+            if (c != null) {
+                c.hide(WindowInsets.Type.systemBars());
+                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            // Legacy SystemUiVisibility path (API 26-29). Same effect as
+            // the modern branch above but routed through the deprecated
+            // flag-based API. The flags are deprecated since API 30 but
+            // the platform team kept the constants working forever for
+            // exactly this shape of cross-version code — the
+            // @SuppressWarnings("deprecation") on the method covers the
+            // unavoidable build-time warning. android:windowFullscreen
+            // in styles.xml hides the status bar via FLAG_FULLSCREEN
+            // independently; the visibility flags here are what hide the
+            // navigation bar AND keep both bars hidden when the user
+            // touches the screen (IMMERSIVE_STICKY behaviour). The
+            // LAYOUT_* flags pre-allocate the layout under the bars so
+            // the launcher's content doesn't reflow when the bars
+            // appear / disappear during transient swipes.
+            View dv = w.getDecorView();
+            dv.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            );
         }
     }
 
