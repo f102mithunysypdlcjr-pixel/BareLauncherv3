@@ -5,7 +5,94 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] — 2026-05-29
+## [Unreleased]
+
+Safe perf / stability hardening pass — surgical, behaviour-preserving
+fixes triaged from a focused audit of `LauncherActivity` and the
+helpers it forwards to. Every change either (a) prevents an existing
+edge-case crash on stripped-down ROMs from killing the launcher, or
+(b) drops a redundant allocation, or (c) enables a regression test
+for a previously-fixed bug to land. Net impact on the visible
+behaviour for healthy installs is zero — the changes only matter on
+the kinds of hardware where the launcher was already on the edge of
+crashing.
+
+### Fixed
+
+- **`addApps` no longer aborts the shelf batch when `loadLabel` throws.**
+  `ResolveInfo.loadLabel(pm)` was previously only null-guarded, but
+  stripped-down Fire-TV ROMs have been observed throwing
+  `Resources$NotFoundException` / `SecurityException` /
+  `RuntimeException` out of `loadLabel` when the app's label string-
+  resource id resolves to a missing or cross-user resource. A single
+  bad app aborted the whole `queryApps` batch via the outer
+  `Throwable` handler in `loadApps` — visible to the user as a blank
+  shelf until the next package broadcast retried. The throw is now
+  treated identically to the null path (fall back to the package
+  name and surface the app as a labelled cell).
+- **`packageReceiver` null-guards `getSchemeSpecificPart()`.** The SSP
+  is documented non-null for `package:` URIs, but malformed broadcasts
+  on stripped-down ROMs have been observed returning null. Guard
+  before calling cache / inflight removers so a null key cannot
+  bubble up through `BroadcastReceiver` and trip the system's
+  misbehaving-receiver protection.
+- **`registerPkgReceiver` / `registerTimeReceiver` are now best-effort.**
+  Hardened TV ROMs (and rare cases after a `system_server` restart)
+  have been observed throwing `SecurityException` out of
+  `registerReceiver` even though the launcher is the active home.
+  Without a catch the throwable bubbled up through `onCreate` /
+  `onResume` and the activity died before its view tree was visible.
+  Both registrations now catch and continue; the user-visible
+  consequence is that package / time broadcasts won't auto-refresh
+  the affected subsystem until the next lifecycle event retries the
+  listener wiring.
+- **`unregisterPkgReceiver` / `unregisterTimeReceiver` symmetry.** Both
+  unregister paths now also catch `SecurityException`, mirroring the
+  register-side broadening above. Prevents `onDestroy` / `onPause`
+  from throwing out of an unregister that the system also gates.
+
+### Performance
+
+- **`saveHiddenApps` drops a redundant `ArrayList` wrapper.**
+  `ArraySet<String>` already implements `Iterable<String>` via its
+  inherited `Collection` / `Set` typed signature, so it can be passed
+  straight to `KeymapStore.serializeHiddenApps` without an
+  intermediate copy. Saves one allocation per toggle — not a hot
+  path, but the wrapper was strictly redundant and the comment
+  explaining the wrapper was wrong about the type contract.
+
+### Quality
+
+- **`paintHideChip` dead-ternary cleanup.** The hide-strip selected
+  branch had `tv.setTextColor(hidden ? 0xFF111114 : 0xFF111114)` —
+  both arms of the ternary identical. The flat assignment matches
+  the comment intent without hinting (incorrectly) that the hidden
+  state changes the colour. Cosmetic; no behavioural delta.
+
+### Testing
+
+- **`WallpaperController.computeSampleSize` extracted as static and unit-tested.**
+  The sub-sampling math now lives in a pure-function `static int
+  computeSampleSize(int srcW, int srcH, int screenW, int screenH)`
+  helper that the instance `calcSampleSize(int,int)` delegates to.
+  New `WallpaperControllerSampleSizeTest` (12 cases) pins every
+  shape of input that has ever produced a wallpaper-decode
+  regression: in-bounds, exact-screen, square 2× / 4× over,
+  the **1.1.4 panorama OOM** (4000 × 500 on 1920 × 1080), tall
+  portrait, 4 K-panel variants, 16 K × 16 K stress, power-of-two
+  invariant, and pathological zero / 1 px screen termination via
+  the `0x8000` safety cap.
+- **`ClockFormatterTest` covers the minute-boundary scheduler.** The
+  Spannable / Typeface output of `format(long)` cannot be exercised
+  in JVM unit tests (Android-framework only), but the pure-arithmetic
+  `nextMinuteDelay(long)` math now has 8 cases pinning the contract
+  that drove the once-per-minute clock loop redesign in 1.1.0:
+  result is always positive, never schedules more than `MIN +
+  CUSHION` out, always lands at-or-after the next minute boundary,
+  and the +50 ms cushion prevents firing twice in the same minute
+  on a slightly-fast wall clock.
+
+
 
 Lower the supported-Android floor from 11 (API 30) to 8 (API 26),
 unlocking roughly 25% more of the active Android-TV install base —
