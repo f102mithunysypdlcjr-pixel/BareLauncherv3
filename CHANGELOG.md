@@ -58,6 +58,25 @@ in `queryApps`. The 1.1.5 dual-target dedupe fix (`addApps` package-
 only key, `queryApps` device-aware ordering) ships unchanged inside
 1.2.0.
 
+### CI
+
+- **`abiFilters` cap broadened from `[armeabi-v7a, arm64-v8a]` to
+  `[armeabi-v7a, arm64-v8a, x86_64]`.** AGP's `connectedAndroidTest`
+  task uses the `ndk.abiFilters` declaration as one of the inputs to
+  its "is this device compatible?" check — it intersects the device's
+  reported ABIs with this filter. GitHub-Actions runners host x86_64
+  emulators, so the AVD reports `[x86_64, x86]` on API 26-29 and
+  `[x86_64, x86, arm64-v8a]` on API 30+ (the arm64 binary-translation
+  layer ships in API 30+ system images only). With the previous
+  ARM-only filter, the API 26 emulator instrumentation row failed
+  with "Found 1 connected device(s), 0 of which were compatible" —
+  while API 30 accidentally worked because of the translation layer.
+  Adding `x86_64` to the cap fixes the smoke test on every API level
+  AND keeps Chromebooks / x86 Android tablets supported as real
+  production targets. The launcher has zero native dependencies so
+  this remains a no-op against the current dependency set; the cap
+  is purely a forward-defensive guard for any future native dep.
+
 ## [1.1.5] — 2026-05-29
 
 App-shelf de-duplication fix and device-aware activity selection.
