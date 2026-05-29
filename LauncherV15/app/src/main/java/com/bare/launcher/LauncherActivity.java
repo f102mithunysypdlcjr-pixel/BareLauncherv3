@@ -947,6 +947,40 @@ public class LauncherActivity extends Activity {
         ringView.setContentDescription(getString(R.string.cd_selection_ring));
         root.addView(ringView);
 
+        // The reorder-mode context menu overlay (~10 views, 3 paint
+        // backgrounds, 3 click listeners) is built lazily on first
+        // {@link RecyclingShelfView#enterReorderMode} entry. The overlay
+        // is only visible while the user is rearranging icons — a
+        // workflow that fires 0× on the cold-start path and 0× for
+        // users who never long-press a shelf cell. Pre-building it
+        // costs ~5-15 ms of cold-start view-tree work for a feature
+        // most users never touch. See {@link #ensureMenuOverlay}.
+
+        return root;
+    }
+
+    /** Build the reorder-mode context menu overlay on first use and add
+     *  it to the root view tree. Subsequent calls are no-ops — the overlay
+     *  is reused across every reorder session for the lifetime of the
+     *  activity.
+     *
+     *  <p>Deferred from {@link #buildLayout()} so cold-start does not pay
+     *  for the ~10 view allocations + 3 click-listener wiring of a feature
+     *  most users never trigger. The pattern matches the existing lazy
+     *  init for {@link #buildKeymapOverlay()}.
+     *
+     *  <p>Pre-condition for safe operation of {@link #showContextMenu(View)},
+     *  {@link #hideContextMenu()}, {@link #updateMenuHighlight()} — those
+     *  three already null-guard their entry, so a missed call here would
+     *  produce a silent no-op rather than an NPE. The single unique
+     *  call site is {@link RecyclingShelfView#enterReorderMode(int)},
+     *  which is the only path that transitions the activity into a state
+     *  where the overlay must be visible. */
+    private void ensureMenuOverlay() {
+        if (menuOverlay != null) return;
+        FrameLayout r = root;
+        if (r == null) return;
+
         menuOverlay = new FrameLayout(this) {
             @Override public boolean onTouchEvent(MotionEvent ev) {
                 // Consume — prevents tap-through to shelf. Dismiss handled by dispatchTouchEvent.
@@ -1075,9 +1109,7 @@ public class LauncherActivity extends Activity {
         menuCol.addView(menuMove,      new android.widget.LinearLayout.LayoutParams(dp(140), WRAP));
 
         menuOverlay.addView(menuCol, new FrameLayout.LayoutParams(WRAP, WRAP));
-        root.addView(menuOverlay);
-
-        return root;
+        r.addView(menuOverlay);
     }
 
     void showContextMenu(View cell) {
@@ -1646,6 +1678,10 @@ public class LauncherActivity extends Activity {
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
             rebindAll();
+            // Lazy-init the context menu overlay on first entry. Cold start
+            // does not pay for this overlay's view-tree construction; users
+            // who never long-press a shelf cell never trigger it.
+            LauncherActivity.this.ensureMenuOverlay();
             CellView cv = attached.get(idx); if (cv != null) LauncherActivity.this.showContextMenu(cv);
             // rebindAll() calls cv.layout() directly — no requestLayout in flight.
             // post() fires after the current message finishes, which is exactly when
@@ -4462,6 +4498,21 @@ public class LauncherActivity extends Activity {
     }
 
     private void initCaches() {
+        // Trigger the SharedPreferences async-load thread early so the
+        // first synchronous {@code .getString()} / {@code .getInt()}
+        // call later in onCreate (loadKeyMap, loadHiddenApps, the
+        // KEY_SCROLL_IDX read in onResume) does not block on disk I/O.
+        // SharedPreferencesImpl spawns a "SharedPreferencesImpl-load"
+        // background thread inside its constructor; this single call
+        // returns immediately, but the file-parse runs in parallel
+        // with the slowest cold-start step ({@link #buildLayout()}).
+        // By the time the first reader hits, the parsed Map is in
+        // memory and the synchronous wait inside getString completes
+        // in a single CountDownLatch await. Net effect: ~5-30 ms
+        // less UI-thread blocking on slow ROMs at cold start, with
+        // zero behavioural change (the load was always going to
+        // happen — just now in parallel).
+        getSharedPreferences(PREFS, MODE_PRIVATE);
         int memMb   = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
         int cacheMb = Math.min(memMb / 8, 16);
         iconCache = new LruCache<String, Bitmap>(cacheMb * 1024 * 1024) {
