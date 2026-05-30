@@ -5,6 +5,62 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.6] — 2026-05-30
+
+Single-fix manifest patch that makes BareLauncher discoverable by
+third-party "set default launcher" / "Launcher Manager" tools
+popular on XDA, and to any other OS surface that probes for
+launcher activities via the canonical
+`queryIntentActivities(MAIN+LAUNCHER, MATCH_DEFAULT_ONLY)` call.
+
+### Fixed
+
+- **`AndroidManifest.xml` adds `CATEGORY_LAUNCHER` to the home
+  activity's intent filter.** The launcher previously declared
+  `MAIN`+`HOME`+`DEFAULT` (system Default-launcher picker) and
+  `MAIN`+`LEANBACK_LAUNCHER` (Android TV "All apps" row) but **not**
+  `MAIN`+`LAUNCHER`, which is the category third-party launcher
+  managers and "open with" pickers use to enumerate installed
+  launcher apps. Without it, BareLauncher was invisible to those
+  tools — the user-reported bug was "the app does not appear in
+  Launcher Manager from XDA when I try to set it as default
+  launcher." Adding `LAUNCHER` to the same intent filter (rather
+  than as a separate filter) is the canonical Android pattern;
+  Google's AOSP Launcher3 ships the same combined
+  `HOME`+`DEFAULT`+`LAUNCHER` filter on its main activity. The
+  launcher's own `queryApps()` already self-filters by
+  `getPackageName()`, so the new visibility does **not** make our
+  activity appear on its own home shelf — it only affects external
+  enumeration.
+- **`AndroidManifest.xml` adds `CATEGORY_DEFAULT` to the leanback
+  filter.** Hygiene: without `DEFAULT`, the leanback filter does
+  not match `queryIntentActivities` calls that pass
+  `MATCH_DEFAULT_ONLY` (the `PackageManager` default flag). Some
+  third-party TV launcher-manager tools combine
+  `MATCH_DEFAULT_ONLY` with a `LEANBACK_LAUNCHER` probe; without
+  `DEFAULT` they would still miss our activity. Also matches the
+  shape of every well-known TV launcher manifest.
+
+### Verified
+
+- All four other `Intent.CATEGORY_HOME` consumers in the codebase
+  (the system `ACTION_MAIN`+`HOME` boot resolution, the
+  `<queries>` block, the predictive-back chain, and
+  `LauncherActivity` itself) continue to work unchanged — adding
+  `LAUNCHER` to the same filter does not narrow the existing
+  matches, only widens the set of queries that find this activity.
+- `queryApps()` self-filter (`if (ai.packageName.equals(self))
+  continue;`) means the launcher does not list itself on the home
+  shelf despite now matching `MAIN`+`LAUNCHER` enumeration.
+- Java sources, ProGuard rules, lint rules unchanged. Manifest-only
+  patch.
+
+### Versioning
+
+- `versionCode` 16 → 17, `versionName` 1.3.5 → 1.3.6. Single bug
+  fix, no behaviour change for users who already had the launcher
+  set as default — SemVer PATCH bump.
+
 ## [1.3.5] — 2026-05-30
 
 Patch release with four small, low-risk fixes that remove the

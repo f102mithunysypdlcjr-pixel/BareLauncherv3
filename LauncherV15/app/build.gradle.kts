@@ -81,6 +81,19 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 16 → 17: 1.3.6 is a single-fix manifest patch that
+        // makes the launcher discoverable by third-party "set default
+        // launcher" / "Launcher Manager" tools popular on XDA. The
+        // launcher's HOME activity declared MAIN+HOME+DEFAULT and
+        // MAIN+LEANBACK_LAUNCHER but NOT MAIN+LAUNCHER — and
+        // queryIntentActivities(MAIN+LAUNCHER, MATCH_DEFAULT_ONLY) is
+        // exactly how those tools enumerate installed launcher apps.
+        // The fix adds CATEGORY_LAUNCHER to the existing HOME filter
+        // (the canonical Android pattern, matching AOSP Launcher3),
+        // and CATEGORY_DEFAULT to the LEANBACK filter so the same
+        // MATCH_DEFAULT_ONLY queries work on TV. Manifest-only
+        // change, zero Java touched. Patch release — SemVer PATCH bump.
+        //
         // Bumped 15 → 16: 1.3.5 is a small performance + cleanup patch.
         // (1) onIconLoaded now short-circuits the keymap-card slot
         // repaint when the just-loaded package isn't bound to any
@@ -175,8 +188,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 16
-        versionName   = "1.3.5"
+        versionCode   = 17
+        versionName   = "1.3.6"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
