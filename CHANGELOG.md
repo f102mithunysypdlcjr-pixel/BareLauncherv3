@@ -5,6 +5,64 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] — 2026-05-30
+
+Single-fix release. Closes a long-standing visual regression in the
+hide-app drawer (and the keymap picker, and the keymap slot-row icon
+miniatures) where apps that had been hidden — especially across a
+launcher restart — rendered with their label only. The icon
+`ImageView` slot was reserved but invisible, so the chip read as
+"name with no icon". Affected only the management UIs; the home
+shelf itself was always correct.
+
+### Fixed
+
+- **Hide-manager / keymap-picker chips no longer render icon-less for
+  previously hidden apps.** Root cause was lifecycle-scoped: the
+  `iconCache` LRU is populated lazily, and the only writer path
+  (`setApps(displayed)` → `preWarmIcon` per visible cell) ran
+  exclusively over the *filtered* shelf list. Hidden apps were
+  removed from the shelf upstream, so their bitmaps never reached
+  `iconCache`. `buildHideChips` and `rebuildPickerChips` then read
+  `iconCache` at chip-build time, found a miss, and emitted the
+  chip with `ImageView.setVisibility(GONE)`. Worse: each strip
+  cached its built children and only rebuilt when `appList.size()`
+  changed, so the icon-less chip persisted across hide/unhide
+  cycles for the lifetime of the activity. Fix is in
+  `LauncherActivity.applyShelfApps`: the loop that filters hidden
+  apps off the shelf now also kicks `preWarmIcon(a)` for the hidden
+  ones, keeping `iconCache` complete for every installed app
+  regardless of whether the shelf renders it. Same fix path
+  benefits the keymap slot-row icon miniatures (which read from
+  `iconCache` for the bound package).
+- **`enterHideManager` / `enterAppPicker` top up icons on cached
+  chip strips.** A chip built before its bitmap was loaded would
+  otherwise stay icon-less even after `iconCache` later gained the
+  entry, because the size-based build cache short-circuits the
+  rebuild. Both entry points now run a cheap allocation-free pass
+  (`refreshHideChipIcons` / `refreshPickerChipIcons`) that walks
+  the existing children, identifies the `ImageView`s still flagged
+  `GONE`, and resolves them against the current `iconCache`. The
+  pass is `O(N)` over the strip and short-circuits on chips that
+  already have their bitmap.
+- **Icon-delivery callbacks live-update any open chip strip / slot
+  row.** New `onIconLoaded(pkg, bitmap)` hook, invoked from both
+  `preWarmIcon` and `loadIconAsync`'s `runOnUiThread` block once
+  the bitmap is in cache and shelf delivery is complete. The hook
+  early-outs in a single field-read + visibility check when the
+  keymap overlay isn't on screen (the common case) so the icon-
+  flood path on cold start pays effectively nothing. When the
+  overlay is open, the hook resolves the package to its
+  `appList` index, updates the matching chip's `ImageView`, and
+  for slot mode triggers a `refreshKeymapRows` repaint. Net effect
+  for the user: hidden-app icons populate live in the management
+  UIs as the cache fills, instead of requiring an overlay
+  close-and-reopen cycle.
+
+### Versioning
+
+- `versionCode` 9 → 10, `versionName` 1.2.1 → 1.2.2.
+
 ## [1.2.1] — 2026-05-29
 
 Safe perf / stability hardening pass — surgical, behaviour-preserving

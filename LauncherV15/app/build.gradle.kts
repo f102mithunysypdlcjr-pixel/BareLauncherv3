@@ -81,12 +81,13 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
-        // Bumped 8 → 9: 1.2.1 ships three rounds of safe perf / stability
-        // hardening on top of the 1.2.0 minSdk-26 release. Pure bug fixes
-        // and behaviour-preserving optimisations — no new features, no
-        // breaking changes — so this is a SemVer PATCH bump.
-        versionCode   = 9
-        versionName   = "1.2.1"
+        // Bumped 9 → 10: 1.2.2 ships a single targeted bug fix — the
+        // hide-app drawer (and keymap picker / slot rows) was rendering
+        // empty icons for previously hidden apps because their bitmaps
+        // never landed in iconCache. Pure bug fix, no new features, no
+        // breaking changes — SemVer PATCH bump.
+        versionCode   = 10
+        versionName   = "1.2.2"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
