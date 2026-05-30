@@ -163,12 +163,14 @@ final class AppleStyle {
      * <p>Composition (proportional to {@code r}):
      * <ul>
      *   <li>Body: filled disc at radius {@code r * 0.40}.</li>
-     *   <li>Teeth: 8 small rounded rectangles at 45° increments,
-     *       protruding outward from the body. Each tooth is
-     *       {@code r * 0.32} wide and {@code r * 0.18} long, with
-     *       a corner radius of {@code toothW * 0.30}. Teeth overlap
-     *       the body by 1 px so the silhouette reads as one
-     *       continuous shape with no AA seam at the join.</li>
+     *   <li>Teeth: 6 rounded rectangles at 60° increments, protruding
+     *       outward from the body. Each tooth is {@code r * 0.32}
+     *       wide and {@code r * 0.20} long, with a corner radius of
+     *       {@code toothW * 0.45} (more rounded than v1.3.3's 0.30 —
+     *       reads as visibly rounded teeth at TV viewing distance,
+     *       per the v1.3.4 "rounded teeth" feedback). Teeth overlap
+     *       the body by 1 px so the silhouette reads as one continuous
+     *       shape with no AA seam at the join.</li>
      *   <li>Hole: filled disc at radius {@code r * 0.16} drawn in
      *       {@code plateColor} so the gear reads with a central
      *       opening. The plate colour matches the pill backdrop the
@@ -180,7 +182,7 @@ final class AppleStyle {
      * <p>Outer extent: {@code r * 0.58} including the tooth tips —
      * comfortable breathing room before the pill rim.
      *
-     * <p>Allocations: zero per draw. The 8 teeth are placed via
+     * <p>Allocations: zero per draw. The 6 teeth are placed via
      * {@link Canvas#save} / {@link Canvas#rotate} / {@link Canvas#restore}
      * so no scratch matrix is allocated. The caller-owned {@link Paint}
      * is reused with only its {@code color} mutated between body /
@@ -204,9 +206,9 @@ final class AppleStyle {
                               int symbolColor, int plateColor, Paint paint) {
         final float rBody    = r * 0.40f;
         final float rHole    = r * 0.16f;
-        final float toothLen = r * 0.18f;
+        final float toothLen = r * 0.20f;
         final float toothW   = r * 0.32f;
-        final float cornerR  = toothW * 0.30f;
+        final float cornerR  = toothW * 0.45f;
 
         paint.setAntiAlias(true);
         paint.setStyle(Paint.Style.FILL);
@@ -215,13 +217,13 @@ final class AppleStyle {
         // Body — filled disc.
         c.drawCircle(cx, cy, rBody, paint);
 
-        // 8 teeth — rounded rectangles, rotated to each 45° step. The
+        // 6 teeth — rounded rectangles, rotated to each 60° step. The
         // rect is drawn at the "north" position (cy − rBody − toothLen
         // … cy − rBody) and the canvas is rotated to place each tooth.
         // 1 px overlap with the body avoids an AA seam at the join.
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 6; i++) {
             c.save();
-            c.rotate(i * 45f, cx, cy);
+            c.rotate(i * 60f, cx, cy);
             c.drawRoundRect(
                     cx - toothW / 2f,
                     cy - rBody - toothLen + 1f,
