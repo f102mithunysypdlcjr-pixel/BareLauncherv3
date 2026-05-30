@@ -81,6 +81,24 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 15 → 16: 1.3.5 is a small performance + cleanup patch.
+        // (1) onIconLoaded now short-circuits the keymap-card slot
+        // repaint when the just-loaded package isn't bound to any
+        // remappable key — eliminates ~50 wasted full-card repaints
+        // during the cold-start icon flood when the user has the
+        // settings panel / keymap card open behind a slow load.
+        // (2) anchorCardUnderGear's two int[2] scratch arrays are
+        // promoted to instance fields, removing the only remaining
+        // per-overlay-open allocation. (3) ClockFormatter drops two
+        // long-uncalled single-arg overloads (shouldRepaint(long) /
+        // format(long)) — pure dead-code removal, no behaviour change.
+        // (4) The instrumentation smoke test migrates from the
+        // deprecated ActivityTestRule + Thread.sleep(500) pattern to
+        // ActivityScenario + waitForIdleSync, which removes a real
+        // CI flake source on slow KVM emulators and lets us drop the
+        // androidx.test:rules dependency. Patch release, no
+        // user-visible behaviour change — SemVer PATCH bump.
+        //
         // Bumped 14 → 15: 1.3.4 trims the gear glyph from 8 teeth to 6
         // (per the "6 rounded teeth" design feedback — wider angular
         // gap reads as the canonical Material / iOS settings gear at
@@ -157,8 +175,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 15
-        versionName   = "1.3.4"
+        versionCode   = 16
+        versionName   = "1.3.5"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
@@ -315,5 +333,11 @@ dependencies {
     // emulator runs the test.
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test:rules:1.6.1")
+    // androidx.test:core hosts ActivityScenario / ActivityScenarioRule —
+    // the modern, deterministic replacement for the deprecated
+    // ActivityTestRule API. Pulled in transitively by ext:junit but
+    // declared explicitly here because the smoke test imports
+    // ActivityScenario directly; surfacing the dep makes the test's
+    // contract self-evident in this file.
+    androidTestImplementation("androidx.test:core:1.6.1")
 }
