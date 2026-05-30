@@ -412,6 +412,26 @@ public class LauncherActivity extends Activity {
      *  back" gesture lands the user exactly where they left the panel. */
     private boolean                     keymapOpenedFromSettings = false;
 
+    /** Set alongside {@link #keymapOpenedFromSettings} when the panel
+     *  enters HIDE mode directly (from the "Manage hidden apps" row).
+     *  {@link #exitHideManager} consults this and skips the v1.2.x
+     *  "back-from-HIDE returns to SLOTS" behaviour — the user came in
+     *  from the panel, not from the slot list, so back should bypass
+     *  SLOTS and dismiss the keymap card so the panel re-opens. */
+    private boolean                     hideManagerSkipSlotsOnExit = false;
+
+    /** Single shared dim backdrop View added to {@link #root} in
+     *  {@link #buildLayout}. Both the settings panel and the keymap
+     *  card reference it via {@link #ensureOverlayBackdropVisible} /
+     *  {@link #dismissOverlayBackdropIfIdle}. Replaces the v1.3.0
+     *  initial design's per-overlay {@code setBackgroundColor(0x33000000)}
+     *  which produced a visible dim flicker when transitioning from
+     *  the panel to the keymap card (settings backdrop fading out
+     *  while keymap backdrop faded in compounded for ~110 ms above
+     *  the wallpaper). With one shared backdrop the dim level stays
+     *  constant across the entire modal flow. */
+    private View                        overlayBackdrop = null;
+
     /** Symbolic indices for the 5 rows in the settings panel. UP/DOWN
      *  navigation is modulo SETTINGS_ROW_COUNT, OK dispatches via a
      *  switch on these values. */
@@ -975,6 +995,30 @@ public class LauncherActivity extends Activity {
         final int BTN_GAP     = dp(4);
         final int MARG_T      = dp(14);
         final int MARG_E      = dp(16);
+
+        // Shared dim backdrop for the settings panel and the keymap card.
+        // Added to root z-order BEFORE the toolbar pills so both modal
+        // overlays can sit above it (their show* methods bring themselves
+        // to front, putting them above the backdrop). GONE by default —
+        // the backdrop only exists during a modal flow.
+        //
+        // One shared backdrop avoids the v1.3.0 initial-design dim flicker
+        // where transitioning settings → keymap fade-out a 0x33-black
+        // backdrop while fading in another 0x33-black backdrop on top of
+        // it, briefly compositing ~0x5C and reading as "the wallpaper just
+        // went darker for half a second". With one persistent backdrop the
+        // dim level stays constant across the entire modal flow regardless
+        // of how the user navigates between the two surfaces.
+        overlayBackdrop = new View(this);
+        overlayBackdrop.setBackgroundColor(0x33000000); // 20 % dim
+        overlayBackdrop.setVisibility(View.GONE);
+        overlayBackdrop.setAlpha(0f);
+        // Clickable so taps on the dim region don't pass through to the
+        // shelf cells underneath. The active overlay's onTouchEvent
+        // handles tap-outside-the-card dismissal; the backdrop just
+        // absorbs everything else.
+        overlayBackdrop.setClickable(true);
+        root.addView(overlayBackdrop, new FrameLayout.LayoutParams(MATCH, MATCH));
 
         // Top-right toolbar buttons. Layout left-to-right after the v1.3.0
         // consolidation:
@@ -3127,6 +3171,86 @@ public class LauncherActivity extends Activity {
     // "settings → button shortcuts → bind a key → back" gesture lands
     // exactly back at the panel cursor where the user left off.
 
+    /** Show the shared dim backdrop if it isn't already visible. Idempotent
+     *  — the second consecutive call (e.g. opening keymap on top of an
+     *  already-open settings panel) is a no-op so the dim level stays
+     *  constant across the modal flow. */
+    private void ensureOverlayBackdropVisible() {
+        View bd = overlayBackdrop;
+        if (bd == null) return;
+        if (bd.getVisibility() == View.VISIBLE && bd.getAlpha() >= 0.99f) return;
+        bd.animate().cancel();
+        bd.setVisibility(View.VISIBLE);
+        bd.bringToFront();
+        bd.animate().alpha(1f).setDuration(140).start();
+    }
+
+    /** Hide the shared backdrop only when neither overlay is logically
+     *  open. "Logically open" includes a queued re-open via
+     *  {@link #keymapOpenedFromSettings} — the 60 ms postDelayed window
+     *  between hideKeymapOverlay's withEndAction and the panel re-show
+     *  must not flash the wallpaper visible. */
+    private void dismissOverlayBackdropIfIdle() {
+        View bd = overlayBackdrop;
+        if (bd == null) return;
+        if (anyOverlayLogicallyOpen()) return;
+        bd.animate().cancel();
+        bd.animate()
+                .alpha(0f)
+                .setDuration(140)
+                .withEndAction(() -> {
+                    if (bd != overlayBackdrop) return;
+                    if (anyOverlayLogicallyOpen()) return;
+                    bd.setVisibility(View.GONE);
+                })
+                .start();
+    }
+
+    /** True when any modal overlay is currently visible OR a deferred
+     *  re-open is queued. Drives the backdrop's stay-or-fade decision. */
+    private boolean anyOverlayLogicallyOpen() {
+        if (keymapOpenedFromSettings) return true;
+        FrameLayout sp = settingsOverlay;
+        if (sp != null && sp.getVisibility() == View.VISIBLE) return true;
+        FrameLayout ko = keymapOverlay;
+        if (ko != null && ko.getVisibility() == View.VISIBLE) return true;
+        return false;
+    }
+
+    /** Equalise every settings-panel row's width to the widest measured
+     *  row. Same pattern as {@code equalizeKeymapRowWidths} on the keymap
+     *  card. Eliminates the right-side dead space the v1.3.0 initial
+     *  design left when {@code FrameLayout.LayoutParams(dp(252), WRAP)}
+     *  forced every row to a fixed-width column regardless of content.
+     *  Indicators stay aligned at the right edge across all rows because
+     *  every row ends at the same x. Called once after the panel is
+     *  built (post-layout via {@link View#post}); the row widths don't
+     *  drift after that since the rows are i18n-static
+     *  {@code String} resources. */
+    private void equalizeSettingsRowWidths(android.widget.LinearLayout col) {
+        int max = 0;
+        for (int i = 0; i < col.getChildCount(); i++) {
+            View child = col.getChildAt(i);
+            if (!(child instanceof android.widget.LinearLayout)) continue;
+            child.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            int w = child.getMeasuredWidth();
+            if (w > max) max = w;
+        }
+        if (max <= 0) return;
+        for (int i = 0; i < col.getChildCount(); i++) {
+            View child = col.getChildAt(i);
+            if (!(child instanceof android.widget.LinearLayout)) continue;
+            android.view.ViewGroup.LayoutParams lp = child.getLayoutParams();
+            if (lp == null) continue;
+            lp.width = max;
+            child.setLayoutParams(lp);
+        }
+    }
+
+    // ── Settings panel build / show / hide / refresh / activate ─────────
+
     /** Lazy-build the settings panel on first {@link #showSettingsPanel}.
      *  Re-used across opens. Same plate / row / animation primitives as
      *  the keymap overlay — only the row count and content differ. */
@@ -3153,7 +3277,9 @@ public class LauncherActivity extends Activity {
         };
         ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
         ov.setVisibility(View.GONE);
-        ov.setBackgroundColor(0x33000000); // 20 % dim — keeps shelf faintly visible
+        // The dim is provided by the shared overlayBackdrop view; this
+        // overlay is a transparent click-catcher only. See
+        // ensureOverlayBackdropVisible / dismissOverlayBackdropIfIdle.
         ov.setClickable(true);
         ov.setFocusable(true);
 
@@ -3201,7 +3327,13 @@ public class LauncherActivity extends Activity {
             rowBg.setColor(Color.TRANSPARENT);
             row.setBackground(rowBg);
 
-            // [0] label — flexes so the indicator hugs the right edge.
+            // [0] label — WRAP_CONTENT with end-padding so the indicator
+            //     sits a small visual gap to its right. v1.3.0 initial
+            //     design used (width=0, weight=1) which forced every row
+            //     to a fixed 252 dp column and left ~70 dp of dead space
+            //     after short labels like "Show clock". WRAP_CONTENT +
+            //     post-build equalizeSettingsRowWidths matches the
+            //     keymap card's auto-fit pattern exactly.
             TextView label = new TextView(this);
             label.setText(rowLabels[i]);
             label.setTextColor(0xCCFFFFFF);
@@ -3210,7 +3342,8 @@ public class LauncherActivity extends Activity {
             label.setSingleLine(true);
             label.setEllipsize(TextUtils.TruncateAt.END);
             android.widget.LinearLayout.LayoutParams labelLp =
-                    new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
+                    new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+            labelLp.setMarginEnd(dp(14));
             row.addView(label, labelLp);
 
             // [1] right-side indicator — chevron for drill-throughs, check
@@ -3222,7 +3355,6 @@ public class LauncherActivity extends Activity {
             indicator.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
             indicator.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
             indicator.setSingleLine(true);
-            indicator.setPadding(dp(8), 0, 0, 0);
             if (i == SETTINGS_ROW_SHOW_CLOCK) {
                 // Bind the field reference here so the toggle handler can
                 // mutate text colour / character without re-walking the
@@ -3235,8 +3367,13 @@ public class LauncherActivity extends Activity {
             row.addView(indicator,
                     new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
 
+            // Row uses WRAP_CONTENT initially so the natural width is
+            // (label + margin + indicator). equalizeSettingsRowWidths
+            // (called post-build) snaps every row to the widest measured
+            // width so all indicators line up vertically at the right
+            // edge while the card auto-fits to the longest label.
             android.widget.LinearLayout.LayoutParams rowLp =
-                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
+                    new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
             rowLp.bottomMargin = dp(2);
             col.addView(row, rowLp);
         }
@@ -3259,10 +3396,11 @@ public class LauncherActivity extends Activity {
         }
 
         card.addView(col, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
-        // 252 dp matches the keymap card width — the panel reads as the
-        // same "kind of surface" as the keymap card to anyone who has
-        // muscle memory of the launcher's UI vocabulary.
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(dp(252), WRAP);
+        // Card width is now WRAP_CONTENT so it auto-fits the widest row's
+        // intrinsic width (no fixed 252 dp column). The card will hug the
+        // longest visible label + chevron with a small breathing-room
+        // padding, no right-side dead space.
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
         cardLp.gravity = Gravity.TOP | Gravity.END;
         card.setLayoutParams(cardLp);
         ov.addView(card);
@@ -3271,6 +3409,14 @@ public class LauncherActivity extends Activity {
         settingsOverlay = ov;
         settingsCard    = card;
         settingsColumn  = col;
+
+        // Equalise row widths in a post() so each row's measure pass has
+        // run. Touching rowLp.width here directly would race with the
+        // first layout pass and produce zero widths.
+        col.post(() -> {
+            if (col != settingsColumn) return;
+            equalizeSettingsRowWidths(col);
+        });
     }
 
     /** Animate the panel in as a dropdown under the gear toolbar pill.
@@ -3279,6 +3425,7 @@ public class LauncherActivity extends Activity {
      *  resolves against the gear too, so opening keymap from inside the
      *  settings panel keeps the visual continuity. */
     private void showSettingsPanel() {
+        if (destroyed) return;
         if (settingsOverlay == null) buildSettingsPanel();
         FrameLayout ov = settingsOverlay;
         final android.widget.LinearLayout card = settingsCard;
@@ -3287,6 +3434,12 @@ public class LauncherActivity extends Activity {
         // Hide focus ring — it belongs to the shelf which is now logically
         // behind the panel.
         RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+
+        // Bring up the shared dim backdrop. Idempotent — when this is
+        // called as part of a settings → keymap → settings round-trip
+        // the backdrop is already at full alpha and this call is a
+        // no-op, so the dim level stays constant.
+        ensureOverlayBackdropVisible();
 
         settingsSelectedRow = 0;
         refreshSettingsRows();
@@ -3355,10 +3508,17 @@ public class LauncherActivity extends Activity {
                     .withEndAction(() -> {
                         if (ov != settingsOverlay) return;
                         ov.setVisibility(View.GONE);
+                        // Drop the dim only if no other overlay is
+                        // logically open (covers the immediate-close
+                        // case AND the settings → keymap transition
+                        // where the keymap card has already taken
+                        // over the modal flow).
+                        dismissOverlayBackdropIfIdle();
                     })
                     .start();
         } else {
             ov.setVisibility(View.GONE);
+            dismissOverlayBackdropIfIdle();
         }
         // Restore focus to the gear pill so the user lands back where
         // they triggered the panel. Falls through to the WiFi pill if
@@ -3456,11 +3616,15 @@ public class LauncherActivity extends Activity {
     private void activateSettingsRow(int row) {
         switch (row) {
             case SETTINGS_ROW_HIDE_APPS:
-                // Hand off to the keymap card's HIDE mode. Set the return
-                // flag so the keymap card knows to re-open the panel on
-                // its own dismiss, and close the panel before launching
-                // the next surface.
-                keymapOpenedFromSettings = true;
+                // Hand off to the keymap card's HIDE mode. Set both the
+                // re-open flag (so dismissing the keymap card returns to
+                // this panel) and the skip-slots flag (so Back from HIDE
+                // bypasses the SLOTS list and dismisses the keymap card
+                // immediately, since the user came in from settings, not
+                // from the slot list). hide-then-show keeps the dim
+                // constant via the shared backdrop.
+                keymapOpenedFromSettings   = true;
+                hideManagerSkipSlotsOnExit = true;
                 hideSettingsPanel();
                 showKeymapOverlay();
                 enterHideManager();
@@ -3566,7 +3730,9 @@ public class LauncherActivity extends Activity {
         // Light contextual dim — this is a dropdown, not a full-screen modal.
         // Keeps the home shelf faintly visible behind so the action feels
         // anchored to the page rather than blocking it.
-        ov.setBackgroundColor(0x33000000);
+        // v1.3.0: dim is now provided by the shared overlayBackdrop view
+        // (see ensureOverlayBackdropVisible / dismissOverlayBackdropIfIdle)
+        // so transitioning settings → keymap doesn't flash a re-dim.
         ov.setClickable(true);
         ov.setFocusable(true);
         ov.setFocusableInTouchMode(true);
@@ -3787,6 +3953,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void showKeymapOverlay() {
+        if (destroyed) return;
         if (keymapOverlay == null) buildKeymapOverlay();
         FrameLayout ko = keymapOverlay;
         final android.widget.LinearLayout card = keymapCard;
@@ -3794,6 +3961,10 @@ public class LauncherActivity extends Activity {
         // Hide the focus ring — it belongs to the shelf, which is now
         // logically behind the overlay.
         RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+        // Shared dim backdrop. Idempotent when transitioning from the
+        // settings panel — already at full alpha so this is a no-op
+        // and the dim level stays constant.
+        ensureOverlayBackdropVisible();
         // Always open in slot-list mode.
         keymapMode        = KEYMAP_MODE_SLOTS;
         keymapSelectedRow = 0;
@@ -3887,10 +4058,19 @@ public class LauncherActivity extends Activity {
                         card.setAlpha(1f);
                         card.setScaleX(1f); card.setScaleY(1f);
                         card.setTranslationY(0f);
+                        // Drop the shared dim only if no other overlay is
+                        // logically open. anyOverlayLogicallyOpen returns
+                        // true while keymapOpenedFromSettings is still
+                        // set (a re-open of the settings panel is queued
+                        // 60 ms below) — that keeps the dim constant
+                        // through the keymap → settings hand-off so the
+                        // wallpaper doesn't flash visible mid-transition.
+                        dismissOverlayBackdropIfIdle();
                     })
                     .start();
         } else {
             ko.setVisibility(View.GONE);
+            dismissOverlayBackdropIfIdle();
         }
         // Restore focus to the gear button so the user lands back where
         // they triggered the overlay (gear is the only entry point into
@@ -3902,8 +4082,14 @@ public class LauncherActivity extends Activity {
             keymapOpenedFromSettings = false;
             // Run AFTER the keymap card's close animation has had a frame
             // to start so the two cards don't visually fight. uiHandler
-            // (main looper) keeps the post on the right thread.
-            uiHandler.postDelayed(this::showSettingsPanel, 60L);
+            // (main looper) keeps the post on the right thread. The
+            // settings re-open's destroyed-guard guarantees the lambda
+            // is a no-op if the activity teardown lands inside the 60 ms
+            // window.
+            uiHandler.postDelayed(() -> {
+                if (destroyed) return;
+                showSettingsPanel();
+            }, 60L);
             return;
         }
         View mb = mapperBtnView;
@@ -4499,14 +4685,34 @@ public class LauncherActivity extends Activity {
     /** Cancel the hide manager and return to slot mode. The shelf is
      *  re-filtered only on overlay close (see hideKeymapOverlay) so
      *  exiting hide mode without closing the overlay leaves the shelf
-     *  alone — cheap, and avoids a flicker behind the dim. */
+     *  alone — cheap, and avoids a flicker behind the dim.
+     *
+     *  <p>v1.3.0: when the user entered HIDE directly from the settings
+     *  panel (the "Manage hidden apps" row), Back from HIDE should NOT
+     *  drop the user into the SLOTS list (which the user never opened
+     *  and doesn't expect to see). The
+     *  {@link #hideManagerSkipSlotsOnExit} flag — set in
+     *  {@link #activateSettingsRow} alongside
+     *  {@link #keymapOpenedFromSettings} — short-circuits the SLOTS
+     *  return path and dismisses the keymap card directly, which then
+     *  re-opens the settings panel via the existing keymap → settings
+     *  hand-off (so the user lands at "settings panel, Manage hidden
+     *  apps row selected"). */
     private void exitHideManager() {
+        if (hideManagerSkipSlotsOnExit) {
+            hideManagerSkipSlotsOnExit = false;
+            hideKeymapOverlay();
+            return;
+        }
         keymapMode = KEYMAP_MODE_SLOTS;
         if (keymapHideView != null) keymapHideView.setVisibility(View.GONE);
         if (keymapColumn   != null) keymapColumn  .setVisibility(View.VISIBLE);
-        // Land focus back on the manage-row entry the user came from so
-        // a reopen of the manager (or another action) is one keypress away.
-        keymapSelectedRow = SHORTCUT_LABELS.length;
+        // Land focus back on the row the user came from. Pre-v1.3.0 this
+        // was SHORTCUT_LABELS.length (the manage-hidden-apps 7th row),
+        // but that row is now in the settings panel — fall back to the
+        // first slot row when re-entering SLOTS from HIDE within the
+        // keymap card itself.
+        keymapSelectedRow = 0;
         refreshKeymapRows();
     }
 

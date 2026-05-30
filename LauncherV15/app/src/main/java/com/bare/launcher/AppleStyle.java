@@ -159,18 +159,25 @@ final class AppleStyle {
      * vector or raster icon resource for it.
      *
      * <p>Composition (all sizes proportional to {@code r} so the glyph
-     * scales cleanly inside any pill diameter):
+     * scales cleanly inside any pill diameter, with comfortable breathing
+     * room around the rim):
      * <ul>
-     *   <li>Outer circle stroke at radius {@code r * 0.66} — the gear
-     *       body, slightly inset from the pill rim.</li>
-     *   <li>Inner hole stroke at radius {@code r * 0.26} — the central
-     *       opening that visually identifies the symbol as "gear" rather
-     *       than "circle".</li>
-     *   <li>8 teeth as small rounded rectangles at multiples of 45°,
-     *       sitting just outside the body circle. Eight is the canonical
-     *       count for "settings gear" in modern UI vocabulary
+     *   <li>Outer body ring at radius {@code r * 0.56} — the gear body,
+     *       inset from the pill rim so the glyph reads as "centred icon",
+     *       not "rim-to-rim circle".</li>
+     *   <li>Inner hole at radius {@code r * 0.22} — the central opening
+     *       that visually identifies the symbol as "gear" rather than
+     *       "circle".</li>
+     *   <li>8 teeth as short radial strokes from the body radius out to
+     *       {@code body + r * 0.14}, at multiples of 45°. Eight is the
+     *       canonical count for "settings gear" in modern UI vocabulary
      *       (Material, iOS, tvOS all converge here).</li>
      * </ul>
+     *
+     * <p>Outer extent: roughly {@code r * 0.77} including the 0.13r
+     * stroke width, leaving ~23% of the radius as breathing room before
+     * the pill rim — visually balanced against the existing WiFi pill's
+     * arc geometry.
      *
      * <p>Allocations: the caller owns {@code stroke} and reuses it across
      * paints, so this method is allocation-free per draw call. The
@@ -190,11 +197,10 @@ final class AppleStyle {
      */
     static void drawGearGlyph(Canvas c, float cx, float cy, float r,
                               int color, Paint stroke) {
-        final float bodyR    = r * 0.66f;
-        final float holeR    = r * 0.26f;
-        final float toothLen = r * 0.20f;
-        final float toothW   = r * 0.22f;
-        final float strokeW  = r * 0.14f;
+        final float bodyR    = r * 0.56f;
+        final float holeR    = r * 0.22f;
+        final float toothLen = r * 0.14f;
+        final float strokeW  = r * 0.13f;
 
         stroke.setColor(color);
         stroke.setStrokeWidth(strokeW);
@@ -222,12 +228,6 @@ final class AppleStyle {
         // as separate strokes that happen to touch it.
         c.drawCircle(cx, cy, bodyR, stroke);
         c.drawCircle(cx, cy, holeR, stroke);
-
-        // toothW intentionally unused — kept as a named constant so a
-        // future iteration that wants filled wedge teeth (instead of line
-        // strokes) has the geometry already named. Eliding it now would
-        // delete useful design intent for ~1 µs of compile time.
-        if (toothW < 0f) c.drawPoint(cx, cy, stroke); // unreachable
     }
 
     /**
