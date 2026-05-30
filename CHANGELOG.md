@@ -5,6 +5,82 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-05-30
+
+Patch release fixing four real-device issues found after v1.3.0 shipped,
+plus an audit pass that tidies a couple of small things.
+
+### Fixed
+
+- **Settings panel auto-fits its content width.** v1.3.0 used a fixed
+  `dp(252)` card width, which left ~70 dp of dead space to the right
+  of short labels like "Show clock". The card is now `WRAP_CONTENT`
+  and a post-build measure equalises every row to the widest one
+  (same pattern the keymap card has used since 1.1.x), so the panel
+  hugs the longest label + chevron with no extra space and the
+  chevron column still aligns vertically across rows.
+- **Back from "Manage hidden apps" returns directly to the settings
+  panel, not to the keymap card's Button-shortcuts list.** The user
+  reached HIDE from the settings panel, never opened SLOTS, and
+  pressing Back was incorrectly dropping them into SLOTS as if they
+  had drilled in from the slot list. New flag
+  `hideManagerSkipSlotsOnExit` short-circuits that return path when
+  HIDE was entered from the panel, so the back-stack reads
+  `gear → settings → hide apps → BACK → settings → BACK → home` in
+  a clean single press per step.
+- **One dim across the whole modal flow, no re-dim flicker.** v1.3.0
+  gave the settings panel and the keymap card their own
+  `setBackgroundColor(0x33000000)` backdrops. Transitioning
+  settings → keymap meant the panel's backdrop animated out while
+  the keymap card's backdrop animated in, briefly compositing
+  ~0x5C-black over the wallpaper and reading as "the screen just
+  got darker for half a second". The dim is now provided by a
+  single shared `overlayBackdrop` view at root z-order. `show*`
+  methods call `ensureOverlayBackdropVisible` (idempotent — no-op
+  when already up); `hide*` methods call
+  `dismissOverlayBackdropIfIdle` (only fades the backdrop when no
+  other overlay is logically open, including a queued re-open via
+  `keymapOpenedFromSettings`). Net effect: dim fades in once on the
+  first overlay, stays at constant 20 % alpha across every
+  in-flow transition, fades out once when the last overlay closes.
+- **Gear glyph is smaller and sits comfortably inside the pill.**
+  v1.3.0 sized the gear at body radius `0.66r` + `0.20r` teeth,
+  reaching ~0.93r of the pill — visually almost rim-to-rim. Tuned
+  down to body `0.56r` + `0.14r` teeth + `0.13r` stroke, outer
+  extent ~0.77r. Same 8-tooth gear shape, ~17 % smaller relative
+  to the pill, ~23 % breathing room before the rim.
+
+### Audit
+
+- Removed a dead `toothW` constant inside
+  `AppleStyle.drawGearGlyph` that v1.3.0 declared "kept for design
+  intent" but didn't actually use. The unreachable
+  `if (toothW < 0f)` line that prevented the unused-local-variable
+  warning is gone with it.
+- Added a `destroyed` guard on the 60 ms `postDelayed` that
+  re-opens the settings panel after the keymap card closes. The
+  lambda was already safe (settings re-open short-circuits when
+  `root == null`) but the explicit guard makes the intent obvious
+  and saves the unnecessary `buildSettingsPanel` no-op call when
+  the activity has been torn down inside the 60 ms window.
+- Added a `destroyed` guard at the top of both
+  `showSettingsPanel` and `showKeymapOverlay` so a stale callback
+  routed in from a focus listener or animation cannot resurrect
+  an overlay during teardown.
+- The `exitHideManager` "land focus on the manage-row" logic
+  pre-1.3.0 set `keymapSelectedRow = SHORTCUT_LABELS.length` —
+  index 6, which was the v1.2.x manage row. That row no longer
+  exists; the index now resolves to nothing. Updated to
+  `keymapSelectedRow = 0` so the in-keymap-card SLOTS-from-HIDE
+  fallback (an unreachable code path under the new
+  hide-from-settings-only flow, but kept defensively) lands on a
+  valid row.
+
+### Versioning
+
+- `versionCode` 11 → 12, `versionName` 1.3.0 → 1.3.1. Bug-fix
+  release, no breaking changes — SemVer PATCH bump.
+
 ## [1.3.0] — 2026-05-30
 
 Top-right toolbar consolidation and the launcher's first user-facing
