@@ -81,6 +81,20 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 14 → 15: 1.3.4 trims the gear glyph from 8 teeth to 6
+        // (per the "6 rounded teeth" design feedback — wider angular
+        // gap reads as the canonical Material / iOS settings gear at
+        // TV viewing distance) and bumps the per-tooth corner radius
+        // from 30 % to 45 % of tooth width so the teeth read as
+        // visibly rounded rather than rectangular. Audit pass
+        // confirmed zero per-frame allocations across every onDraw
+        // (toolbar pills, gear glyph, ring, cells, clock, wallpaper),
+        // no orphaned string resources, no dead fields, no unused
+        // imports — only the platform-API deprecation noise the
+        // codebase has carried since 1.1.x. Patch release, no
+        // behavioural change beyond the visual gear refresh —
+        // SemVer PATCH bump.
+        //
         // Bumped 13 → 14: 1.3.3 swaps the WiFi and gear pill positions
         // (WiFi now sits leftmost in the cluster so it lines up with
         // the home shelf's centre-of-mass and is one UP-press away
@@ -143,8 +157,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 14
-        versionName   = "1.3.3"
+        versionCode   = 15
+        versionName   = "1.3.4"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

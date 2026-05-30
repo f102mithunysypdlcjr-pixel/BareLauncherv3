@@ -5,6 +5,74 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] — 2026-05-30
+
+Patch release that finishes the gear-glyph design pass and confirms
+the codebase audit. One visual change, plus a clean bill of health
+across every hot-path scan we have.
+
+### Changed
+
+- **Gear glyph trimmed from 8 teeth to 6, with rounder tooth caps.**
+  The v1.3.3 8-tooth gear read slightly busy at the dp(40) toolbar
+  pill size — the teeth filled most of the angular budget, leaving
+  little visible gap between them. The v1.3.4 6-tooth gear has a
+  60° step instead of 45°, opening up wider angular gaps that read
+  as the canonical Material / iOS / tvOS settings gear at TV viewing
+  distance. Per-tooth corner radius bumped from 30 % to 45 % of the
+  tooth width so each tooth reads as visibly rounded rather than
+  rectangular (the user's "rounded teeth" feedback). Tooth length
+  also bumped slightly (0.18r → 0.20r) so the silhouette outer
+  extent grows from ~0.58r to ~0.60r — still comfortable breathing
+  room inside the pill rim, but the teeth now take a meaningful
+  visual share of the glyph silhouette. Body and hole sizes
+  unchanged. Drawn via the same allocation-free
+  `Canvas.save / rotate / drawRoundRect / restore` loop as v1.3.3,
+  just iterating 6 times at 60° instead of 8 times at 45°.
+
+### Audit
+
+A deep pass across every source file confirmed the codebase is in
+a clean, optimised state:
+
+- **Zero per-frame allocations** in any `onDraw`. `grep -E "new
+  (Rect|Paint|RectF|Matrix|Path|Canvas|String|StringBuilder|.*\\[)"`
+  scoped to `protected void onDraw` blocks returns no matches.
+  Every drawing primitive that a hot-path view needs (Paint,
+  RectF, Path, Bitmap scratch buffers) is held as a final field
+  on the View and reused across frames.
+- **Zero orphaned string resources.** Cross-reference of
+  `name="..."` entries in `strings.xml` against `R.string.*`
+  references in Java + `@string/...` references in
+  `AndroidManifest.xml` matches exactly.
+- **Zero dead fields.** Every private field in
+  `LauncherActivity` is either written-and-read, written by
+  framework lifecycle and read by the launcher, or kept
+  intentionally as a final-cleared reference for the destroy
+  path's null-out.
+- **Zero unused imports.** `javac --release 17 -Xlint:all` reports
+  the same 3 platform-API deprecation warnings the codebase has
+  carried since 1.1.x (`TRIM_MEMORY_COMPLETE`, `TRIM_MEMORY_MODERATE`,
+  `Drawable.getOpacity`) and nothing else.
+- **Per-row indicator selection diff is O(2)**, not O(N). The
+  `ShortcutTagView.setSelectedState` short-circuit means UP/DOWN
+  navigation in the keymap card invalidates exactly two rows per
+  press (the row losing selection and the row gaining it),
+  regardless of total row count.
+- **Drop-down anchor logic deduplicated** in v1.3.3 stays
+  deduplicated — `anchorCardUnderGear` is the single source of
+  truth for both the settings panel and the keymap card.
+- **Hot paths preserved.** Shelf scroll, focus animation, key
+  dispatch, icon delivery, package-broadcast refresh, clock tick
+  all execute the same code paths with the same allocation
+  profile as 1.3.3.
+
+### Versioning
+
+- `versionCode` 14 → 15, `versionName` 1.3.3 → 1.3.4. Patch
+  release, no behavioural change beyond the visual gear refresh —
+  SemVer PATCH bump.
+
 ## [1.3.3] — 2026-05-30
 
 Patch release that tightens four real-device design details on the
