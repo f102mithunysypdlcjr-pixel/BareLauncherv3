@@ -5,6 +5,84 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] — 2026-05-30
+
+Patch release that tightens four real-device design details on the
+v1.3.2 build and folds a duplicated anchor block into one helper.
+
+### Changed
+
+- **Toolbar pill order swapped: `[ wifi ] [ ⚙ gear ]`.** WiFi now sits
+  leftmost in the top-right cluster (was rightmost in v1.3.0 / 1.3.1
+  / 1.3.2). Pressing UP from any home shelf cell still lands on WiFi —
+  that wiring was already in place — and now WiFi is also the cell
+  visually closest to the centre of the shelf below, so the d-pad
+  path from "browsing apps" to "checking my network" is the
+  shortest possible single keypress. The gear pill takes the
+  right-edge slot. WiFi and gear DOWN handlers updated so "below me
+  is the cell visually under me" stays consistent: WiFi DOWN lands
+  on the FIRST shelf cell, gear DOWN lands on the LAST. WiFi LEFT
+  wraps to the last shelf cell; gear RIGHT wraps to the first.
+- **Solid filled gear glyph.** v1.3.0 / 1.3.1 / 1.3.2 used a stroke-
+  only line gear: two ring strokes plus 8 short radial line segments.
+  v1.3.3 replaces it with a chunky filled silhouette: 0.40r body
+  disc, 8 rounded-rectangle teeth at 45° increments, 0.16r centre
+  hole drawn in the pill plate colour so the cut-out reads as
+  continuous against the underlying dim backdrop. Outer extent
+  ~0.58r — comfortable breathing room before the pill rim. Drawn
+  via `Canvas.save / rotate / drawRoundRect / restore` — zero
+  per-frame allocations, no new resources.
+- **Keymap card Menu / Subtitle indicator glyphs tightened.** The
+  v1.3.2 hamburger and CC were drawn at ~0.78 of the dp(11)
+  container — visually larger and heavier than the colour discs
+  next to them, breaking the "small and symmetric" goal. v1.3.3
+  scales them to match the colour disc's visual footprint:
+  hamburger lines span ~64 % of the container (matching the dot's
+  diameter); CC text size shrinks to 0.62 of container height; both
+  are centred via the actual rendered glyph bounds (`getTextBounds`
+  with a per-View cached `Rect`) instead of the typographic
+  baseline metrics, which sat slightly low.
+- **Keymap card glyph colour inverts on row selection.** The v1.3.2
+  hamburger and CC were always drawn warm white. When the row was
+  selected (bright frosted-white pill background), the white glyph
+  blended into the white pill and disappeared — the
+  "white-selector-blends, icon not visible" issue. v1.3.3 flips the
+  glyph colour to near-black when the row is selected (matching the
+  row label's selected colour). Colour discs ignore the selection
+  state — saturated red / green / yellow / blue read on either
+  backdrop, and inverting them would change their identity. New
+  `ShortcutTagView` inner class holds a `selectedState` bool;
+  `refreshKeymapRows` calls `setSelectedState` on each row's
+  indicator, which short-circuits when the state hasn't changed.
+
+### Audit
+
+- **Drop-down anchor logic factored to a single helper.**
+  `showSettingsPanel` and `showKeymapOverlay` had ~25 lines of
+  identical anchor math: `getLocationOnScreen` for both the gear
+  pill and root, compute the gear's bottom-right corner, derive
+  top/right margins on the card. Folded into
+  `anchorCardUnderGear(card, defaultTop, defaultRight)` — both
+  call sites now just hand the card and a fallback margin pair
+  to the helper.
+- **Allocation hygiene preserved.** The new `ShortcutTagView`
+  carries one cached `Rect` for `Paint.getTextBounds` so the
+  keymap card's CC row stays zero-alloc per draw (without a
+  cached Rect, `getTextBounds` allocates internally). The new
+  filled gear's 8-tooth loop uses `Canvas.save/rotate/restore`
+  instead of a scratch `Matrix` to keep the gear render
+  allocation-free.
+- **Removed the old `drawShortcutGlyph` static helper signature**
+  in favour of one that accepts the selected state and the
+  cached Rect. The old signature took `Paint` only and rendered
+  the glyph the same way regardless of selection.
+
+### Versioning
+
+- `versionCode` 13 → 14, `versionName` 1.3.2 → 1.3.3. Patch release,
+  no behavioural change for users who don't open the keymap card or
+  look at the toolbar pills closely — SemVer PATCH bump.
+
 ## [1.3.2] — 2026-05-30
 
 Patch release fixing two real-device bugs in v1.3.1 and a pair of
