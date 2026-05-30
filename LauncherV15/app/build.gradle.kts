@@ -81,6 +81,28 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 12 → 13: 1.3.2 ships two real-device bug fixes from
+        // v1.3.1 (the "Button shortcuts flashes during back-from-Hide"
+        // race in hideKeymapOverlay's reset-to-SLOTS-at-the-top logic;
+        // the settings panel cursor resetting to row 0 instead of
+        // restoring the row the user came from), plus two design-pass
+        // refinements (panel chevrons removed for a label-only list,
+        // and Menu / Subtitle keymap rows now carry a 3-line hamburger
+        // and "CC" glyph respectively so every row has a real indicator
+        // instead of a transparent dot placeholder). Patch release, no
+        // behaviour change for users who don't open the keymap card —
+        // SemVer PATCH bump.
+        //
+        // Bumped 11 → 12: 1.3.1 patches four issues from v1.3.0 found in
+        // real-device testing — settings panel right-side dead space
+        // (now WRAP_CONTENT auto-fit), Back from "Manage hidden apps"
+        // landing in the keymap SLOTS list (now skips to the panel
+        // directly via hideManagerSkipSlotsOnExit), the dim flickering
+        // when transitioning settings → keymap (now a single shared
+        // backdrop view), and the gear glyph being too rim-to-rim
+        // inside its pill (proportions tuned smaller). Bug-fix only,
+        // no behaviour change for healthy users — SemVer PATCH bump.
+        //
         // v1.3.0: top-right toolbar consolidation + Show clock toggle.
         // The wallpaper pill is gone — its action moved into a unified
         // gear-pill settings panel that also hosts Manage hidden apps,
@@ -106,8 +128,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 11
-        versionName   = "1.3.0"
+        versionCode   = 13
+        versionName   = "1.3.2"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

@@ -5,6 +5,158 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] — 2026-05-30
+
+Patch release fixing two real-device bugs in v1.3.1 and a pair of
+design-pass refinements requested after the unified settings panel
+shipped.
+
+### Fixed
+
+- **Back from "Manage hidden apps" no longer flashes the Button
+  shortcuts list.** The v1.3.1 close path called `hideKeymapOverlay`,
+  which reset the keymap card to SLOTS mode at the *top* of the
+  method — that swap fired BEFORE the 110 ms close animation, so the
+  user briefly saw the slot column visible behind the fading-HIDE
+  card before the card finished animating out. v1.3.2 splits the
+  close path in two: when the user is transitioning back to the
+  settings panel (the `keymapOpenedFromSettings` case),
+  `hideKeymapOverlay` snap-closes the card immediately (no animation,
+  no SLOTS reset) and synchronously opens the settings panel. The
+  shared backdrop stays solid throughout, so the dim level never
+  flickers. The home → keymap → home path keeps the original animated
+  close.
+- **Settings panel cursor returns to the row you came from.** v1.3.1
+  always reset `settingsSelectedRow = 0` in `showSettingsPanel`, so
+  drilling into "Button shortcuts" and pressing Back landed back on
+  "Manage hidden apps" instead. v1.3.2 adds a `pendingSettingsCursor`
+  field — set in `activateSettingsRow` before the keymap-card hand-off,
+  consumed in `showSettingsPanel`, reset to 0 immediately so the next
+  fresh open from the gear pill still starts at row 0. Cursor now
+  reads naturally: `gear → row 0 → click "Button shortcuts" → keymap
+  card → BACK → row 1 → BACK → home → gear → row 0 again`.
+
+### Changed
+
+- **Settings panel rows are label-only — chevrons removed.** The four
+  drill-through rows (Manage hidden apps, Button shortcuts, Set
+  wallpaper, System Settings) no longer render the `›` indicator. The
+  panel reads as a clean vertical list of action labels and shrinks
+  tighter around the longest label. `refreshSettingsRows`'
+  `instanceof TextView` guard handles the missing-indicator case
+  cleanly (null short-circuits). The Show clock toggle row keeps its
+  ✓ indicator since it carries functional state, not navigation
+  affordance.
+- **Keymap card rows show a glyph indicator in every slot.** v1.3.0 /
+  v1.3.1 had a coloured disc next to the four colour keys (Red /
+  Green / Yellow / Blue) and a *transparent* placeholder next to
+  Menu and Subtitle so the name column still aligned. v1.3.2 makes
+  every row carry a real visual indicator: Menu shows a 3-line
+  hamburger glyph, Subtitle shows a "CC" closed-captions badge, all
+  drawn in `Canvas` with the same allocation-free `Paint` the colour
+  discs use. New `SHORTCUT_GLYPHS` array packs the per-row indicator
+  kind alongside `SHORTCUT_TAGS` (the colour). Container size grew
+  from `dp(7)` to `dp(11)` so the hamburger and CC stay legible at
+  TV viewing distance — the dot variant scales its drawn radius down
+  by 0.64 to keep the visual disc size identical to v1.3.1.
+
+### Audit
+
+- Removed the dead `settingsShowClockCheck` TextView field. v1.3.0
+  cached it for the toggle handler with the comment "so toggling
+  repaints only that one indicator without scanning child indices,"
+  but `refreshSettingsRows` actually walks the row's children by
+  index (`row.getChildAt(1)`) — the cached field was set on build
+  and never read. Removing it shrinks the field-clear list in
+  `onDestroy` by one line and removes one paragraph of misleading
+  documentation.
+- New `drawShortcutGlyph` static helper consolidates the dot /
+  hamburger / CC drawing into one allocation-free method, called
+  from each row's tiny anonymous `View` subclass. Six rows × one
+  helper call per onDraw, zero per-draw allocations.
+
+### Versioning
+
+- `versionCode` 12 → 13, `versionName` 1.3.1 → 1.3.2. Patch release,
+  no behavioural change for users who don't open the keymap card —
+  SemVer PATCH bump.
+
+## [1.3.1] — 2026-05-30
+
+Patch release fixing four real-device issues found after v1.3.0 shipped,
+plus an audit pass that tidies a couple of small things.
+
+### Fixed
+
+- **Settings panel auto-fits its content width.** v1.3.0 used a fixed
+  `dp(252)` card width, which left ~70 dp of dead space to the right
+  of short labels like "Show clock". The card is now `WRAP_CONTENT`
+  and a post-build measure equalises every row to the widest one
+  (same pattern the keymap card has used since 1.1.x), so the panel
+  hugs the longest label + chevron with no extra space and the
+  chevron column still aligns vertically across rows.
+- **Back from "Manage hidden apps" returns directly to the settings
+  panel, not to the keymap card's Button-shortcuts list.** The user
+  reached HIDE from the settings panel, never opened SLOTS, and
+  pressing Back was incorrectly dropping them into SLOTS as if they
+  had drilled in from the slot list. New flag
+  `hideManagerSkipSlotsOnExit` short-circuits that return path when
+  HIDE was entered from the panel, so the back-stack reads
+  `gear → settings → hide apps → BACK → settings → BACK → home` in
+  a clean single press per step.
+- **One dim across the whole modal flow, no re-dim flicker.** v1.3.0
+  gave the settings panel and the keymap card their own
+  `setBackgroundColor(0x33000000)` backdrops. Transitioning
+  settings → keymap meant the panel's backdrop animated out while
+  the keymap card's backdrop animated in, briefly compositing
+  ~0x5C-black over the wallpaper and reading as "the screen just
+  got darker for half a second". The dim is now provided by a
+  single shared `overlayBackdrop` view at root z-order. `show*`
+  methods call `ensureOverlayBackdropVisible` (idempotent — no-op
+  when already up); `hide*` methods call
+  `dismissOverlayBackdropIfIdle` (only fades the backdrop when no
+  other overlay is logically open, including a queued re-open via
+  `keymapOpenedFromSettings`). Net effect: dim fades in once on the
+  first overlay, stays at constant 20 % alpha across every
+  in-flow transition, fades out once when the last overlay closes.
+- **Gear glyph is smaller and sits comfortably inside the pill.**
+  v1.3.0 sized the gear at body radius `0.66r` + `0.20r` teeth,
+  reaching ~0.93r of the pill — visually almost rim-to-rim. Tuned
+  down to body `0.56r` + `0.14r` teeth + `0.13r` stroke, outer
+  extent ~0.77r. Same 8-tooth gear shape, ~17 % smaller relative
+  to the pill, ~23 % breathing room before the rim.
+
+### Audit
+
+- Removed a dead `toothW` constant inside
+  `AppleStyle.drawGearGlyph` that v1.3.0 declared "kept for design
+  intent" but didn't actually use. The unreachable
+  `if (toothW < 0f)` line that prevented the unused-local-variable
+  warning is gone with it.
+- Added a `destroyed` guard on the 60 ms `postDelayed` that
+  re-opens the settings panel after the keymap card closes. The
+  lambda was already safe (settings re-open short-circuits when
+  `root == null`) but the explicit guard makes the intent obvious
+  and saves the unnecessary `buildSettingsPanel` no-op call when
+  the activity has been torn down inside the 60 ms window.
+- Added a `destroyed` guard at the top of both
+  `showSettingsPanel` and `showKeymapOverlay` so a stale callback
+  routed in from a focus listener or animation cannot resurrect
+  an overlay during teardown.
+- The `exitHideManager` "land focus on the manage-row" logic
+  pre-1.3.0 set `keymapSelectedRow = SHORTCUT_LABELS.length` —
+  index 6, which was the v1.2.x manage row. That row no longer
+  exists; the index now resolves to nothing. Updated to
+  `keymapSelectedRow = 0` so the in-keymap-card SLOTS-from-HIDE
+  fallback (an unreachable code path under the new
+  hide-from-settings-only flow, but kept defensively) lands on a
+  valid row.
+
+### Versioning
+
+- `versionCode` 11 → 12, `versionName` 1.3.0 → 1.3.1. Bug-fix
+  release, no breaking changes — SemVer PATCH bump.
+
 ## [1.3.0] — 2026-05-30
 
 Top-right toolbar consolidation and the launcher's first user-facing
