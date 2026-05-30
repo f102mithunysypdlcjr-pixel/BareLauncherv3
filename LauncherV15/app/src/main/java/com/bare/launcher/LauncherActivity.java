@@ -1732,6 +1732,23 @@ public class LauncherActivity extends Activity {
             }
             if (aMaster >= 0 && bMaster >= 0 && aMaster != bMaster) {
                 Collections.swap(appList, aMaster, bMaster);
+                // Invalidate the chip-strip caches in the keymap overlay.
+                // Both strips (hide-manager + keymap picker) are built once
+                // and re-used across overlay opens; the rebuild trigger is
+                // a size-change check (keymapHideBuiltSize / keymapPickerBuiltSize
+                // == appList.size()). A reorder leaves the size unchanged
+                // — only positions move — so without this nudge a stale
+                // chip strip would survive a swap. The user-visible symptom
+                // was "I select chip showing app A, app B gets toggled":
+                // chip i still carries the OLD label / icon while
+                // toggleSelectedHide and commitKeymapPicker resolve the
+                // package via appList[i] at the new position. Same shape
+                // of invalidation the package-broadcast handler already
+                // does for install / uninstall / replace; reorder is the
+                // third class of mutation that needs the same nudge.
+                LauncherActivity.this.keymapHideBuiltSize    = -1;
+                LauncherActivity.this.keymapPickerBuiltSize  = -1;
+                LauncherActivity.this.keymapRowsNeedEqualize = true;
             }
             dragIndex    = targetIdx;
             focusedIndex = dragIndex;

@@ -7,16 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [1.2.2] — 2026-05-30
 
-Single-fix release. Closes a long-standing visual regression in the
-hide-app drawer (and the keymap picker, and the keymap slot-row icon
-miniatures) where apps that had been hidden — especially across a
-launcher restart — rendered with their label only. The icon
-`ImageView` slot was reserved but invisible, so the chip read as
-"name with no icon". Affected only the management UIs; the home
+Two related fixes in the hide-app drawer / keymap-picker management
+UIs. The first restores icons to chips that were rendering label-only
+for previously hidden apps. The second closes a separate stale-cache
+bug exposed by the first: chip strips were not being invalidated when
+the user reordered apps on the home shelf, so chip *i* could carry
+the OLD label / icon while the toggle path resolved the package via
+the NEW `appList[i]` — selecting a chip showing app A could end up
+toggling app B. Both bugs are scoped to the management UIs; the home
 shelf itself was always correct.
 
 ### Fixed
 
+- **Reorder swap no longer desyncs the hide-manager / keymap-picker
+  chip strips.** `RecyclingShelfView.swapWithNeighbour` mutates
+  `appList` in place to mirror a home-shelf drag-and-drop, but the
+  hide-manager and keymap-picker chip strips are size-cached
+  (`keymapHideBuiltSize` / `keymapPickerBuiltSize` == `appList.size()`
+  → skip rebuild). A reorder leaves the size unchanged, so the
+  cache check passed and the chip strip survived from before the
+  swap. Chip *i* still carried the old label and icon, but
+  `toggleSelectedHide` and the keymap-picker commit path resolved
+  the package via `appList[i]` at the *new* position. The
+  user-visible symptom was "I select chip showing app A, app B
+  gets toggled" for any pair the user just rearranged on the home
+  shelf. The package-broadcast handler already invalidates these
+  caches on install / uninstall / replace; reorder is the third
+  class of `appList` mutation that needs the same nudge. The
+  row-equalize flag is also flipped because the slot-row miniatures
+  rendered alongside the slot list can land at a different
+  equalised width when the underlying app order shifts.
 - **Hide-manager / keymap-picker chips no longer render icon-less for
   previously hidden apps.** Root cause was lifecycle-scoped: the
   `iconCache` LRU is populated lazily, and the only writer path
