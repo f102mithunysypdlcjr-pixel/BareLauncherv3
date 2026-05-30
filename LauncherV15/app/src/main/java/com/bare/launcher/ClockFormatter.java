@@ -97,12 +97,6 @@ final class ClockFormatter {
         return cal.get(Calendar.DAY_OF_YEAR) != lastShownDayOfYear;
     }
 
-    /** Backwards-compatible overload — defaults {@code showDate} to false.
-     *  Kept so existing call sites that haven't migrated still compile. */
-    boolean shouldRepaint(long ms) {
-        return shouldRepaint(ms, false);
-    }
-
     /**
      * Reset the "last shown" sentinels so the next call to
      * {@link #shouldRepaint(long, boolean)} returns {@code true}
@@ -186,12 +180,6 @@ final class ClockFormatter {
         ssb.setSpan(amPmFace,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         ssb.setSpan(amPmStyle, timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return ssb;
-    }
-
-    /** Backwards-compatible overload — formats time only. Kept so any
-     *  unmigrated call site still compiles. */
-    CharSequence format(long ms) {
-        return format(ms, false);
     }
 
     /**

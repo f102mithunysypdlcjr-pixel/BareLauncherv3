@@ -260,6 +260,14 @@ public class LauncherActivity extends Activity {
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
+    /** Scratch arrays used by {@link #anchorCardUnderGear} to read the
+     *  gear pill's and the root's on-screen positions. Promoted to
+     *  fields so the per-overlay-open path stays allocation-free —
+     *  matches the {@link #ringCellLoc} / {@link #menuCellLoc} pattern.
+     *  Anchor reads run only on the main thread so no synchronisation
+     *  is needed. */
+    private final int[]    anchorMbLoc      = new int[2];
+    private final int[]    anchorRootLoc    = new int[2];
     private       int      ringLayoutSize   = 0;  // full RingView box size (large enough at 1.12x focus scale)
     private       float    cachedIcyOffset  = 0f;
     private final Runnable pkgReloadRunnable = this::loadApps;
@@ -4431,9 +4439,23 @@ public class LauncherActivity extends Activity {
                 setChipIcon(pStrip.getChildAt(idx + 1), 0, bmp);
             }
         }
-        // Slot rows: only when the slot list is the active sub-mode.
+        // Slot rows: only when the slot list is the active sub-mode AND
+        // the just-loaded package is actually bound to a slot. Without
+        // the binding check the slot card is repainted on every icon
+        // delivery during the cold-start icon flood (~50 deliveries on
+        // a typical TV) — each repaint walks all 6 rows, re-checks the
+        // bitmap cache, and re-mutates colours / GradientDrawable
+        // backgrounds. Most of those repaints are pure noise because
+        // the package whose icon just landed isn't shown anywhere on
+        // the slot card. The size of keyMap is bounded by the
+        // SHORTCUT_KEYCODES.length (6) so the inner scan is constant
+        // work per delivery.
         if (keymapMode == KEYMAP_MODE_SLOTS) {
-            refreshKeymapRows();
+            boolean bound = false;
+            for (int i = 0, n = keyMap.size(); i < n; i++) {
+                if (pkg.equals(keyMap.valueAt(i))) { bound = true; break; }
+            }
+            if (bound) refreshKeymapRows();
         }
     }
 
@@ -5460,8 +5482,11 @@ public class LauncherActivity extends Activity {
      *  would normally sit, so a card that's shown before measure passes
      *  finish (rare but possible) doesn't land off-screen.
      *
-     *  <p>Allocations: two {@code int[2]} arrays per call. Not hot — at
-     *  most a few invocations per session (one per overlay open).
+     *  <p>Allocations: zero. The two scratch arrays needed for
+     *  {@code getLocationOnScreen} are held as instance fields
+     *  ({@link #anchorMbLoc} / {@link #anchorRootLoc}) and reused
+     *  across every invocation. Called only on the main thread (one
+     *  call per overlay open).
      *
      *  @param card                  the card whose LayoutParams will be mutated
      *  @param defaultTopMarginPx    fallback top margin in px
@@ -5474,8 +5499,8 @@ public class LauncherActivity extends Activity {
         View mb = mapperBtnView;
         FrameLayout r = root;
         if (mb != null && r != null && mb.getWidth() > 0) {
-            int[] mbLoc = new int[2];
-            int[] rLoc  = new int[2];
+            int[] mbLoc = anchorMbLoc;
+            int[] rLoc  = anchorRootLoc;
             mb.getLocationOnScreen(mbLoc);
             r .getLocationOnScreen(rLoc);
             int mbBottomInRoot = mbLoc[1] - rLoc[1] + mb.getHeight();

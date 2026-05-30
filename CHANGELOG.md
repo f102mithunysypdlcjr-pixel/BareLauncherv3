@@ -5,6 +5,63 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5] — 2026-05-30
+
+Patch release with four small, low-risk fixes that remove the
+remaining per-interaction allocation, eliminate a redundant repaint
+loop during the cold-start icon flood, drop dead code from
+`ClockFormatter`, and make the CI smoke test deterministic on slow
+emulators.
+
+### Changed
+
+- **`onIconLoaded` short-circuits the keymap slot-card repaint when
+  the loaded package isn't bound to any remappable key.** Previously,
+  while the user had the settings panel or keymap card open during a
+  package broadcast or a slow icon load, every icon delivered to the
+  shelf also triggered a full repaint of the 6-row slot card — even
+  though the slot card only shows icons / labels for packages that
+  are bound to a key. The cold-start flood is ~50 deliveries on a
+  typical TV, so the worst case was ~50 redundant card repaints in a
+  single second. Now `onIconLoaded` walks the in-memory `keyMap`
+  (≤ 6 entries) and only repaints when the just-loaded package is
+  actually rendered somewhere on the card. No behaviour change, just
+  less wasted work.
+- **`anchorCardUnderGear` no longer allocates per call.** The two
+  `int[2]` scratch arrays used to read the gear pill's and the
+  root view's on-screen positions are now instance fields
+  (`anchorMbLoc` / `anchorRootLoc`), matching the existing pattern
+  for `ringCellLoc` / `menuCellLoc`. This was the only remaining
+  per-overlay-open allocation in the modal path. One call per
+  overlay open, so the GC win is tiny — but it closes the last open
+  hole in the "no allocations after onCreate" goal.
+- **`ClockFormatter` drops two unused single-arg overloads.** The
+  zero-default `shouldRepaint(long)` and `format(long)` methods
+  existed as backwards-compat wrappers but had no callers anywhere
+  in the codebase (verified by ripgrep across `main` + `androidTest`
+  + `test`). Pure dead-code removal — smaller class, smaller method
+  table, identical behaviour.
+
+### Tests / CI
+
+- **Smoke test migrated from `ActivityTestRule` + `Thread.sleep(500)`
+  to `ActivityScenario` + `Instrumentation.waitForIdleSync`.** The
+  old approach was deprecated since androidx.test 1.4 and was a
+  documented flake source on the slow API-29 KVM emulator we run in
+  CI: the 500 ms sleep was a guess that was sometimes too short on a
+  cold emulator (false negatives) and always wasted on a fast device.
+  `ActivityScenario` is the modern recommended primitive, and
+  `waitForIdleSync` blocks until the main looper has actually
+  drained — both deterministic and faster. Removed the
+  `androidx.test:rules:1.6.1` dependency (no longer needed) and
+  declared `androidx.test:core:1.6.1` directly (the host of
+  `ActivityScenario`, previously transitive only).
+
+### Versioning
+
+- `versionCode` 15 → 16, `versionName` 1.3.4 → 1.3.5. Patch release,
+  no user-visible behaviour change — SemVer PATCH bump.
+
 ## [1.3.4] — 2026-05-30
 
 Patch release that finishes the gear-glyph design pass and confirms
