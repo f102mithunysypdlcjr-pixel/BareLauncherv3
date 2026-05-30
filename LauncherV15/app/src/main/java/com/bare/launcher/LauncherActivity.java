@@ -2970,7 +2970,20 @@ public class LauncherActivity extends Activity {
         List<AppInfo> visible = new ArrayList<>(appList.size());
         for (int i = 0, n = appList.size(); i < n; i++) {
             AppInfo a = appList.get(i);
-            if (!hiddenApps.contains(a.packageName)) visible.add(a);
+            if (!hiddenApps.contains(a.packageName)) {
+                visible.add(a);
+            } else {
+                // Hidden apps are filtered off the shelf, but their icons
+                // are still rendered inside the hide-manager and keymap-
+                // picker chip strips and the keymap slot-row miniatures.
+                // setApps only preWarms the (filtered) shelf list, so
+                // without this nudge a hidden app's bitmap never lands in
+                // iconCache — the chip strip is built lazily once and the
+                // ImageView for that pkg ends up GONE, so the row shows
+                // only the label. Visible to the user as "icons missing
+                // for previously hidden apps after unhide".
+                preWarmIcon(a);
+            }
         }
         s.setApps(visible);
     }
@@ -3630,6 +3643,12 @@ public class LauncherActivity extends Activity {
         if (keymapPickerBuiltSize != appList.size()) {
             rebuildPickerChips();
             keymapPickerBuiltSize = appList.size();
+        } else {
+            // Strip cached from a previous open — top up any chips whose
+            // bitmap was missing from iconCache at build time but has
+            // since been loaded. See refreshHideChipIcons for the same
+            // pattern in the hide-manager strip.
+            refreshPickerChipIcons();
         }
         // Pre-select the chip matching the current binding so left/right
         // navigates from where the user is, not always from the start.
@@ -3697,6 +3716,91 @@ public class LauncherActivity extends Activity {
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
             addPickerChip(strip, a.label, b, false);
         }
+    }
+
+    /** Mirror of {@link #refreshHideChipIcons} for the keymap picker strip.
+     *  The picker has a leading "Not assigned" sentinel chip with no
+     *  ImageView, so chip i in the strip corresponds to appList[i-1]. */
+    private void refreshPickerChipIcons() {
+        android.widget.LinearLayout strip = keymapPickerStrip;
+        if (strip == null || iconCache == null) return;
+        int n = Math.min(strip.getChildCount() - 1, appList.size());
+        for (int i = 0; i < n; i++) {
+            View chip = strip.getChildAt(i + 1); // +1 skips the sentinel
+            if (!(chip instanceof android.widget.LinearLayout)) continue;
+            android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+            // Picker app-chip child layout: [icon (0), label (1)].
+            View v = cl.getChildAt(0);
+            if (!(v instanceof ImageView)) continue;
+            ImageView iv = (ImageView) v;
+            if (iv.getVisibility() == View.VISIBLE && iv.getDrawable() != null) continue;
+            Bitmap b = iconCache.get(appList.get(i).packageName);
+            if (b != null) {
+                iv.setImageBitmap(b);
+                iv.setVisibility(View.VISIBLE);
+            }
+        }
+    }
+
+    /** Live-update hook called from the icon-delivery callbacks in
+     *  {@link #preWarmIcon} / {@link #loadIconAsync}. If either chip strip
+     *  is currently visible, refresh the matching chip's ImageView so the
+     *  user sees the icon appear without having to close and reopen the
+     *  overlay. The keymap slot rows (which can also display a hidden
+     *  app's icon as a binding miniature) are repainted via the cheap
+     *  {@link #refreshKeymapRows} call when in slot mode. */
+    private void onIconLoaded(String pkg, Bitmap bmp) {
+        if (pkg == null || bmp == null) return;
+        // Cheap early-out: skip everything if the keymap overlay isn't on
+        // screen. hideKeymapOverlay leaves the inner sub-views (column /
+        // picker / hide) at their pre-close visibilities, so checking the
+        // top-level overlay is the only reliable "is the user looking at
+        // this right now?" signal.
+        FrameLayout ko = keymapOverlay;
+        if (ko == null || ko.getVisibility() != View.VISIBLE) return;
+        int idx = indexInAppList(pkg);
+        // Hide-manager strip: chip i ↔ appList[i].
+        if (keymapMode == KEYMAP_MODE_HIDE) {
+            android.widget.LinearLayout hStrip = keymapHideStrip;
+            if (hStrip != null && idx >= 0 && idx < hStrip.getChildCount()) {
+                setChipIcon(hStrip.getChildAt(idx), 0, bmp);
+            }
+        }
+        // Picker strip: leading sentinel offsets app indices by 1.
+        if (keymapMode == KEYMAP_MODE_PICKER) {
+            android.widget.LinearLayout pStrip = keymapPickerStrip;
+            if (pStrip != null && idx >= 0 && (idx + 1) < pStrip.getChildCount()) {
+                setChipIcon(pStrip.getChildAt(idx + 1), 0, bmp);
+            }
+        }
+        // Slot rows: only when the slot list is the active sub-mode.
+        if (keymapMode == KEYMAP_MODE_SLOTS) {
+            refreshKeymapRows();
+        }
+    }
+
+    /** Linear scan over appList for the given pkg. Cheap (≤ ~50 entries on
+     *  a typical TV) and only used by {@link #onIconLoaded} which itself
+     *  is rate-limited by icon-decode throughput. Avoids a parallel
+     *  pkg→index map purely for this one path. */
+    private int indexInAppList(String pkg) {
+        for (int i = 0, n = appList.size(); i < n; i++) {
+            if (pkg.equals(appList.get(i).packageName)) return i;
+        }
+        return -1;
+    }
+
+    /** Set the bitmap on an ImageView at a fixed child index inside a chip
+     *  LinearLayout. Used by {@link #onIconLoaded} to top up a single
+     *  chip's icon without touching its other state. */
+    private void setChipIcon(View chip, int childIdx, Bitmap bmp) {
+        if (!(chip instanceof android.widget.LinearLayout)) return;
+        android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+        View v = cl.getChildAt(childIdx);
+        if (!(v instanceof ImageView)) return;
+        ImageView iv = (ImageView) v;
+        iv.setImageBitmap(bmp);
+        iv.setVisibility(View.VISIBLE);
     }
 
     private void addPickerChip(android.widget.LinearLayout strip,
@@ -3961,6 +4065,14 @@ public class LauncherActivity extends Activity {
         if (keymapHideBuiltSize != appList.size()) {
             buildHideChips();
             keymapHideBuiltSize = appList.size();
+        } else {
+            // Strip cached from a previous open — top up any chips whose
+            // bitmap was missing from iconCache at build time but has
+            // since been loaded (typical path: app was hidden across
+            // launcher restarts, applyShelfApps' hidden-app preWarm only
+            // just landed). Without this the chip's ImageView stays GONE
+            // and the row reads as "label only".
+            refreshHideChipIcons();
         }
         int n = appList.size();
         keymapHideIdx     = n > 0 ? 0 : -1;
@@ -4006,6 +4118,36 @@ public class LauncherActivity extends Activity {
             AppInfo a = appList.get(i);
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
             addHideChip(strip, a.label, b);
+        }
+    }
+
+    /** Walk the existing hide-manager chip strip and update any chip whose
+     *  ImageView is hidden (icon was null at build time) with the bitmap
+     *  now in iconCache. The strip is built once per app-list-size change
+     *  to avoid view churn on every reopen, but the underlying iconCache
+     *  populates asynchronously and lazily — so a chip built before the
+     *  icon was loaded would otherwise stay icon-less for the launcher's
+     *  lifetime. The fix is allocation-free: each chip already has the
+     *  ImageView slot reserved (kept GONE for layout consistency); we just
+     *  toggle visibility and set the bitmap. */
+    private void refreshHideChipIcons() {
+        android.widget.LinearLayout strip = keymapHideStrip;
+        if (strip == null || iconCache == null) return;
+        int n = Math.min(strip.getChildCount(), appList.size());
+        for (int i = 0; i < n; i++) {
+            View chip = strip.getChildAt(i);
+            if (!(chip instanceof android.widget.LinearLayout)) continue;
+            android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+            // Hide chip child layout: [icon (0), label (1)].
+            View v = cl.getChildAt(0);
+            if (!(v instanceof ImageView)) continue;
+            ImageView iv = (ImageView) v;
+            if (iv.getVisibility() == View.VISIBLE && iv.getDrawable() != null) continue;
+            Bitmap b = iconCache.get(appList.get(i).packageName);
+            if (b != null) {
+                iv.setImageBitmap(b);
+                iv.setVisibility(View.VISIBLE);
+            }
         }
     }
 
@@ -4246,18 +4388,27 @@ public class LauncherActivity extends Activity {
                 runOnUiThread(() -> {
                     if (destroyed) return;
                     List<RecyclingShelfView.CellView> pending = iconInflight.remove(key);
-                    if (pending == null || fb == null) return;
-                    for (int i = 0, n = pending.size(); i < n; i++) {
-                        RecyclingShelfView.CellView cell = pending.get(i);
-                        // Guard: only deliver to a cell that is still attached
-                        // and bound to this package. A cell that's been recycled
-                        // back to the pool has visibility GONE and a null
-                        // boundApp — delivering would invalidate a hidden view
-                        // for nothing.
-                        if (cell.getVisibility() == View.VISIBLE
-                                && key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
-                            cell.setIconBitmap(fb);
+                    if (pending != null && fb != null) {
+                        for (int i = 0, n = pending.size(); i < n; i++) {
+                            RecyclingShelfView.CellView cell = pending.get(i);
+                            // Guard: only deliver to a cell that is still attached
+                            // and bound to this package. A cell that's been recycled
+                            // back to the pool has visibility GONE and a null
+                            // boundApp — delivering would invalidate a hidden view
+                            // for nothing.
+                            if (cell.getVisibility() == View.VISIBLE
+                                    && key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
+                                cell.setIconBitmap(fb);
+                        }
                     }
+                    // Live-update any open chip strips / slot rows showing
+                    // this package — the bitmap may have been requested
+                    // for the shelf but the user is currently inside the
+                    // hide manager / keymap picker. Runs even when the
+                    // shelf-delivery path short-circuited above (pending
+                    // null after onTrimMemory clear) so the chip strip
+                    // still picks up the new cache entry.
+                    if (fb != null) onIconLoaded(key, fb);
                 });
             });
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
@@ -4302,6 +4453,9 @@ public class LauncherActivity extends Activity {
                                 && key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
                             cell.setIconBitmap(fb);
                     }
+                    // Live-update any open chip strips / slot rows showing
+                    // this package — see preWarmIcon for the same hook.
+                    onIconLoaded(key, fb);
                 });
             });
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
