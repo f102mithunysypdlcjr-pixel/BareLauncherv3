@@ -152,82 +152,89 @@ final class AppleStyle {
     static final int SYMBOL_IDLE    = Color.WHITE;
 
     /**
-     * Draw a gear / settings glyph centred at {@code (cx, cy)} with outer
-     * radius {@code r} and the given symbol colour. Used by the toolbar
-     * gear pill (the unified "open settings panel" entry point) — drawn
-     * entirely with {@link Canvas} primitives so the launcher carries no
-     * vector or raster icon resource for it.
+     * Draw a solid (filled) gear / settings glyph centred at
+     * {@code (cx, cy)} with outer radius {@code r}. v1.3.3 swapped the
+     * v1.3.0 stroke-only line gear for this filled silhouette per the
+     * "more monochrome solid not line" design feedback. The result is
+     * a chunky settings-cog that reads cleanly at TV viewing distance
+     * and inverts cleanly with the rest of the toolbar pill vocabulary
+     * (white-on-dark idle, dark-on-white focused).
      *
-     * <p>Composition (all sizes proportional to {@code r} so the glyph
-     * scales cleanly inside any pill diameter, with comfortable breathing
-     * room around the rim):
+     * <p>Composition (proportional to {@code r}):
      * <ul>
-     *   <li>Outer body ring at radius {@code r * 0.56} — the gear body,
-     *       inset from the pill rim so the glyph reads as "centred icon",
-     *       not "rim-to-rim circle".</li>
-     *   <li>Inner hole at radius {@code r * 0.22} — the central opening
-     *       that visually identifies the symbol as "gear" rather than
-     *       "circle".</li>
-     *   <li>8 teeth as short radial strokes from the body radius out to
-     *       {@code body + r * 0.14}, at multiples of 45°. Eight is the
-     *       canonical count for "settings gear" in modern UI vocabulary
-     *       (Material, iOS, tvOS all converge here).</li>
+     *   <li>Body: filled disc at radius {@code r * 0.40}.</li>
+     *   <li>Teeth: 8 small rounded rectangles at 45° increments,
+     *       protruding outward from the body. Each tooth is
+     *       {@code r * 0.32} wide and {@code r * 0.18} long, with
+     *       a corner radius of {@code toothW * 0.30}. Teeth overlap
+     *       the body by 1 px so the silhouette reads as one
+     *       continuous shape with no AA seam at the join.</li>
+     *   <li>Hole: filled disc at radius {@code r * 0.16} drawn in
+     *       {@code plateColor} so the gear reads with a central
+     *       opening. The plate colour matches the pill backdrop the
+     *       gear sits on (idle dark glass, focused frosted-white) so
+     *       the hole reads continuous with the surrounding plate even
+     *       though no actual Porter-Duff alpha-clear is performed.</li>
      * </ul>
      *
-     * <p>Outer extent: roughly {@code r * 0.77} including the 0.13r
-     * stroke width, leaving ~23% of the radius as breathing room before
-     * the pill rim — visually balanced against the existing WiFi pill's
-     * arc geometry.
+     * <p>Outer extent: {@code r * 0.58} including the tooth tips —
+     * comfortable breathing room before the pill rim.
      *
-     * <p>Allocations: the caller owns {@code stroke} and reuses it across
-     * paints, so this method is allocation-free per draw call. The
-     * trigonometric constants for the 8 tooth angles are computed inline
-     * (HotSpot inlines {@link Math#sin} / {@link Math#cos} on x86 and
-     * arm64).
+     * <p>Allocations: zero per draw. The 8 teeth are placed via
+     * {@link Canvas#save} / {@link Canvas#rotate} / {@link Canvas#restore}
+     * so no scratch matrix is allocated. The caller-owned {@link Paint}
+     * is reused with only its {@code color} mutated between body /
+     * hole; antialias setting is preserved.
      *
-     * @param c       canvas to draw onto
-     * @param cx      glyph centre X in canvas coordinates
-     * @param cy      glyph centre Y in canvas coordinates
-     * @param r       outer radius (typically the pill plate's inner radius)
-     * @param color   ARGB symbol colour — pass {@link #SYMBOL_FOCUSED} or
-     *                {@link #SYMBOL_IDLE} to match the canonical inversion
-     * @param stroke  reusable stroke {@link Paint} (caller-owned). The
-     *                method mutates {@code stroke}'s colour and width but
-     *                preserves cap / join settings.
+     * @param c            canvas to draw onto
+     * @param cx           glyph centre X in canvas coordinates
+     * @param cy           glyph centre Y in canvas coordinates
+     * @param r            outer radius (typically the pill plate's inner radius)
+     * @param symbolColor  ARGB symbol colour — pass {@link #SYMBOL_FOCUSED}
+     *                     or {@link #SYMBOL_IDLE} to match the canonical
+     *                     pill inversion
+     * @param plateColor   ARGB pill backdrop colour the gear sits on. The
+     *                     hole is drawn in this colour so the cut-out
+     *                     reads as continuous with the surrounding pill.
+     * @param paint        reusable {@link Paint} (caller-owned). The
+     *                     method sets {@code Style.FILL}, the symbol
+     *                     colour, then the plate colour for the hole.
      */
     static void drawGearGlyph(Canvas c, float cx, float cy, float r,
-                              int color, Paint stroke) {
-        final float bodyR    = r * 0.56f;
-        final float holeR    = r * 0.22f;
-        final float toothLen = r * 0.14f;
-        final float strokeW  = r * 0.13f;
+                              int symbolColor, int plateColor, Paint paint) {
+        final float rBody    = r * 0.40f;
+        final float rHole    = r * 0.16f;
+        final float toothLen = r * 0.18f;
+        final float toothW   = r * 0.32f;
+        final float cornerR  = toothW * 0.30f;
 
-        stroke.setColor(color);
-        stroke.setStrokeWidth(strokeW);
-        stroke.setStrokeCap(Paint.Cap.ROUND);
-        stroke.setStrokeJoin(Paint.Join.ROUND);
-        stroke.setStyle(Paint.Style.STROKE);
+        paint.setAntiAlias(true);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(symbolColor);
 
-        // 8 teeth — short radial strokes from bodyR out to bodyR + toothLen.
-        // Drawing as line segments rather than filled rectangles keeps the
-        // visual weight balanced with the two ring strokes.
+        // Body — filled disc.
+        c.drawCircle(cx, cy, rBody, paint);
+
+        // 8 teeth — rounded rectangles, rotated to each 45° step. The
+        // rect is drawn at the "north" position (cy − rBody − toothLen
+        // … cy − rBody) and the canvas is rotated to place each tooth.
+        // 1 px overlap with the body avoids an AA seam at the join.
         for (int i = 0; i < 8; i++) {
-            double a = i * (Math.PI / 4.0);
-            float dx = (float) Math.cos(a);
-            float dy = (float) Math.sin(a);
-            float x0 = cx + dx * bodyR;
-            float y0 = cy + dy * bodyR;
-            float x1 = cx + dx * (bodyR + toothLen);
-            float y1 = cy + dy * (bodyR + toothLen);
-            c.drawLine(x0, y0, x1, y1, stroke);
+            c.save();
+            c.rotate(i * 45f, cx, cy);
+            c.drawRoundRect(
+                    cx - toothW / 2f,
+                    cy - rBody - toothLen + 1f,
+                    cx + toothW / 2f,
+                    cy - rBody + 1f,
+                    cornerR, cornerR, paint);
+            c.restore();
         }
 
-        // Outer body ring + inner hole ring. Drawn after the teeth so the
-        // ring caps cleanly cover the inner ends of the tooth strokes —
-        // visually the teeth read as protrusions FROM the ring rather than
-        // as separate strokes that happen to touch it.
-        c.drawCircle(cx, cy, bodyR, stroke);
-        c.drawCircle(cx, cy, holeR, stroke);
+        // Hole — drawn in the plate colour so the cut-out reads as
+        // continuous with the surrounding pill backdrop.
+        paint.setColor(plateColor);
+        c.drawCircle(cx, cy, rHole, paint);
     }
 
     /**

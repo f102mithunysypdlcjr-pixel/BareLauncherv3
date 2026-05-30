@@ -15,6 +15,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
@@ -1041,27 +1042,36 @@ public class LauncherActivity extends Activity {
         overlayBackdrop.setClickable(true);
         root.addView(overlayBackdrop, new FrameLayout.LayoutParams(MATCH, MATCH));
 
-        // Top-right toolbar buttons. Layout left-to-right after the v1.3.0
-        // consolidation:
+        // Top-right toolbar buttons. Layout left-to-right after the v1.3.3
+        // swap that moved the WiFi pill to its leftmost-in-cluster
+        // position and the gear pill to the right edge:
         //
-        //     [ ⚙ gear ]   [ wifi ]
+        //     [ wifi ]   [ ⚙ gear ]
         //
-        // The wallpaper pill that used to sit at the rightmost edge in
-        // v1.2.x has been folded into the gear panel as a "Set wallpaper"
-        // row, halving the toolbar footprint without losing any feature.
-        // WiFi keeps the rightmost slot (it's the only daily-frequent
-        // toolbar action — the muscle memory of "edge of screen = WiFi"
-        // is preserved). The gear pill sits to its left and is the new
-        // discoverable entry into every other launcher setting.
+        // Why swap from the v1.3.0 [ ⚙ ] [ wifi ] order: WiFi is the
+        // single daily-frequent action on the toolbar (people dig into
+        // network settings far more often than the consolidated config
+        // panel). Putting it leftmost in the cluster lines it up with
+        // the visual centre-of-mass of the home shelf below — a TV
+        // remote user pressing UP from any shelf cell lands on WiFi,
+        // a single keypress away from the most common destination.
+        // The gear pill takes the right-edge slot — slightly out of the
+        // primary glance path, but still discoverable as the second pill
+        // and reachable in one extra D-pad RIGHT keypress.
         //
-        // Margins are computed from the right edge — netBtn sits flush
-        // against MARG_E, the gear is one (BTN_VIEW_SZ + BTN_GAP) step
-        // further left.
+        // Both pills are positioned from the right edge: gear sits flush
+        // at MARG_E (rightmost), WiFi sits one (BTN_VIEW_SZ + BTN_GAP)
+        // step further left (the "leftmost-in-cluster" slot). Cell-up
+        // navigation already routes to WiFi via netBtn.requestFocus so
+        // that requirement carries over cleanly from v1.3.0 — only the
+        // physical pill positions and the per-pill LEFT/RIGHT/DOWN key
+        // chains needed updating.
         netBtn = buildNetBtn(BTN_SZ);
         FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         netLp.gravity = Gravity.TOP | Gravity.END;
         netLp.topMargin = MARG_T;
-        netLp.setMarginEnd(MARG_E);
+        // One stride step from the right edge (left of the gear pill).
+        netLp.setMarginEnd(MARG_E + BTN_VIEW_SZ + BTN_GAP);
         netBtn.setLayoutParams(netLp);
         netBtn.setClipBounds(null);
         netBtn.setContentDescription(getString(R.string.cd_network_settings));
@@ -1072,8 +1082,8 @@ public class LauncherActivity extends Activity {
         FrameLayout.LayoutParams mpLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         mpLp.gravity = Gravity.TOP | Gravity.END;
         mpLp.topMargin = MARG_T;
-        // One stride step from the right edge (left of the WiFi pill).
-        mpLp.setMarginEnd(MARG_E + BTN_VIEW_SZ + BTN_GAP);
+        // Flush at the right edge.
+        mpLp.setMarginEnd(MARG_E);
         mpLocal.setLayoutParams(mpLp);
         mpLocal.setContentDescription(getString(R.string.cd_settings));
         root.addView(mpLocal);
@@ -1502,23 +1512,25 @@ public class LauncherActivity extends Activity {
                 // unbound (see comment above) so there is no
                 // OnLongClickListener to compete with.
                 case KeyEvent.KEYCODE_DPAD_DOWN:
-                    // WiFi is the rightmost button now — its DOWN lands on
-                    // the LAST shelf cell so the d-pad model "below me is
-                    // the cell visually under me" stays consistent.
+                    // WiFi is the leftmost-in-cluster button now (v1.3.3
+                    // swap). Its DOWN lands on the FIRST shelf cell so
+                    // the d-pad model "below me is the cell visually
+                    // under me" stays consistent — first cell sits
+                    // furthest left, gear pill is at the right edge.
                     RecyclingShelfView sd = shelf;
-                    if (sd != null) sd.requestFocusOnIndex(sd.lastIndex());
+                    if (sd != null) sd.requestFocusOnIndex(0);
                     return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
-                    // Gear is the only neighbour to the left.
-                    View mb = mapperBtnView;
-                    if (mb != null) { mb.requestFocus(); return true; }
+                    // Leftmost in the toolbar cluster — wrap to the last
+                    // shelf cell. Symmetric with the gear's RIGHT-wraps-
+                    // to-first-shelf-cell behaviour.
                     RecyclingShelfView sl = shelf;
                     if (sl != null) sl.requestFocusOnIndex(sl.lastIndex());
                     return true;
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
-                    // Rightmost toolbar button — wrap to the first shelf
-                    // cell. Symmetric with the gear's LEFT-wraps-to-last
-                    // shelf cell behaviour.
+                    // Gear is the only neighbour to the right.
+                    View mb = mapperBtnView;
+                    if (mb != null) { mb.requestFocus(); return true; }
                     RecyclingShelfView sr = shelf;
                     if (sr != null) sr.requestFocusOnIndex(0);
                     return true;
@@ -1541,7 +1553,11 @@ public class LauncherActivity extends Activity {
      *  discoverable, full-menu entry point. */
     private View buildMapperBtn(int sz) {
         View v = new View(this) {
-            private final Paint stroke    = makeBtnStrokePaint();
+            // The fill paint owns one Paint instance reused across every
+            // gear draw — no per-frame allocation. The bg / rim paints
+            // are factory-built (shared style with the rest of the
+            // toolbar pills) and untouched by drawGearGlyph.
+            private final Paint fill      = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Paint bgIdle    = makeBgIdlePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
             private final Paint rim       = makeRimPaint();
@@ -1552,17 +1568,19 @@ public class LauncherActivity extends Activity {
                 float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
-                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
+
+                Paint plate = focused ? bgFocus : bgIdle;
+                c.drawCircle(cx, cy, r, plate);
                 c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
 
+                // Solid filled gear (v1.3.3 redesign — was a stroke-only
+                // line gear). The hole punches through with the SAME
+                // plate colour the pill body was just drawn with, so
+                // the cut-out reads continuous against the underlying
+                // dim backdrop / wallpaper.
                 int symbolColor = focused ? AppleStyle.SYMBOL_FOCUSED : AppleStyle.SYMBOL_IDLE;
-                // Single delegating call: the gear glyph (8 teeth, body
-                // ring, inner hole) is drawn proportionally inside the
-                // plate. {@link AppleStyle#drawGearGlyph} mutates only
-                // the supplied paint's colour / width / cap / join, so
-                // the next idle / focused transition will re-set the
-                // colour cleanly without paint-state leakage.
-                AppleStyle.drawGearGlyph(c, cx, cy, r, symbolColor, stroke);
+                AppleStyle.drawGearGlyph(c, cx, cy, r,
+                        symbolColor, plate.getColor(), fill);
             }
         };
         applyApplePillStyle(v);
@@ -1598,20 +1616,24 @@ public class LauncherActivity extends Activity {
                 // timeout) while still triggering the short
                 // OnClickListener on key UP.
                 case KeyEvent.KEYCODE_DPAD_DOWN:
-                    // Down lands on the first shelf cell — natural since
-                    // the gear is the leftmost icon and the leftmost
-                    // shelf cell sits below it.
+                    // Gear is the rightmost button now (v1.3.3 swap).
+                    // Down lands on the LAST shelf cell so the d-pad
+                    // model "below me is the cell visually under me"
+                    // stays consistent — last cell sits at the right
+                    // edge, WiFi pill is one stride further left.
                     RecyclingShelfView s = shelf;
-                    if (s != null) s.requestFocusOnIndex(0);
+                    if (s != null) s.requestFocusOnIndex(s.lastIndex());
                     return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT:
-                    // Wrap to last shelf cell — taking over what netBtn
-                    // previously did when it was leftmost.
-                    RecyclingShelfView sl = shelf;
-                    if (sl != null) sl.requestFocusOnIndex(sl.lastIndex());
-                    return true;
-                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    // WiFi is the only neighbour to the left.
                     View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    // Rightmost in the toolbar cluster — wrap to the
+                    // first shelf cell. Symmetric with the WiFi pill's
+                    // LEFT-wraps-to-last-shelf-cell behaviour.
+                    RecyclingShelfView sr = shelf;
+                    if (sr != null) sr.requestFocusOnIndex(0);
+                    return true;
                 default: return false;
             }
         });
@@ -3477,28 +3499,9 @@ public class LauncherActivity extends Activity {
         pendingSettingsCursor = 0;
         refreshSettingsRows();
 
-        // Anchor the card just below the gear toolbar pill.
-        int topMargin   = dp(78);
-        int rightMargin = dp(20);
-        View mb = mapperBtnView;
-        FrameLayout r = root;
-        if (mb != null && r != null && mb.getWidth() > 0) {
-            int[] mbLoc = new int[2];
-            int[] rLoc  = new int[2];
-            mb.getLocationOnScreen(mbLoc);
-            r .getLocationOnScreen(rLoc);
-            int mbBottomInRoot = mbLoc[1] - rLoc[1] + mb.getHeight();
-            int mbRightInRoot  = mbLoc[0] - rLoc[0] + mb.getWidth();
-            int rW = r.getWidth() > 0 ? r.getWidth() : screenW;
-            topMargin   = mbBottomInRoot + dp(4);
-            rightMargin = rW - mbRightInRoot;
-            if (rightMargin < dp(8)) rightMargin = dp(8);
-        }
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
-        lp.gravity     = Gravity.TOP | Gravity.END;
-        lp.topMargin   = topMargin;
-        lp.rightMargin = rightMargin;
-        card.setLayoutParams(lp);
+        // Anchor the card just below the gear toolbar pill — shared
+        // helper since the keymap card uses the identical math.
+        anchorCardUnderGear(card, dp(78), dp(20));
 
         ov.setVisibility(View.VISIBLE);
         ov.bringToFront();
@@ -3815,24 +3818,18 @@ public class LauncherActivity extends Activity {
             row.setBackground(rowBg);
 
             // [0] indicator — colour disc for the four colour keys, 3-line
-            //     hamburger for Menu, "CC" badge for Subtitle. Drawn
-            //     entirely with Canvas primitives via the shared static
-            //     drawShortcutGlyph helper so each row reuses one
-            //     allocation-free Paint and zero raster resources are
-            //     required. Container size dp(11) (was dp(7) in v1.3.0
-            //     / v1.3.1) — the glyph variants need that extra room to
-            //     stay legible at TV viewing distance; the GLYPH_DOT
-            //     case scales its drawn radius down so colour dots stay
-            //     visually the same size as before.
-            final int glyphKind  = SHORTCUT_GLYPHS[i];
-            final int glyphColor = SHORTCUT_TAGS[i];
-            View tag = new View(this) {
-                private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                @Override protected void onDraw(Canvas canvas) {
-                    drawShortcutGlyph(canvas, getWidth(), getHeight(),
-                            glyphKind, glyphColor, p);
-                }
-            };
+            //     hamburger for Menu, "CC" badge for Subtitle. v1.3.3:
+            //     glyphs invert their colour when the row is selected
+            //     (the row's bright frosted-white selection pill would
+            //     hide the warm-white idle glyph colour otherwise — the
+            //     "white selector blends, icon not visible" issue from
+            //     v1.3.2 device testing). Colour discs keep their full
+            //     saturated colour in both states. Container size dp(11)
+            //     gives the hamburger / CC glyphs enough room to stay
+            //     legible at TV viewing distance; the dot variant scales
+            //     its drawn radius to match the pre-v1.3.2 dp(7) visual
+            //     diameter so colour-row symmetry is preserved.
+            ShortcutTagView tag = new ShortcutTagView(SHORTCUT_GLYPHS[i], SHORTCUT_TAGS[i]);
             android.widget.LinearLayout.LayoutParams tagLp =
                     new android.widget.LinearLayout.LayoutParams(dp(11), dp(11));
             tagLp.setMarginEnd(dp(8));
@@ -4024,25 +4021,7 @@ public class LauncherActivity extends Activity {
         // mapper button's right edge, top edge sits 4 dp below it.
         int topMargin   = dp(78);   // fallback if mapper button isn't laid out yet
         int rightMargin = dp(20);
-        View mb = mapperBtnView;
-        FrameLayout r = root;
-        if (mb != null && r != null && mb.getWidth() > 0) {
-            int[] mbLoc = new int[2];
-            int[] rLoc  = new int[2];
-            mb.getLocationOnScreen(mbLoc);
-            r .getLocationOnScreen(rLoc);
-            int mbBottomInRoot = mbLoc[1] - rLoc[1] + mb.getHeight();
-            int mbRightInRoot  = mbLoc[0] - rLoc[0] + mb.getWidth();
-            int rW = r.getWidth() > 0 ? r.getWidth() : screenW;
-            topMargin   = mbBottomInRoot + dp(4);
-            rightMargin = rW - mbRightInRoot;
-            if (rightMargin < dp(8)) rightMargin = dp(8);
-        }
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
-        lp.gravity     = Gravity.TOP | Gravity.END;
-        lp.topMargin   = topMargin;
-        lp.rightMargin = rightMargin;
-        card.setLayoutParams(lp);
+        anchorCardUnderGear(card, topMargin, rightMargin);
 
         ko.setVisibility(View.VISIBLE);
         ko.bringToFront();
@@ -4229,6 +4208,20 @@ public class LauncherActivity extends Activity {
             if (rbg instanceof android.graphics.drawable.GradientDrawable) {
                 ((android.graphics.drawable.GradientDrawable) rbg)
                         .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
+            }
+
+            // v1.3.3: indicator-glyph colour inversion. The hamburger and
+            // CC glyphs in particular need to flip from warm white to
+            // near-black when the row is selected so they stay visible
+            // against the bright frosted-white selection pill (the
+            // v1.3.2 "white selector blends, icon not visible" issue).
+            // The colour discs ignore the selected flag — they keep
+            // their saturated brand colour in both states. setSelectedState
+            // is a no-op when the state hasn't actually changed, so the
+            // call is safe to fire on every refresh.
+            View first = row.getChildAt(0);
+            if (first instanceof ShortcutTagView) {
+                ((ShortcutTagView) first).setSelectedState(sel);
             }
         }
 
@@ -5455,64 +5448,167 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** Compute and apply drop-down anchor margins on a card so it sits
+     *  immediately below the gear toolbar pill, right-edges aligned. The
+     *  settings panel and the keymap card both anchor the same way; this
+     *  helper used to be inlined twice with identical logic, audited
+     *  out in v1.3.3.
+     *
+     *  <p>Falls back to a sensible top/right pair when the gear pill
+     *  hasn't been laid out yet (cold start, configuration change). The
+     *  fallback positions the card at roughly the same place the gear
+     *  would normally sit, so a card that's shown before measure passes
+     *  finish (rare but possible) doesn't land off-screen.
+     *
+     *  <p>Allocations: two {@code int[2]} arrays per call. Not hot — at
+     *  most a few invocations per session (one per overlay open).
+     *
+     *  @param card                  the card whose LayoutParams will be mutated
+     *  @param defaultTopMarginPx    fallback top margin in px
+     *  @param defaultRightMarginPx  fallback right margin in px */
+    private void anchorCardUnderGear(View card,
+                                     int defaultTopMarginPx,
+                                     int defaultRightMarginPx) {
+        int topMargin   = defaultTopMarginPx;
+        int rightMargin = defaultRightMarginPx;
+        View mb = mapperBtnView;
+        FrameLayout r = root;
+        if (mb != null && r != null && mb.getWidth() > 0) {
+            int[] mbLoc = new int[2];
+            int[] rLoc  = new int[2];
+            mb.getLocationOnScreen(mbLoc);
+            r .getLocationOnScreen(rLoc);
+            int mbBottomInRoot = mbLoc[1] - rLoc[1] + mb.getHeight();
+            int mbRightInRoot  = mbLoc[0] - rLoc[0] + mb.getWidth();
+            int rW = r.getWidth() > 0 ? r.getWidth() : screenW;
+            topMargin   = mbBottomInRoot + dp(4);
+            rightMargin = rW - mbRightInRoot;
+            if (rightMargin < dp(8)) rightMargin = dp(8);
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
+        lp.gravity     = Gravity.TOP | Gravity.END;
+        lp.topMargin   = topMargin;
+        lp.rightMargin = rightMargin;
+        card.setLayoutParams(lp);
+    }
+
     private int dp(int v) { return Math.round(v * density); }
 
-    /** Draw the v1.3.2 shortcut-row indicator for a single keymap row.
-     *  Three rendering modes packed behind a {@code kind} switch so all
-     *  six rows can share one allocation-free {@link Paint} owned by
-     *  the calling View:
+    /** Per-row indicator view for the keymap card slot list. Renders one
+     *  of three glyphs ({@link #GLYPH_DOT} colour disc, {@link
+     *  #GLYPH_HAMBURGER} 3-line menu glyph, {@link #GLYPH_CC} closed-
+     *  captions badge) at a tiny dp(11) container size, centred via
+     *  cached {@link Rect} bounds for the text variant. The {@code
+     *  selectedState} field flips the hamburger / CC colour from warm
+     *  white to near-black when the row is selected so the glyphs stay
+     *  visible against the bright frosted-white selection pill — the
+     *  v1.3.2 issue where they invisibly blended into the white pill.
+     *  Colour discs (the four colour-key rows) keep their saturated
+     *  colour in both states because red / green / yellow / blue are
+     *  visible on white anyway. v1.3.3 introduction. */
+    private final class ShortcutTagView extends View {
+        final int kind;
+        final int color;
+        private boolean selectedState = false;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Rect ccBounds = new Rect();
+
+        ShortcutTagView(int kind, int color) {
+            super(LauncherActivity.this);
+            this.kind = kind;
+            this.color = color;
+        }
+
+        /** Update the selection state and request a redraw if it
+         *  actually changed. Cheap no-op when the row's selection state
+         *  hasn't moved (refreshKeymapRows fires on every UP/DOWN press
+         *  but the state delta is one row in / one row out — most rows
+         *  are stable). */
+        void setSelectedState(boolean s) {
+            if (s != selectedState) {
+                selectedState = s;
+                invalidate();
+            }
+        }
+
+        @Override protected void onDraw(Canvas c) {
+            drawShortcutGlyph(c, getWidth(), getHeight(), kind, color,
+                    selectedState, paint, ccBounds);
+        }
+    }
+
+    /** Draw a single keymap-card row indicator. Three rendering modes
+     *  packed behind a {@code kind} switch so all six rows share one
+     *  allocation-free {@link Paint} owned by the calling
+     *  {@link ShortcutTagView}.
      *
      *  <ul>
-     *    <li>{@link #GLYPH_DOT}: solid colour disc, ~64% of the
-     *        container's half-width so the visual dot size matches the
-     *        v1.3.0 / v1.3.1 dp(7) coloured tag despite the container
-     *        being dp(11) (the glyph variants need that extra room to
-     *        stay legible).</li>
-     *    <li>{@link #GLYPH_HAMBURGER}: three short horizontal strokes,
-     *        12% stroke width, 30% vertical spacing. Universal "menu"
-     *        symbol vocabulary — same shape as the Material / iOS /
-     *        Android system menu glyphs at TV viewing distance.</li>
-     *    <li>{@link #GLYPH_CC}: bold "CC" text centered in the
-     *        container, 62% of container height. Standard closed-
-     *        captions badge that TV remotes have used since the 1990s.</li>
+     *    <li>{@link #GLYPH_DOT}: solid colour disc (~64 % of the
+     *        container's half-width). Stays its saturated colour in
+     *        both idle and selected states — visible on either backdrop.</li>
+     *    <li>{@link #GLYPH_HAMBURGER}: three short horizontal lines,
+     *        symmetric within ~64 % of the container so the visual
+     *        footprint matches the colour disc. Idle warm white,
+     *        selected near-black.</li>
+     *    <li>{@link #GLYPH_CC}: bold "CC" text, centred via cached
+     *        {@link Rect} text bounds for accurate visual alignment.
+     *        Same idle / selected colour rules as the hamburger.</li>
      *  </ul>
      *
-     *  The colour parameter is consulted only for {@code GLYPH_DOT};
-     *  the two glyph variants render in {@code 0xCCFFFFFF} (the same
-     *  warm-white the row labels use idle) so the indicator is visible
-     *  but doesn't compete with the colour discs above it. */
+     *  The {@link Rect} parameter is owned by the calling View
+     *  (per-instance) and reused for {@code Paint.getTextBounds} on
+     *  the CC variant — getTextBounds allocates internally if no Rect
+     *  is supplied, so passing a cached one keeps the draw call
+     *  zero-alloc per frame. */
     private static void drawShortcutGlyph(Canvas c, int w, int h,
-                                          int kind, int color, Paint paint) {
+                                          int kind, int color, boolean selected,
+                                          Paint p, Rect ccBounds) {
         if (w <= 0 || h <= 0) return;
         float cx = w / 2f, cy = h / 2f;
+        // Glyph colour for the monochrome variants: idle warm white
+        // (matches row label idle colour), selected near-black (matches
+        // row label selected colour). Colour discs keep their full
+        // colour regardless — saturated brand colours read on either
+        // backdrop, and inverting them would be a different visual
+        // language (the dots would lose their identity).
+        final int glyphColor = selected ? 0xFF111114 : 0xCCFFFFFF;
+
         if (kind == GLYPH_DOT) {
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(color);
-            // 0.64 fraction keeps the dot's visual diameter ~dp(7) when
-            // the container is dp(11) — matching the pre-v1.3.2 size.
-            c.drawCircle(cx, cy, Math.min(cx, cy) * 0.64f, paint);
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(color);
+            // 0.64 fraction of the half-width keeps the visible disc
+            // at ~dp(7) inside the dp(11) container, matching the
+            // pre-v1.3.2 dot diameter.
+            c.drawCircle(cx, cy, Math.min(cx, cy) * 0.64f, p);
         } else if (kind == GLYPH_HAMBURGER) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setColor(0xCCFFFFFF);
-            paint.setStrokeWidth(Math.max(1f, w * 0.13f));
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            float inset   = w * 0.13f;
-            float spacing = h * 0.30f;
-            c.drawLine(inset, cy - spacing, w - inset, cy - spacing, paint);
-            c.drawLine(inset, cy           , w - inset, cy           , paint);
-            c.drawLine(inset, cy + spacing, w - inset, cy + spacing, paint);
+            p.setStyle(Paint.Style.STROKE);
+            p.setColor(glyphColor);
+            // Stroke + line geometry tuned so the hamburger occupies
+            // ~64 % of the container (matching the dot's visual
+            // footprint per the user's "small as symmetric to other
+            // colour icon" feedback).
+            p.setStrokeWidth(Math.max(1f, w * 0.13f));
+            p.setStrokeCap(Paint.Cap.ROUND);
+            float inset   = w * 0.18f;            // 64 % horizontal span
+            float spacing = h * 0.22f;            // ~44 % vertical span
+            c.drawLine(inset, cy - spacing, w - inset, cy - spacing, p);
+            c.drawLine(inset, cy           , w - inset, cy           , p);
+            c.drawLine(inset, cy + spacing, w - inset, cy + spacing, p);
         } else { // GLYPH_CC
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0xCCFFFFFF);
-            paint.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
-            paint.setTextAlign(Paint.Align.CENTER);
-            paint.setTextSize(h * 0.78f);
-            // Vertically centre via descent/ascent metrics — the visual
-            // centre of "CC" sits below text baseline, so we compute the
-            // baseline that puts the metrics midpoint on cy.
-            Paint.FontMetrics fm = paint.getFontMetrics();
-            float baseline = cy - (fm.ascent + fm.descent) / 2f;
-            c.drawText("CC", cx, baseline, paint);
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(glyphColor);
+            p.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+            p.setTextAlign(Paint.Align.CENTER);
+            p.setTextSize(h * 0.62f);
+            // Vertically centre via the actual rendered glyph bounds
+            // (Paint.FontMetrics centres on the typographic median,
+            // which sits below the visual median of "CC" — the user
+            // reported "not aligned in centre" against this rendering).
+            // getTextBounds writes into the caller-owned Rect, so this
+            // is allocation-free per draw.
+            p.getTextBounds("CC", 0, 2, ccBounds);
+            float baseline = cy + ccBounds.height() / 2f - ccBounds.bottom;
+            c.drawText("CC", cx, baseline, p);
         }
     }
 
