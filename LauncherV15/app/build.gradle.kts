@@ -81,6 +81,21 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 13 → 14: 1.3.3 swaps the WiFi and gear pill positions
+        // (WiFi now sits leftmost in the cluster so it lines up with
+        // the home shelf's centre-of-mass and is one UP-press away
+        // from any cell), replaces the v1.3.0 stroke-only line gear
+        // with a solid filled gear glyph (per the "more monochrome
+        // solid not line" design feedback), tightens the keymap card's
+        // Menu / Subtitle row glyphs (they're now visually symmetric
+        // with the colour discs and invert their colour when the row
+        // is selected so the bright frosted-white selection pill no
+        // longer hides them), and folds the duplicated drop-down
+        // anchor logic in the settings panel and the keymap card into
+        // one shared helper. Patch release, no behavioural change for
+        // users who don't open the keymap card or look at the toolbar
+        // pills closely — SemVer PATCH bump.
+        //
         // Bumped 12 → 13: 1.3.2 ships two real-device bug fixes from
         // v1.3.1 (the "Button shortcuts flashes during back-from-Hide"
         // race in hideKeymapOverlay's reset-to-SLOTS-at-the-top logic;
@@ -128,8 +143,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 13
-        versionName   = "1.3.2"
+        versionCode   = 14
+        versionName   = "1.3.3"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
