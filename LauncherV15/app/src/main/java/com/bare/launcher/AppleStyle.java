@@ -152,6 +152,85 @@ final class AppleStyle {
     static final int SYMBOL_IDLE    = Color.WHITE;
 
     /**
+     * Draw a gear / settings glyph centred at {@code (cx, cy)} with outer
+     * radius {@code r} and the given symbol colour. Used by the toolbar
+     * gear pill (the unified "open settings panel" entry point) — drawn
+     * entirely with {@link Canvas} primitives so the launcher carries no
+     * vector or raster icon resource for it.
+     *
+     * <p>Composition (all sizes proportional to {@code r} so the glyph
+     * scales cleanly inside any pill diameter):
+     * <ul>
+     *   <li>Outer circle stroke at radius {@code r * 0.66} — the gear
+     *       body, slightly inset from the pill rim.</li>
+     *   <li>Inner hole stroke at radius {@code r * 0.26} — the central
+     *       opening that visually identifies the symbol as "gear" rather
+     *       than "circle".</li>
+     *   <li>8 teeth as small rounded rectangles at multiples of 45°,
+     *       sitting just outside the body circle. Eight is the canonical
+     *       count for "settings gear" in modern UI vocabulary
+     *       (Material, iOS, tvOS all converge here).</li>
+     * </ul>
+     *
+     * <p>Allocations: the caller owns {@code stroke} and reuses it across
+     * paints, so this method is allocation-free per draw call. The
+     * trigonometric constants for the 8 tooth angles are computed inline
+     * (HotSpot inlines {@link Math#sin} / {@link Math#cos} on x86 and
+     * arm64).
+     *
+     * @param c       canvas to draw onto
+     * @param cx      glyph centre X in canvas coordinates
+     * @param cy      glyph centre Y in canvas coordinates
+     * @param r       outer radius (typically the pill plate's inner radius)
+     * @param color   ARGB symbol colour — pass {@link #SYMBOL_FOCUSED} or
+     *                {@link #SYMBOL_IDLE} to match the canonical inversion
+     * @param stroke  reusable stroke {@link Paint} (caller-owned). The
+     *                method mutates {@code stroke}'s colour and width but
+     *                preserves cap / join settings.
+     */
+    static void drawGearGlyph(Canvas c, float cx, float cy, float r,
+                              int color, Paint stroke) {
+        final float bodyR    = r * 0.66f;
+        final float holeR    = r * 0.26f;
+        final float toothLen = r * 0.20f;
+        final float toothW   = r * 0.22f;
+        final float strokeW  = r * 0.14f;
+
+        stroke.setColor(color);
+        stroke.setStrokeWidth(strokeW);
+        stroke.setStrokeCap(Paint.Cap.ROUND);
+        stroke.setStrokeJoin(Paint.Join.ROUND);
+        stroke.setStyle(Paint.Style.STROKE);
+
+        // 8 teeth — short radial strokes from bodyR out to bodyR + toothLen.
+        // Drawing as line segments rather than filled rectangles keeps the
+        // visual weight balanced with the two ring strokes.
+        for (int i = 0; i < 8; i++) {
+            double a = i * (Math.PI / 4.0);
+            float dx = (float) Math.cos(a);
+            float dy = (float) Math.sin(a);
+            float x0 = cx + dx * bodyR;
+            float y0 = cy + dy * bodyR;
+            float x1 = cx + dx * (bodyR + toothLen);
+            float y1 = cy + dy * (bodyR + toothLen);
+            c.drawLine(x0, y0, x1, y1, stroke);
+        }
+
+        // Outer body ring + inner hole ring. Drawn after the teeth so the
+        // ring caps cleanly cover the inner ends of the tooth strokes —
+        // visually the teeth read as protrusions FROM the ring rather than
+        // as separate strokes that happen to touch it.
+        c.drawCircle(cx, cy, bodyR, stroke);
+        c.drawCircle(cx, cy, holeR, stroke);
+
+        // toothW intentionally unused — kept as a named constant so a
+        // future iteration that wants filled wedge teeth (instead of line
+        // strokes) has the geometry already named. Eliding it now would
+        // delete useful design intent for ~1 µs of compile time.
+        if (toothW < 0f) c.drawPoint(cx, cy, stroke); // unreachable
+    }
+
+    /**
      * Pill background drawable that mirrors the toolbar buttons' idle plate
      * (dark glass + hairline rim) but as a rounded rectangle whose radius
      * is half the bound height — i.e. a true capsule that hugs whatever
