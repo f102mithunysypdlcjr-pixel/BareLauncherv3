@@ -69,17 +69,68 @@
             android:stateNotNeeded="true"
             android:windowSoftInputMode="stateUnspecified|adjustPan">
 
-            <!-- Standard Android HOME launcher -->
+            <!--
+                 Standard Android HOME launcher.
+
+                 Categories:
+                   HOME      — registers as a home-screen candidate so
+                               the OS picks up the app in Settings →
+                               Default apps → Home app.
+                   DEFAULT   — needed for queryIntentActivities calls
+                               that pass MATCH_DEFAULT_ONLY (the
+                               PackageManager default).
+                   LAUNCHER  — makes the launcher itself enumerable
+                               via queryIntentActivities(MAIN+LAUNCHER).
+                               Required for third-party "Launcher
+                               Manager" / "set-default-launcher" tools
+                               popular on XDA — they list every
+                               activity matching MAIN+LAUNCHER (which
+                               is how every conventional app appears
+                               in an app drawer). Without LAUNCHER,
+                               our launcher is invisible to those
+                               tools and to any "open with" dialog
+                               that probes for launchable activities.
+
+                               Adding LAUNCHER to the same intent
+                               filter (rather than as a second filter)
+                               is the canonical Android pattern — see
+                               AOSP packages/apps/Launcher3.
+
+                               Note: queryApps() inside this launcher
+                               self-filters by getPackageName(), so
+                               our own activity does NOT appear on
+                               the home shelf despite now matching
+                               MAIN+LAUNCHER probes. The visibility
+                               only affects external enumeration.
+
+                 The intent-filter priority="1" stays low so OEM /
+                 system launchers retain their default selection on
+                 first boot; the user is the one who picks our app
+                 via the system Default-launcher dialog.
+            -->
             <intent-filter android:priority="1">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Android TV / Leanback launcher -->
+            <!--
+                 Android TV / Leanback launcher.
+
+                 LEANBACK_LAUNCHER puts the activity on the Android TV
+                 system launcher's "All apps" row.
+
+                 DEFAULT is added in v1.3.6 so that queries with
+                 MATCH_DEFAULT_ONLY (the PackageManager default) also
+                 match this filter on TV. Without it, third-party
+                 tools that combine MATCH_DEFAULT_ONLY with a
+                 LEANBACK_LAUNCHER probe miss our activity entirely.
+            -->
             <intent-filter android:priority="1">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
 
         </activity>
