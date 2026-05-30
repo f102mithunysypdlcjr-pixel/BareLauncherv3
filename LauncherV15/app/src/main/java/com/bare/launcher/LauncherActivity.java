@@ -89,6 +89,12 @@ public class LauncherActivity extends Activity {
     // remote-key shortcut. Loaded once at startup into hiddenApps; saved
     // synchronously on every toggle.
     private static final String KEY_HIDDEN     = "hidden_apps";
+    /** Persisted "show clock" preference. true = clock pill rendered with
+     *  a "EEE · h:mm a" date prefix (locale-aware short day-of-week);
+     *  false = clock pill hidden entirely and no minute tick scheduled.
+     *  v1.3.0 introduced this toggle alongside the unified settings panel.
+     *  Default true so existing installs see no behaviour change. */
+    private static final String KEY_SHOW_CLOCK = "show_clock";
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
@@ -172,7 +178,6 @@ public class LauncherActivity extends Activity {
     private WallpaperController wallpaperCtl;
     private TextView           clockView;
     private View               netBtn;
-    private View               wpBtnView;
     private RingView           ringView;
     private FrameLayout        root;
     private Toast              currentToast;
@@ -197,6 +202,13 @@ public class LauncherActivity extends Activity {
     // the activity now only deals with scheduling / TextView wiring.
     private final ClockFormatter clockFmt = new ClockFormatter();
 
+    /** Mirror of {@link #KEY_SHOW_CLOCK} loaded once at startup. The
+     *  settings panel toggle writes the pref synchronously and updates
+     *  this field + the {@link #clockView} visibility / tick scheduling
+     *  in one step. Default {@code true} preserves v1.2.x behaviour for
+     *  existing installs. */
+    private boolean showClock = true;
+
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
             if (destroyed || !clockRunning) return;
@@ -211,12 +223,18 @@ public class LauncherActivity extends Activity {
     };
 
     /** Refresh the clock TextView. Updates the digits on the minute boundary
-     *  with no fade animation — simpler and stabler. */
+     *  with no fade animation — simpler and stabler. The {@link #showClock}
+     *  preference gates everything: when off the method short-circuits
+     *  before any allocation or canvas-touching work. When on, the
+     *  formatter renders with the locale-aware short day-of-week prefix
+     *  (the time + date toggle is bundled in v1.3.0 so a single user
+     *  preference controls both). */
     private void tickClock(long now) {
         TextView cv = clockView;
         if (cv == null) return;
-        if (!clockFmt.shouldRepaint(now)) return; // no visible change
-        cv.setText(clockFmt.format(now), TextView.BufferType.SPANNABLE);
+        if (!showClock) return;
+        if (!clockFmt.shouldRepaint(now, true)) return; // no visible change
+        cv.setText(clockFmt.format(now, true), TextView.BufferType.SPANNABLE);
     }
 
     private ThreadPoolExecutor       iconExecutor;
@@ -323,12 +341,12 @@ public class LauncherActivity extends Activity {
     // inside the hide-manager mode. Iteration order doesn't matter — we
     // never list this set directly; we only do contains() checks.
     private final ArraySet<String>      hiddenApps        = new ArraySet<>();
-    // Manage-hidden-apps slot row: a 7th, visually-offset row at the bottom
-    // of the slot column that transitions the card to HIDE mode. Held as a
-    // field so refreshKeymapRows can paint its selection state without
-    // hunting through child indices (key rows occupy 0..5, divider 6,
-    // manage row 7).
-    private android.widget.LinearLayout keymapManageRow   = null;
+    // Manage-hidden-apps used to live as a 7th, visually-offset row at
+    // the bottom of the slot column. v1.3.0 moves it into the unified
+    // settings panel (alongside Set wallpaper / Show clock / System
+    // Settings). The keymap card is now exclusively key-binding rows.
+    // The HIDE sub-mode the manage row used to enter still exists and
+    // is reachable from the settings panel's "Manage hidden apps" row.
     // Hide-manager sub-view (third child of the card, sibling of the slot
     // list and picker — visibility is swapped between the three). The hide
     // manager intentionally mirrors the keymap PICKER's UX exactly: a
@@ -359,10 +377,50 @@ public class LauncherActivity extends Activity {
     // session (avoids a full shelf rebuild for read-only opens).
     private boolean                     keymapHideDirty   = false;
 
-    // Third toolbar icon (next to wifi + wallpaper) that opens the keymap
-    // overlay. Held as a field so focus-chain handlers and onDestroy can
-    // reach it.
+    // Third toolbar icon (next to wifi) that opens the unified settings
+    // panel — the v1.3.0 consolidation entry point. Held as a field so
+    // focus-chain handlers and onDestroy can reach it.
     private View                        mapperBtnView     = null;
+
+    // ── Settings panel (v1.3.0) ──────────────────────────────────────────
+    //
+    // Top-level overlay that opens as a dropdown under the gear button
+    // and holds five rows: Manage hidden apps, Button shortcuts, Set
+    // wallpaper, Show clock toggle, System Settings. Replaces the
+    // wallpaper toolbar pill (deleted) and the "Manage hidden apps" 7th
+    // row that used to live inside the keymap card. Same visual language
+    // as the keymap card (dark slate plate + 1 dp white rim, drop-down
+    // animation pivoted at the gear's top-right corner).
+    //
+    // Lifecycle: built lazily on first {@link #showSettingsPanel} so
+    // cold-start doesn't pay for ~12 view allocations and 5 click
+    // listeners for a feature most users only touch occasionally.
+    // Re-used across opens, torn down on activity destroy.
+    private FrameLayout                 settingsOverlay   = null;
+    private android.widget.LinearLayout settingsCard      = null;
+    private android.widget.LinearLayout settingsColumn    = null;
+    /** Selection cursor inside the panel — UP/DOWN cycle, OK activates. */
+    private int                         settingsSelectedRow = 0;
+    /** Hold the show-clock row's checkmark TextView so toggling repaints
+     *  only that one indicator without scanning child indices. */
+    private TextView                    settingsShowClockCheck = null;
+    /** Set when the user enters the keymap card via the settings panel
+     *  (Manage hidden apps row → HIDE mode, Button shortcuts row →
+     *  SLOTS mode). {@link #hideKeymapOverlay} consults this flag and
+     *  re-opens the settings panel instead of dropping focus to the home
+     *  shelf, so a deep "settings → button shortcuts → bind a key →
+     *  back" gesture lands the user exactly where they left the panel. */
+    private boolean                     keymapOpenedFromSettings = false;
+
+    /** Symbolic indices for the 5 rows in the settings panel. UP/DOWN
+     *  navigation is modulo SETTINGS_ROW_COUNT, OK dispatches via a
+     *  switch on these values. */
+    private static final int SETTINGS_ROW_HIDE_APPS       = 0;
+    private static final int SETTINGS_ROW_KEYMAP          = 1;
+    private static final int SETTINGS_ROW_WALLPAPER       = 2;
+    private static final int SETTINGS_ROW_SHOW_CLOCK      = 3;
+    private static final int SETTINGS_ROW_SYSTEM_SETTINGS = 4;
+    private static final int SETTINGS_ROW_COUNT           = 5;
 
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
      *  Single source of truth for "ring should not be visible right now".
@@ -528,12 +586,24 @@ public class LauncherActivity extends Activity {
                     hideKeymapOverlay();
                     return;
                 }
-                // 2. Context menu / reorder mode open → exit it. The context
+                // 2. Settings panel open → close it. Lower priority than
+                //    the keymap overlay because the keymap overlay can sit
+                //    on top of the settings panel (drilled in via "Manage
+                //    hidden apps" or "Button shortcuts"). hideKeymapOverlay
+                //    re-opens the settings panel automatically when
+                //    keymapOpenedFromSettings is set, so back-stack
+                //    behaviour matches user expectations.
+                FrameLayout sp = settingsOverlay;
+                if (sp != null && sp.getVisibility() == View.VISIBLE) {
+                    hideSettingsPanel();
+                    return;
+                }
+                // 3. Context menu / reorder mode open → exit it. The context
                 //    menu lives inside reorder mode in this design, so a
                 //    single exitReorderMode call hides both.
                 RecyclingShelfView s = shelf;
                 if (s != null && s.reorderMode) { s.exitReorderMode(false); return; }
-                // 3. Otherwise no-op: the launcher is HOME — back from the
+                // 4. Otherwise no-op: the launcher is HOME — back from the
                 //    home screen should stay home.
             };
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -664,13 +734,14 @@ public class LauncherActivity extends Activity {
         // to know about wallpaper memory hygiene at all.
         if (wallpaperCtl != null) { wallpaperCtl.onDestroy(); wallpaperCtl = null; }
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
-        wpBtnView = null; netBtn = null; ringView = null; root = null;
+        netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
+        settingsOverlay = null; settingsCard = null; settingsColumn = null;
+        settingsShowClockCheck = null;
         menuOverlay = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
         keymapOverlay = null; keymapColumn = null; keymapCard = null;
         keymapPickerView = null; keymapPickerTitle = null;
         keymapPickerHsv = null; keymapPickerStrip = null;
-        keymapManageRow = null;
         keymapHideView = null; keymapHideTitle = null;
         keymapHideHsv  = null; keymapHideStrip = null;
         super.onDestroy();
@@ -736,6 +807,10 @@ public class LauncherActivity extends Activity {
 
     @Override @SuppressWarnings("deprecation")
     public void onBackPressed() {
+        FrameLayout sp = settingsOverlay;
+        if (sp != null && sp.getVisibility() == View.VISIBLE) {
+            hideSettingsPanel(); return;
+        }
         RecyclingShelfView s = shelf;
         if (s != null && s.reorderMode) { s.exitReorderMode(false); return; }
         // No-op for HOME launcher: back from the home screen should stay home.
@@ -863,6 +938,12 @@ public class LauncherActivity extends Activity {
         // the TypefaceSpan in {@link ClockFormatter}.
         clockView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         clockView.setLetterSpacing(0.02f);
+        // If the user has opted out of the clock pill, hide it before the
+        // first paint so cold start never flashes a visible-then-hidden
+        // pill. {@link #startClock} also enforces this on every resume,
+        // but doing it here avoids the one-frame visibility flicker on
+        // slow-laying-out ROMs.
+        if (!showClock) clockView.setVisibility(View.GONE);
         root.addView(clockView);
 
         // Minimal-pill sizing. Earlier values (52 / 36 / 6 / 18 / 20) read
@@ -895,18 +976,27 @@ public class LauncherActivity extends Activity {
         final int MARG_T      = dp(14);
         final int MARG_E      = dp(16);
 
-        // Top-right toolbar buttons. Layout left-to-right is:
-        //   [mapper] [wifi] [wallpaper]
-        // Margins are computed from the right edge — wallpaper sits flush
-        // against MARG_E, each preceding button is one (BTN_VIEW_SZ + BTN_GAP)
-        // step further left. mapperBtn was added as a third icon so the
-        // remote-key remapping config gets a dedicated, discoverable entry
-        // (no long-press gesture, no nested menu).
+        // Top-right toolbar buttons. Layout left-to-right after the v1.3.0
+        // consolidation:
+        //
+        //     [ ⚙ gear ]   [ wifi ]
+        //
+        // The wallpaper pill that used to sit at the rightmost edge in
+        // v1.2.x has been folded into the gear panel as a "Set wallpaper"
+        // row, halving the toolbar footprint without losing any feature.
+        // WiFi keeps the rightmost slot (it's the only daily-frequent
+        // toolbar action — the muscle memory of "edge of screen = WiFi"
+        // is preserved). The gear pill sits to its left and is the new
+        // discoverable entry into every other launcher setting.
+        //
+        // Margins are computed from the right edge — netBtn sits flush
+        // against MARG_E, the gear is one (BTN_VIEW_SZ + BTN_GAP) step
+        // further left.
         netBtn = buildNetBtn(BTN_SZ);
         FrameLayout.LayoutParams netLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         netLp.gravity = Gravity.TOP | Gravity.END;
         netLp.topMargin = MARG_T;
-        netLp.setMarginEnd(MARG_E + BTN_VIEW_SZ + BTN_GAP);
+        netLp.setMarginEnd(MARG_E);
         netBtn.setLayoutParams(netLp);
         netBtn.setClipBounds(null);
         netBtn.setContentDescription(getString(R.string.cd_network_settings));
@@ -917,21 +1007,11 @@ public class LauncherActivity extends Activity {
         FrameLayout.LayoutParams mpLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
         mpLp.gravity = Gravity.TOP | Gravity.END;
         mpLp.topMargin = MARG_T;
-        // Leftmost of the three: 2 stride steps from the right edge.
-        mpLp.setMarginEnd(MARG_E + 2 * (BTN_VIEW_SZ + BTN_GAP));
+        // One stride step from the right edge (left of the WiFi pill).
+        mpLp.setMarginEnd(MARG_E + BTN_VIEW_SZ + BTN_GAP);
         mpLocal.setLayoutParams(mpLp);
-        mpLocal.setContentDescription(getString(R.string.cd_remap_remote));
+        mpLocal.setContentDescription(getString(R.string.cd_settings));
         root.addView(mpLocal);
-
-        View wpLocal = buildWpBtn(BTN_SZ);
-        wpBtnView = wpLocal;
-        FrameLayout.LayoutParams wpLp = new FrameLayout.LayoutParams(BTN_VIEW_SZ, BTN_VIEW_SZ);
-        wpLp.gravity = Gravity.TOP | Gravity.END;
-        wpLp.topMargin = MARG_T;
-        wpLp.setMarginEnd(MARG_E);
-        wpLocal.setLayoutParams(wpLp);
-        wpLocal.setContentDescription(getString(R.string.cd_change_wallpaper));
-        root.addView(wpLocal);
 
         int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
         // Ring view diameter = icon + headroom for the focus scale-up.
@@ -1333,11 +1413,105 @@ public class LauncherActivity extends Activity {
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
-        // Long-press → general system Settings. Discoverable via the
-        // standard "press and hold" gesture (TV remote: hold DPAD_CENTER;
-        // touch: long-press). The short click still opens WiFi/network
-        // settings as before — long-press is purely an additional
-        // shortcut, never replaces the primary action.
+        // Long-press intentionally NOT bound. The system-Settings shortcut
+        // moved to the gear pill in v1.3.0 (it's the most common
+        // destination from the panel and now lives next to the gear's
+        // short-press = "open panel" entry). Leaving WiFi long-press
+        // unbound reserves it for a future power-user shortcut without
+        // committing to a feature now. Important: we do NOT register an
+        // OnLongClickListener that returns true; doing so would swallow
+        // long-press events. Without a listener, long-press is a no-op
+        // and short-press still fires cleanly on key UP / touch UP.
+        v.setOnFocusChangeListener((view, f) -> {
+            view.animate().cancel();
+            view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
+                    .setDuration(100).setInterpolator(FOCUS_EASE).start();
+            view.invalidate();
+        });
+        v.setOnKeyListener((view, kc, ev) -> {
+            if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+            switch (kc) {
+                // DPAD_CENTER / ENTER / BUTTON_A intentionally NOT
+                // intercepted here. Letting them fall through preserves
+                // the platform's short-click on key UP. Long-press is
+                // unbound (see comment above) so there is no
+                // OnLongClickListener to compete with.
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                    // WiFi is the rightmost button now — its DOWN lands on
+                    // the LAST shelf cell so the d-pad model "below me is
+                    // the cell visually under me" stays consistent.
+                    RecyclingShelfView sd = shelf;
+                    if (sd != null) sd.requestFocusOnIndex(sd.lastIndex());
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                    // Gear is the only neighbour to the left.
+                    View mb = mapperBtnView;
+                    if (mb != null) { mb.requestFocus(); return true; }
+                    RecyclingShelfView sl = shelf;
+                    if (sl != null) sl.requestFocusOnIndex(sl.lastIndex());
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    // Rightmost toolbar button — wrap to the first shelf
+                    // cell. Symmetric with the gear's LEFT-wraps-to-last
+                    // shelf cell behaviour.
+                    RecyclingShelfView sr = shelf;
+                    if (sr != null) sr.requestFocusOnIndex(0);
+                    return true;
+                default: return false;
+            }
+        });
+        return v;
+    }
+
+    /** Third toolbar pill — opens the unified settings panel (which
+     *  hosts hide-apps / button-shortcuts / wallpaper / system-settings /
+     *  show-clock toggle as a vertical row list). Matches the netBtn glass
+     *  aesthetic exactly: dark idle plate, frosted-white focused plate,
+     *  glyph inverts on focus. The icon is a gear (universal "settings"
+     *  symbol). Drawn entirely with Canvas primitives — zero new
+     *  resources.
+     *
+     *  <p>Long-press opens system Settings directly (the most common
+     *  destination from the panel). Short-press opens the panel as the
+     *  discoverable, full-menu entry point. */
+    private View buildMapperBtn(int sz) {
+        View v = new View(this) {
+            private final Paint stroke    = makeBtnStrokePaint();
+            private final Paint bgIdle    = makeBgIdlePaint();
+            private final Paint bgFocus   = makeBgFocusPaint();
+            private final Paint rim       = makeRimPaint();
+            @Override protected void onDraw(Canvas c) {
+                int w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) return;
+                boolean focused = isFocused();
+                float scale = focused ? 1f : 0.86f;
+                float cx = w / 2f, cy = h / 2f;
+                float r = Math.min(cx, cy) * scale;
+                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
+                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+
+                int symbolColor = focused ? AppleStyle.SYMBOL_FOCUSED : AppleStyle.SYMBOL_IDLE;
+                // Single delegating call: the gear glyph (8 teeth, body
+                // ring, inner hole) is drawn proportionally inside the
+                // plate. {@link AppleStyle#drawGearGlyph} mutates only
+                // the supplied paint's colour / width / cap / join, so
+                // the next idle / focused transition will re-set the
+                // colour cleanly without paint-state leakage.
+                AppleStyle.drawGearGlyph(c, cx, cy, r, symbolColor, stroke);
+            }
+        };
+        applyApplePillStyle(v);
+        v.setOnClickListener(view -> {
+            view.playSoundEffect(SoundEffectConstants.CLICK);
+            showSettingsPanel();
+        });
+        // Long-press → general system Settings. The most common
+        // destination from the panel and the muscle-memory shortcut
+        // moved over from the WiFi pill in v1.3.0. Discoverable via the
+        // standard "press and hold" gesture (TV remote: hold
+        // DPAD_CENTER; touch: long-press). The short click still opens
+        // the unified settings panel — long-press is purely an
+        // additional shortcut.
         v.setOnLongClickListener(view -> {
             view.playSoundEffect(SoundEffectConstants.CLICK);
             openSystemSettings();
@@ -1352,183 +1526,16 @@ public class LauncherActivity extends Activity {
         v.setOnKeyListener((view, kc, ev) -> {
             if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
             switch (kc) {
-                // DPAD_CENTER / ENTER / BUTTON_A intentionally NOT intercepted
-                // here. Letting them fall through to the platform's default
-                // View key handling preserves long-press detection (which
-                // fires our OnLongClickListener after the system long-press
-                // timeout) while still triggering the short OnClickListener
-                // on key UP. The other toolbar buttons keep their snappier
-                // ACTION_DOWN-fires-click behaviour because they don't
-                // expose a long-press action.
+                // DPAD_CENTER / ENTER / BUTTON_A intentionally NOT
+                // intercepted — letting them fall through preserves the
+                // platform's long-press detection (which fires our
+                // OnLongClickListener after the system long-press
+                // timeout) while still triggering the short
+                // OnClickListener on key UP.
                 case KeyEvent.KEYCODE_DPAD_DOWN:
-                    RecyclingShelfView sd = shelf; if (sd != null) sd.requestFocusOnIndex(0); return true;
-                case KeyEvent.KEYCODE_DPAD_LEFT:
-                    // Wifi is the middle button: LEFT focuses the mapper
-                    // (leftmost) when present, else falls through to the
-                    // last shelf cell to preserve pre-mapper behaviour.
-                    View mb = mapperBtnView;
-                    if (mb != null) { mb.requestFocus(); return true; }
-                    RecyclingShelfView sl = shelf;
-                    if (sl != null) sl.requestFocusOnIndex(sl.lastIndex());
-                    return true;
-                case KeyEvent.KEYCODE_DPAD_RIGHT:
-                    View wb = wpBtnView; if (wb != null) wb.requestFocus(); return true;
-                default: return false;
-            }
-        });
-        return v;
-    }
-
-    private View buildWpBtn(int sz) {
-        View v = new View(this) {
-            // Same Apple-TV glass aesthetic as the WiFi button. Glyph is a
-            // landscape (sun + mountain) drawn as crisp white strokes that
-            // invert to dark on focus for the frosted-plate effect.
-            private final Paint stroke    = makeBtnStrokePaint();
-            private final Paint bgIdle    = makeBgIdlePaint();
-            private final Paint bgFocus   = makeBgFocusPaint();
-            private final Paint rim       = makeRimPaint();
-            private final android.graphics.Path mt  = new android.graphics.Path();
-            private int   lw = 0, lh = 0;
-            private float ls = -1f;
-            @Override protected void onDraw(Canvas c) {
-                int w = getWidth(), h = getHeight();
-                if (w <= 0 || h <= 0) return;
-                boolean focused = isFocused();
-                float scale = focused ? 1f : 0.86f;
-                float cx = w / 2f, cy = h / 2f;
-                float r = Math.min(cx, cy) * scale;
-                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
-                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
-
-                int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
-                stroke.setColor(symbolColor);
-                float s = r * 0.92f;
-                stroke.setStrokeWidth(s * 0.13f);
-                if (w != lw || h != lh || scale != ls) {
-                    lw = w; lh = h; ls = scale;
-                    float l = cx - s/2f, rt = cx + s/2f, t = cy - s/2f, b = cy + s/2f;
-                    mt.rewind();
-                    mt.moveTo(l, b); mt.lineTo(l + s*0.38f, t + s*0.48f);
-                    mt.lineTo(l + s*0.62f, t + s*0.66f); mt.lineTo(rt, b);
-                }
-                // Landscape icon: outer frame, sun dot, mountain path — full bright.
-                c.drawCircle(cx, cy, s * 0.46f, stroke);
-                c.drawCircle(cx + s*0.17f, cy - s*0.18f, s*0.10f, stroke);
-                c.drawPath(mt, stroke);
-            }
-        };
-        applyApplePillStyle(v);
-        v.setOnClickListener(view -> openStoragePicker());
-        v.setOnFocusChangeListener((view, f) -> {
-            view.animate().cancel();
-            view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
-                    .setDuration(100).setInterpolator(FOCUS_EASE).start();
-            view.invalidate();
-        });
-        v.setOnKeyListener((view, kc, ev) -> {
-            if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
-            switch (kc) {
-                case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A:
-                    view.playSoundEffect(SoundEffectConstants.CLICK);
-                    view.performClick(); return true;
-                case KeyEvent.KEYCODE_DPAD_DOWN:
-                    RecyclingShelfView s = shelf;
-                    if (s != null) s.requestFocusOnIndex(s.lastIndex());
-                    return true;
-                case KeyEvent.KEYCODE_DPAD_LEFT:
-                    View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
-                case KeyEvent.KEYCODE_DPAD_RIGHT:
-                    RecyclingShelfView sr = shelf; if (sr != null) sr.requestFocusOnIndex(0); return true;
-                default: return false;
-            }
-        });
-        return v;
-    }
-
-    /** Third toolbar pill — opens the remote-key remap overlay.
-     *  Matches the netBtn / wpBtn glass aesthetic exactly: dark idle plate,
-     *  frosted-white focused plate, glyph inverts on focus. The icon is a
-     *  3-bar "sliders" / settings glyph (universal "configure" symbol).
-     *  Drawn entirely with Canvas primitives — zero new resources. */
-    private View buildMapperBtn(int sz) {
-        View v = new View(this) {
-            private final Paint stroke    = makeBtnStrokePaint();
-            private final Paint dot       = makeBtnPaint(true);
-            private final Paint bgIdle    = makeBgIdlePaint();
-            private final Paint bgFocus   = makeBgFocusPaint();
-            private final Paint rim       = makeRimPaint();
-            @Override protected void onDraw(Canvas c) {
-                int w = getWidth(), h = getHeight();
-                if (w <= 0 || h <= 0) return;
-                boolean focused = isFocused();
-                float scale = focused ? 1f : 0.86f;
-                float cx = w / 2f, cy = h / 2f;
-                float r = Math.min(cx, cy) * scale;
-                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
-                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
-
-                int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
-                stroke.setColor(symbolColor);
-                dot.setColor(symbolColor);
-
-                // 3 horizontal bars with circular knobs at varied positions —
-                // reads as "sliders" / "configure" at a glance. Knob ordering
-                // (28%, 70%, 46%) gives an asymmetric, hand-tuned look that
-                // never collides with the bar end-caps.
-                //
-                // Geometry tuned for the smaller minimal pill: bar length
-                // 1.12× ic (was 1.30) so the bars sit comfortably within
-                // the plate — at 1.30 they nearly touched the rim on the
-                // 40 dp box. Stroke and knob proportions reduced in step
-                // so the symbol stays balanced rather than ink-heavy.
-                float ic       = r * 0.96f;
-                float lineW    = ic * 1.12f;
-                float lineL    = cx - lineW / 2f;
-                float lineR    = cx + lineW / 2f;
-                float strokeW  = ic * 0.16f;
-                float spacing  = ic * 0.50f;
-                float knobR    = strokeW * 0.90f;
-                stroke.setStrokeWidth(strokeW);
-                stroke.setStrokeCap(Paint.Cap.ROUND);
-                stroke.setStrokeJoin(Paint.Join.ROUND);
-
-                final float[] knobFrac = { 0.28f, 0.70f, 0.46f };
-                for (int i = 0; i < 3; i++) {
-                    float by = cy + (i - 1) * spacing;
-                    c.drawLine(lineL, by, lineR, by, stroke);
-                    float kx = lineL + lineW * knobFrac[i];
-                    // Outer knob disc (matches plate colour) acts as a "cut-out"
-                    // around the inner knob to visually separate it from the bar.
-                    c.drawCircle(kx, by, knobR + strokeW * 0.45f,
-                            focused ? bgFocus : bgIdle);
-                    c.drawCircle(kx, by, knobR, dot);
-                }
-            }
-        };
-        applyApplePillStyle(v);
-        v.setOnClickListener(view -> {
-            view.playSoundEffect(SoundEffectConstants.CLICK);
-            showKeymapOverlay();
-        });
-        v.setOnFocusChangeListener((view, f) -> {
-            view.animate().cancel();
-            view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
-                    .setDuration(100).setInterpolator(FOCUS_EASE).start();
-            view.invalidate();
-        });
-        v.setOnKeyListener((view, kc, ev) -> {
-            if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
-            switch (kc) {
-                case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A:
-                    view.playSoundEffect(SoundEffectConstants.CLICK);
-                    view.performClick(); return true;
-                case KeyEvent.KEYCODE_DPAD_DOWN:
-                    // Down lands on the first shelf cell — natural since the
-                    // mapper is the leftmost icon and the leftmost shelf cell
-                    // sits below it.
+                    // Down lands on the first shelf cell — natural since
+                    // the gear is the leftmost icon and the leftmost
+                    // shelf cell sits below it.
                     RecyclingShelfView s = shelf;
                     if (s != null) s.requestFocusOnIndex(0);
                     return true;
@@ -3069,6 +3076,21 @@ public class LauncherActivity extends Activity {
             if (handleKeymapOverlayKey(event)) return true;
             return super.dispatchKeyEvent(event);
         }
+        FrameLayout sp = settingsOverlay;
+        if (sp != null && sp.getVisibility() == View.VISIBLE) {
+            // Only consume on ACTION_DOWN. Letting ACTION_UP fall through
+            // matches the keymap overlay's pattern and avoids swallowing
+            // long-press detection when a future row gains one.
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (handleSettingsKey(event.getKeyCode())) return true;
+            } else {
+                // Swallow non-DOWN events for keys we'd otherwise let
+                // through (volume / power / media handled by the
+                // isLetThroughKey path inside handleSettingsKey).
+                return true;
+            }
+            return super.dispatchKeyEvent(event);
+        }
         if (event.getAction() == KeyEvent.ACTION_DOWN
                 && event.getRepeatCount() == 0
                 && keyMap.size() > 0
@@ -3084,6 +3106,412 @@ public class LauncherActivity extends Activity {
             }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    // ── Settings panel (v1.3.0) ──────────────────────────────────────────
+    //
+    // Top-level overlay that opens as a dropdown under the gear toolbar
+    // pill. Five rows: Manage hidden apps, Button shortcuts, Set
+    // wallpaper, Show clock toggle, System Settings. Visual language
+    // matches the keymap card (deep slate plate + 1 dp white rim, drop-
+    // down animation pivoted at the gear's top-right corner). Same
+    // selection vocabulary too: idle row transparent + light-grey text,
+    // selected row a bright frosted-white pill with dark text.
+    //
+    // Drill-through actions (hide apps, button shortcuts, wallpaper,
+    // system settings) close the panel before launching the next
+    // surface. The Show clock toggle stays in place — the user can flip
+    // it and continue browsing the panel. The keymap card knows it was
+    // opened from the panel via {@link #keymapOpenedFromSettings} and
+    // re-opens the panel after the keymap card is dismissed, so a deep
+    // "settings → button shortcuts → bind a key → back" gesture lands
+    // exactly back at the panel cursor where the user left off.
+
+    /** Lazy-build the settings panel on first {@link #showSettingsPanel}.
+     *  Re-used across opens. Same plate / row / animation primitives as
+     *  the keymap overlay — only the row count and content differ. */
+    private void buildSettingsPanel() {
+        FrameLayout r = root; if (r == null) return;
+        FrameLayout ov = new FrameLayout(this) {
+            @Override public boolean onTouchEvent(MotionEvent ev) {
+                // Tap-outside-the-card dismisses, matching the keymap
+                // card and context-menu UX.
+                if (ev.getAction() == MotionEvent.ACTION_DOWN) {
+                    android.widget.LinearLayout c = settingsCard;
+                    if (c != null) {
+                        float x = ev.getX(), y = ev.getY();
+                        float l = c.getX(), t = c.getY();
+                        float rt = l + c.getWidth(), b = t + c.getHeight();
+                        if (x < l || x > rt || y < t || y > b) {
+                            hideSettingsPanel();
+                            return true;
+                        }
+                    }
+                }
+                return super.onTouchEvent(ev);
+            }
+        };
+        ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        ov.setVisibility(View.GONE);
+        ov.setBackgroundColor(0x33000000); // 20 % dim — keeps shelf faintly visible
+        ov.setClickable(true);
+        ov.setFocusable(true);
+
+        // Card — matches the keymap card's plate, rim, and corner radius.
+        android.widget.LinearLayout card = new android.widget.LinearLayout(this);
+        card.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.graphics.drawable.GradientDrawable cardBg =
+                new android.graphics.drawable.GradientDrawable();
+        cardBg.setColor(0xF21A1A1F);                          // deep slate
+        cardBg.setStroke(Math.max(1, dp(1) / 2), 0x1AFFFFFF); // 1 dp hairline rim
+        cardBg.setCornerRadius(dp(18));
+        card.setBackground(cardBg);
+        card.setPadding(dp(8), dp(7), dp(8), dp(7));
+        card.setClipChildren(false);
+        card.setClipToPadding(false);
+
+        // Vertical column of 5 rows.
+        android.widget.LinearLayout col = new android.widget.LinearLayout(this);
+        col.setOrientation(android.widget.LinearLayout.VERTICAL);
+        col.setClipChildren(false);
+        col.setClipToPadding(false);
+
+        // Build each row. Row geometry mirrors the keymap card's slot
+        // rows so the focus pill aligns horizontally across both panels
+        // (a user who has the keymap card and the settings panel in
+        // muscle memory sees the same selection language in both).
+        // Row label string ids in the same order as SETTINGS_ROW_*
+        // constants. Indicator: "›" for drill-throughs, "✓" for the
+        // toggle (set on the actual selected state in refreshSettingsRows).
+        final int[] rowLabels = new int[] {
+                R.string.settings_row_manage_hidden,
+                R.string.settings_row_button_shortcuts,
+                R.string.settings_row_set_wallpaper,
+                R.string.settings_row_show_clock,
+                R.string.settings_row_system_settings,
+        };
+        for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
+            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(10), dp(7), dp(10), dp(7));
+            android.graphics.drawable.GradientDrawable rowBg =
+                    new android.graphics.drawable.GradientDrawable();
+            rowBg.setCornerRadius(dp(9));
+            rowBg.setColor(Color.TRANSPARENT);
+            row.setBackground(rowBg);
+
+            // [0] label — flexes so the indicator hugs the right edge.
+            TextView label = new TextView(this);
+            label.setText(rowLabels[i]);
+            label.setTextColor(0xCCFFFFFF);
+            label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+            label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.END);
+            android.widget.LinearLayout.LayoutParams labelLp =
+                    new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
+            row.addView(label, labelLp);
+
+            // [1] right-side indicator — chevron for drill-throughs, check
+            //     for the show-clock toggle. The indicator's text is bound
+            //     once at build time; only its colour mutates inside
+            //     refreshSettingsRows when the row's selection state
+            //     changes (or when the toggle flips).
+            TextView indicator = new TextView(this);
+            indicator.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+            indicator.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            indicator.setSingleLine(true);
+            indicator.setPadding(dp(8), 0, 0, 0);
+            if (i == SETTINGS_ROW_SHOW_CLOCK) {
+                // Bind the field reference here so the toggle handler can
+                // mutate text colour / character without re-walking the
+                // child tree on every flip.
+                settingsShowClockCheck = indicator;
+                indicator.setText("\u2713"); // ✓
+            } else {
+                indicator.setText("\u203A"); // ›
+            }
+            row.addView(indicator,
+                    new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+
+            android.widget.LinearLayout.LayoutParams rowLp =
+                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
+            rowLp.bottomMargin = dp(2);
+            col.addView(row, rowLp);
+        }
+
+        // Touch support: each row is independently clickable, so a TV
+        // remote user uses d-pad and a touchscreen / mouse user gets the
+        // same affordances. Click also moves the selection cursor to the
+        // tapped row before activating, so the focus pill highlight
+        // matches what was just pressed.
+        for (int i = 0; i < col.getChildCount(); i++) {
+            final int idx = i;
+            View row = col.getChildAt(i);
+            row.setClickable(true);
+            row.setOnClickListener(v -> {
+                v.playSoundEffect(SoundEffectConstants.CLICK);
+                settingsSelectedRow = idx;
+                refreshSettingsRows();
+                activateSettingsRow(idx);
+            });
+        }
+
+        card.addView(col, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+        // 252 dp matches the keymap card width — the panel reads as the
+        // same "kind of surface" as the keymap card to anyone who has
+        // muscle memory of the launcher's UI vocabulary.
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(dp(252), WRAP);
+        cardLp.gravity = Gravity.TOP | Gravity.END;
+        card.setLayoutParams(cardLp);
+        ov.addView(card);
+
+        r.addView(ov);
+        settingsOverlay = ov;
+        settingsCard    = card;
+        settingsColumn  = col;
+    }
+
+    /** Animate the panel in as a dropdown under the gear toolbar pill.
+     *  Same anchor logic as {@link #showKeymapOverlay} so both surfaces
+     *  appear to fall out of the same icon — but the keymap card's anchor
+     *  resolves against the gear too, so opening keymap from inside the
+     *  settings panel keeps the visual continuity. */
+    private void showSettingsPanel() {
+        if (settingsOverlay == null) buildSettingsPanel();
+        FrameLayout ov = settingsOverlay;
+        final android.widget.LinearLayout card = settingsCard;
+        if (ov == null || card == null) return;
+
+        // Hide focus ring — it belongs to the shelf which is now logically
+        // behind the panel.
+        RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+
+        settingsSelectedRow = 0;
+        refreshSettingsRows();
+
+        // Anchor the card just below the gear toolbar pill.
+        int topMargin   = dp(78);
+        int rightMargin = dp(20);
+        View mb = mapperBtnView;
+        FrameLayout r = root;
+        if (mb != null && r != null && mb.getWidth() > 0) {
+            int[] mbLoc = new int[2];
+            int[] rLoc  = new int[2];
+            mb.getLocationOnScreen(mbLoc);
+            r .getLocationOnScreen(rLoc);
+            int mbBottomInRoot = mbLoc[1] - rLoc[1] + mb.getHeight();
+            int mbRightInRoot  = mbLoc[0] - rLoc[0] + mb.getWidth();
+            int rW = r.getWidth() > 0 ? r.getWidth() : screenW;
+            topMargin   = mbBottomInRoot + dp(4);
+            rightMargin = rW - mbRightInRoot;
+            if (rightMargin < dp(8)) rightMargin = dp(8);
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
+        lp.gravity     = Gravity.TOP | Gravity.END;
+        lp.topMargin   = topMargin;
+        lp.rightMargin = rightMargin;
+        card.setLayoutParams(lp);
+
+        ov.setVisibility(View.VISIBLE);
+        ov.bringToFront();
+        ov.requestFocus();
+
+        // Drop-down animation: same shape and timing as the keymap card so
+        // both surfaces feel like the same primitive opening from the same
+        // pill.
+        card.animate().cancel();
+        card.setAlpha(0f);
+        card.setScaleX(0.94f); card.setScaleY(0.86f);
+        card.setTranslationY(-dp(6));
+        card.post(() -> {
+            if (card != settingsCard) return;
+            card.setPivotX(card.getWidth());
+            card.setPivotY(0f);
+            card.animate()
+                    .alpha(1f)
+                    .scaleX(1f).scaleY(1f)
+                    .translationY(0f)
+                    .setDuration(160)
+                    .setInterpolator(MENU_IN)
+                    .start();
+        });
+    }
+
+    /** Animate the panel out and restore focus to the gear pill. */
+    private void hideSettingsPanel() {
+        final FrameLayout ov = settingsOverlay;
+        final android.widget.LinearLayout card = settingsCard;
+        if (ov == null) return;
+        if (card != null) {
+            card.animate().cancel();
+            card.animate()
+                    .alpha(0f)
+                    .scaleX(0.96f).scaleY(0.9f)
+                    .translationY(-dp(4))
+                    .setDuration(110)
+                    .setInterpolator(MENU_OUT)
+                    .withEndAction(() -> {
+                        if (ov != settingsOverlay) return;
+                        ov.setVisibility(View.GONE);
+                    })
+                    .start();
+        } else {
+            ov.setVisibility(View.GONE);
+        }
+        // Restore focus to the gear pill so the user lands back where
+        // they triggered the panel. Falls through to the WiFi pill if
+        // the gear has been GC'd (paranoia — it is held as a field).
+        View mb = mapperBtnView;
+        if (mb != null) mb.requestFocus();
+        else {
+            View nb = netBtn;
+            if (nb != null) nb.requestFocus();
+        }
+    }
+
+    /** Repaint each row to reflect {@link #settingsSelectedRow} and the
+     *  current {@link #showClock} toggle state. Cheap — five rows, each
+     *  a small LinearLayout with two children. The "selected" row gets a
+     *  bright frosted-white pill and dark text + dark indicator; idle
+     *  rows get transparent backgrounds and light-grey text. */
+    private void refreshSettingsRows() {
+        android.widget.LinearLayout col = settingsColumn;
+        if (col == null) return;
+        final int hlWhite = 0xFFEFEFEF;
+        final int idleBg  = Color.TRANSPARENT;
+        final int idleTx  = 0xCCFFFFFF;
+        final int selTx   = 0xFF111114;
+        for (int i = 0; i < col.getChildCount(); i++) {
+            View child = col.getChildAt(i);
+            if (!(child instanceof android.widget.LinearLayout)) continue;
+            android.widget.LinearLayout row = (android.widget.LinearLayout) child;
+            boolean sel = (i == settingsSelectedRow);
+            // Background — mutate the existing GradientDrawable so the
+            // 9 dp corner radius is preserved across paints. Wrapping in
+            // setBackgroundColor would clobber the drawable.
+            android.graphics.drawable.Drawable bg = row.getBackground();
+            if (bg instanceof android.graphics.drawable.GradientDrawable) {
+                ((android.graphics.drawable.GradientDrawable) bg)
+                        .setColor(sel ? hlWhite : idleBg);
+            }
+            View labelView     = row.getChildAt(0);
+            View indicatorView = row.getChildAt(1);
+            if (labelView instanceof TextView) {
+                ((TextView) labelView).setTextColor(sel ? selTx : idleTx);
+            }
+            if (indicatorView instanceof TextView) {
+                TextView ind = (TextView) indicatorView;
+                if (i == SETTINGS_ROW_SHOW_CLOCK) {
+                    // The toggle row's indicator carries an additional
+                    // channel of state: ON = ✓ visible, OFF = ✓ alpha-
+                    // dimmed (rendered nearly invisible) so the row's
+                    // height stays constant and the layout doesn't
+                    // shift when the toggle flips.
+                    ind.setText("\u2713");
+                    if (showClock) {
+                        ind.setTextColor(sel ? selTx : 0xFF7DD3FC); // sky cyan when on + idle
+                    } else {
+                        // 0x33 alpha — visually reads as "off" without
+                        // collapsing the row layout.
+                        ind.setTextColor(sel ? 0x66111114 : 0x33FFFFFF);
+                    }
+                } else {
+                    ind.setTextColor(sel ? selTx : idleTx);
+                }
+            }
+        }
+    }
+
+    /** D-pad / OK / Back navigation inside the settings panel. Returns
+     *  {@code true} when handled, the activity-level dispatcher relays
+     *  every other key to {@code super.dispatchKeyEvent} so volume /
+     *  power / media keys reach the platform unchanged. */
+    private boolean handleSettingsKey(int kc) {
+        switch (kc) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                settingsSelectedRow =
+                        (settingsSelectedRow - 1 + SETTINGS_ROW_COUNT) % SETTINGS_ROW_COUNT;
+                refreshSettingsRows(); return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                settingsSelectedRow = (settingsSelectedRow + 1) % SETTINGS_ROW_COUNT;
+                refreshSettingsRows(); return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+                activateSettingsRow(settingsSelectedRow);
+                return true;
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+                hideSettingsPanel(); return true;
+        }
+        // Allow volume / power / media to pass through; swallow other
+        // keys so they don't bleed to the shelf underneath.
+        if (isLetThroughKey(kc)) return false;
+        return true;
+    }
+
+    /** Execute the action bound to the given panel row. */
+    private void activateSettingsRow(int row) {
+        switch (row) {
+            case SETTINGS_ROW_HIDE_APPS:
+                // Hand off to the keymap card's HIDE mode. Set the return
+                // flag so the keymap card knows to re-open the panel on
+                // its own dismiss, and close the panel before launching
+                // the next surface.
+                keymapOpenedFromSettings = true;
+                hideSettingsPanel();
+                showKeymapOverlay();
+                enterHideManager();
+                break;
+            case SETTINGS_ROW_KEYMAP:
+                // Hand off to the keymap card's SLOTS mode (default).
+                keymapOpenedFromSettings = true;
+                hideSettingsPanel();
+                showKeymapOverlay();
+                break;
+            case SETTINGS_ROW_WALLPAPER:
+                // Wallpaper picker is a system surface (SAF). Close the
+                // panel before launching so the dim backdrop doesn't
+                // sit behind the picker on slow ROMs.
+                hideSettingsPanel();
+                openStoragePicker();
+                break;
+            case SETTINGS_ROW_SHOW_CLOCK:
+                // In-place toggle. Persist + apply + repaint indicator.
+                // Panel stays open so the user can flip multiple
+                // toggles in sequence (no toggle other than this one
+                // exists today, but the design accommodates future
+                // additions trivially).
+                showClock = !showClock;
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(KEY_SHOW_CLOCK, showClock).apply();
+                if (showClock) {
+                    // Rendering the clock for the first time after a
+                    // toggle: reset formatter so the next paint runs
+                    // unconditionally (the per-minute idempotency guard
+                    // would otherwise skip the redraw if the minute
+                    // hasn't changed since the launcher cold-started).
+                    clockFmt.reset();
+                    startClock();
+                } else {
+                    // Hide pill and stop scheduling. clockFmt itself
+                    // doesn't need teardown — it's a tiny pooled
+                    // formatter that will simply not be invoked.
+                    stopClock();
+                    TextView cv = clockView;
+                    if (cv != null) cv.setVisibility(View.GONE);
+                }
+                refreshSettingsRows(); // repaint the ✓ indicator
+                break;
+            case SETTINGS_ROW_SYSTEM_SETTINGS:
+                hideSettingsPanel();
+                openSystemSettings();
+                break;
+            default:
+                break;
+        }
     }
 
     // ── Keymap configuration overlay ─────────────────────────────────────
@@ -3240,50 +3668,12 @@ public class LauncherActivity extends Activity {
             col.addView(row, rlp);
         }
 
-        // ── Divider + manage-hidden-apps row ─────────────────────────────
-        // Hairline separator that visually groups the 6 mappable keys above
-        // and the navigation-style "manage hidden apps" entry below as two
-        // distinct categories. 1 dp tall, low-opacity white, with breathing
-        // room above/below so the slot pills don't touch it.
-        View kmDivider = new View(this);
-        kmDivider.setBackgroundColor(0x1AFFFFFF);
-        android.widget.LinearLayout.LayoutParams kmDivLp =
-                new android.widget.LinearLayout.LayoutParams(MATCH, Math.max(1, dp(1) / 2));
-        kmDivLp.topMargin    = dp(4);
-        kmDivLp.bottomMargin = dp(4);
-        kmDivLp.leftMargin   = dp(6);
-        kmDivLp.rightMargin  = dp(6);
-        col.addView(kmDivider, kmDivLp);
-
-        // Manage row mirrors the slot-row geometry (so the focus pill aligns
-        // perfectly when the manage entry is selected) but only carries a
-        // single label TextView — it's an action, not a binding.
-        android.widget.LinearLayout manage = new android.widget.LinearLayout(this);
-        manage.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        manage.setGravity(Gravity.CENTER_VERTICAL);
-        manage.setPadding(dp(10), dp(7), dp(10), dp(7));
-        android.graphics.drawable.GradientDrawable manageBg =
-                new android.graphics.drawable.GradientDrawable();
-        manageBg.setCornerRadius(dp(9));
-        manageBg.setColor(Color.TRANSPARENT);
-        manage.setBackground(manageBg);
-        TextView manageLabel = new TextView(this);
-        manageLabel.setText(R.string.keymap_manage_hidden);
-        // Idle colour is a bit dimmer than slot-row labels (0xCCFFFFFF →
-        // 0x99FFFFFF) so the row visibly reads as a different category
-        // even before the user notices the divider. Selected colour
-        // matches the slot rows for a consistent inverted-pill highlight.
-        manageLabel.setTextColor(0x99FFFFFF);
-        manageLabel.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
-        manageLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        manageLabel.setSingleLine(true);
-        manage.addView(manageLabel,
-                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
-        android.widget.LinearLayout.LayoutParams manageLp =
-                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
-        manageLp.bottomMargin = dp(2);
-        col.addView(manage, manageLp);
-        keymapManageRow = manage;
+        // The divider + "Manage hidden apps" row that used to sit at the
+        // bottom of the slot list moved to the unified settings panel in
+        // v1.3.0. The keymap card is now strictly key-binding territory —
+        // 6 rows, no extras. Hide-apps drill-in lives at
+        // {@code SETTINGS_ROW_HIDE_APPS} and reaches the same
+        // {@link #enterHideManager} surface this card hosts in HIDE mode.
 
         // ── App picker view ─────────────────────────────────────
         android.widget.LinearLayout picker = new android.widget.LinearLayout(this);
@@ -3502,13 +3892,25 @@ public class LauncherActivity extends Activity {
         } else {
             ko.setVisibility(View.GONE);
         }
-        // Restore focus to the mapper button so the user lands back
-        // where they triggered the overlay.
+        // Restore focus to the gear button so the user lands back where
+        // they triggered the overlay (gear is the only entry point into
+        // the keymap card now that the wallpaper pill is gone).
+        // If the user drilled in from the settings panel, re-open it
+        // afterwards so the back-stack reads naturally:
+        //   gear → settings → keymap → BACK → settings → BACK → home
+        if (keymapOpenedFromSettings) {
+            keymapOpenedFromSettings = false;
+            // Run AFTER the keymap card's close animation has had a frame
+            // to start so the two cards don't visually fight. uiHandler
+            // (main looper) keeps the post on the right thread.
+            uiHandler.postDelayed(this::showSettingsPanel, 60L);
+            return;
+        }
         View mb = mapperBtnView;
         if (mb != null) mb.requestFocus();
         else {
-            View wb = wpBtnView;
-            if (wb != null) wb.requestFocus();
+            View nb = netBtn;
+            if (nb != null) nb.requestFocus();
         }
     }
 
@@ -3573,22 +3975,10 @@ public class LauncherActivity extends Activity {
             }
         }
 
-        // Paint the manage row separately — it's a different category
-        // (an action, not a key binding) so the styling pipeline above
-        // doesn't apply, but the selection language must match.
-        android.widget.LinearLayout mr = keymapManageRow;
-        if (mr != null) {
-            boolean sel = (keymapSelectedRow == rows);
-            View first = mr.getChildAt(0);
-            if (first instanceof TextView) {
-                ((TextView) first).setTextColor(sel ? 0xFF111114 : 0x99FFFFFF);
-            }
-            android.graphics.drawable.Drawable mrBg = mr.getBackground();
-            if (mrBg instanceof android.graphics.drawable.GradientDrawable) {
-                ((android.graphics.drawable.GradientDrawable) mrBg)
-                        .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
-            }
-        }
+        // The manage-hidden-apps row that used to sit at index `rows` was
+        // removed in v1.3.0; it now lives in the unified settings panel.
+        // No special-case repaint needed here — the slot loop above
+        // covers every visible row.
 
         // Equalise row widths to the widest row so the menu is exactly as
         // wide as it needs to be (no dead space) AND the selection pill
@@ -3604,10 +3994,11 @@ public class LauncherActivity extends Activity {
 
     /** Measure every selectable row in the slot column and snap them all to
      *  the widest measured width. Iterates every LinearLayout child (the
-     *  6 key rows + the manage row) and skips non-LinearLayout children
-     *  like the hairline divider — so the divider is never counted as a
-     *  measurable row. Called from refreshKeymapRows() after every
-     *  binding/text change so the menu auto-fits the longest app label. */
+     *  6 key rows). v1.3.0 dropped the divider + manage row from this
+     *  column — the {@code instanceof LinearLayout} check is kept as a
+     *  defensive guard against future structural drift. Called from
+     *  refreshKeymapRows() after every binding/text change so the menu
+     *  auto-fits the longest app label. */
     private void equalizeKeymapRowWidths(android.widget.LinearLayout col, int rows) {
         int spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
         int n = col.getChildCount();
@@ -4018,8 +4409,9 @@ public class LauncherActivity extends Activity {
     }
 
     private boolean handleKeymapSlotsKey(int kc) {
-        // 6 key bindings + 1 manage-hidden-apps action row.
-        int rows = SHORTCUT_LABELS.length + 1;
+        // 6 key bindings only — the v1.2.x "manage hidden apps" 7th row
+        // moved to the unified settings panel in v1.3.0.
+        int rows = SHORTCUT_LABELS.length;
         switch (kc) {
             case KeyEvent.KEYCODE_DPAD_UP:
                 keymapSelectedRow = (keymapSelectedRow - 1 + rows) % rows;
@@ -4030,8 +4422,7 @@ public class LauncherActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
-                if (keymapSelectedRow == SHORTCUT_LABELS.length) enterHideManager();
-                else                                            enterAppPicker(keymapSelectedRow);
+                enterAppPicker(keymapSelectedRow);
                 return true;
             case KeyEvent.KEYCODE_BACK:
             case KeyEvent.KEYCODE_ESCAPE:
@@ -4525,6 +4916,20 @@ public class LauncherActivity extends Activity {
     }
 
     private void startClock() {
+        if (!showClock) {
+            // Toggle is off: ensure the pill is hidden and no tick is
+            // scheduled. tickClock would short-circuit anyway, but dropping
+            // the postDelayed entirely means zero CPU per minute on installs
+            // that opt out of the clock — the configured "0 cost when off"
+            // contract from the v1.3.0 design discussion.
+            clockRunning = false;
+            uiHandler.removeCallbacks(clockTick);
+            TextView cv = clockView;
+            if (cv != null) cv.setVisibility(View.GONE);
+            return;
+        }
+        TextView cv = clockView;
+        if (cv != null) cv.setVisibility(View.VISIBLE);
         if (!clockRunning) {
             clockRunning = true;
             // Fresh start — reset the minute tracker so the very first paint
@@ -4719,6 +5124,15 @@ public class LauncherActivity extends Activity {
                 new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.DiscardPolicy());
         app.allowCoreThreadTimeOut(true);
         appExecutor = app;
+
+        // Show-clock preference (v1.3.0). Cheap synchronous read after the
+        // pre-warm above guarantees the parsed map is already in memory.
+        // Default true so existing v1.2.x installs continue to render the
+        // clock pill on first launch without any opt-in step. The "show
+        // clock" toggle is a single bundled control: when true the formatter
+        // renders day-of-week + time, when false the pill is hidden and no
+        // minute tick is scheduled (zero CPU per minute).
+        showClock = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_SHOW_CLOCK, true);
     }
 
     @SuppressWarnings("deprecation")

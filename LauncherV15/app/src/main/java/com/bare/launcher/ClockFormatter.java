@@ -8,6 +8,7 @@ import android.text.style.StyleSpan;
 import android.text.style.TypefaceSpan;
 
 import java.util.Calendar;
+import java.util.Locale;
 
 /**
  * Encapsulates the home-screen clock's text formatting.
@@ -58,39 +59,89 @@ final class ClockFormatter {
      *  {@code true} on the first call after construction or a reset. */
     private int lastShownMinute = -1;
 
+    /** Last day-of-year shown. Tracked so a midnight rollover with the
+     *  {@code showDate} prefix on triggers a repaint even though the
+     *  minute number cycles back to 0. */
+    private int lastShownDayOfYear = -1;
+
+    /** Whether the most recent {@link #format} call was rendered with
+     *  the date prefix. A toggle of the user's "Show clock" preference
+     *  flips this — {@link #shouldRepaint} compares the requested mode
+     *  to the rendered mode so the next paint runs unconditionally. */
+    private boolean lastShownWithDate = false;
+
     /**
-     * Whether {@link #format(long)} would produce a visibly different
-     * string than the one currently shown. Activity uses this to skip the
-     * {@link android.widget.TextView#setText} when the minute has not
-     * advanced (the minute-aligned tick can fire slightly off and we want
-     * to avoid a redundant invalidate).
+     * Whether {@link #format(long, boolean)} would produce a visibly
+     * different string than the one currently shown. Activity uses this
+     * to skip the {@link android.widget.TextView#setText} when the
+     * minute has not advanced (the minute-aligned tick can fire slightly
+     * off and we want to avoid a redundant invalidate).
+     *
+     * <p>Three repaint triggers:
+     * <ul>
+     *   <li>The minute number changed since the last paint — the time
+     *       digits need a redraw.</li>
+     *   <li>The day-of-year rolled over — only relevant when the date
+     *       prefix is being rendered, but we always check it so a wall-
+     *       clock correction that lands on a different day still
+     *       repaints.</li>
+     *   <li>The {@code showDate} mode flipped — the user just toggled
+     *       "Show clock" and we need to re-render with or without the
+     *       prefix.</li>
+     * </ul>
      */
-    boolean shouldRepaint(long ms) {
+    boolean shouldRepaint(long ms, boolean showDate) {
         cal.setTimeInMillis(ms);
-        return cal.get(Calendar.MINUTE) != lastShownMinute;
+        if (showDate != lastShownWithDate) return true;
+        if (cal.get(Calendar.MINUTE) != lastShownMinute) return true;
+        return cal.get(Calendar.DAY_OF_YEAR) != lastShownDayOfYear;
+    }
+
+    /** Backwards-compatible overload — defaults {@code showDate} to false.
+     *  Kept so existing call sites that haven't migrated still compile. */
+    boolean shouldRepaint(long ms) {
+        return shouldRepaint(ms, false);
     }
 
     /**
-     * Reset the "last shown minute" sentinel so the next call to
-     * {@link #shouldRepaint(long)} returns {@code true} unconditionally
-     * and {@link #format(long)} will re-emit the spans even if nothing
-     * actually changed. Used after configuration changes (RTL flip,
-     * font scale change) so the next paint redraws against the new
-     * environment.
+     * Reset the "last shown" sentinels so the next call to
+     * {@link #shouldRepaint(long, boolean)} returns {@code true}
+     * unconditionally and {@link #format(long, boolean)} will re-emit
+     * the spans even if nothing actually changed. Used after
+     * configuration changes (RTL flip, font scale change, locale
+     * change) so the next paint redraws against the new environment.
      */
-    void reset() { lastShownMinute = -1; }
+    void reset() {
+        lastShownMinute    = -1;
+        lastShownDayOfYear = -1;
+        // lastShownWithDate intentionally left as-is: a reset() call
+        // doesn't change the user's "Show clock" preference, only the
+        // dirty-paint flags. shouldRepaint will still trigger a repaint
+        // because lastShownMinute = -1 forces it.
+    }
 
     /**
      * Build the visible clock {@link CharSequence} for the given absolute
-     * time. The returned object is the internally-pooled
+     * time, optionally prefixed with the locale-aware short day-of-week
+     * (e.g. {@code "Sat · 12:34 PM"} when {@code showDate=true}).
+     *
+     * <p>The day prefix uses {@link Calendar#getDisplayName} with a
+     * {@link Locale#getDefault()} lookup so the rendering is correct in
+     * every system language without changes to the launcher's
+     * English-only resource bundle. The {@code · } separator is locale-
+     * neutral.
+     *
+     * <p>The returned object is the internally-pooled
      * {@link SpannableStringBuilder} — callers must not mutate it and
-     * should pass {@link android.widget.TextView.BufferType#SPANNABLE} so
-     * the platform copies the spans. Subsequent calls will reuse the same
-     * builder and overwrite its contents.
+     * should pass {@link android.widget.TextView.BufferType#SPANNABLE}
+     * so the platform copies the spans. Subsequent calls will reuse
+     * the same builder and overwrite its contents.
      */
-    CharSequence format(long ms) {
+    CharSequence format(long ms, boolean showDate) {
         cal.setTimeInMillis(ms);
-        lastShownMinute = cal.get(Calendar.MINUTE);
+        lastShownMinute    = cal.get(Calendar.MINUTE);
+        lastShownDayOfYear = cal.get(Calendar.DAY_OF_YEAR);
+        lastShownWithDate  = showDate;
 
         int hour = cal.get(Calendar.HOUR);
         if (hour == 0) hour = 12;
@@ -109,14 +160,38 @@ final class ClockFormatter {
 
         ssb.clear();
         ssb.clearSpans();
+        // Optional date prefix. Calendar.getDisplayName allocates a small
+        // String per call (locale lookups don't expose a zero-alloc API)
+        // — at one tick per minute this is a single tiny String per
+        // minute, far below GC pressure. Falls back gracefully if the
+        // locale ever returns null (some stripped-down ROMs have been
+        // observed shipping with broken DateFormatSymbols).
+        if (showDate) {
+            String day = cal.getDisplayName(Calendar.DAY_OF_WEEK,
+                    Calendar.SHORT, Locale.getDefault());
+            if (day != null && !day.isEmpty()) {
+                ssb.append(day);
+                ssb.append(" \u00B7 ");
+            }
+        }
+
         // String.valueOf builds a tiny throwaway String, but format() now
         // fires once per minute (not per second), so this is 1 small alloc
         // per minute — far below GC pressure.
+        int timeStart = ssb.length();
         ssb.append(String.valueOf(chars, 0, pos));
-        ssb.setSpan(amPmSize,  amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        ssb.setSpan(amPmFace,  amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        ssb.setSpan(amPmStyle, amStart, pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        // Span offsets are relative to ssb, not to the chars buffer, so
+        // shift by timeStart when the date prefix pushed the time down.
+        ssb.setSpan(amPmSize,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        ssb.setSpan(amPmFace,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        ssb.setSpan(amPmStyle, timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return ssb;
+    }
+
+    /** Backwards-compatible overload — formats time only. Kept so any
+     *  unmigrated call site still compiles. */
+    CharSequence format(long ms) {
+        return format(ms, false);
     }
 
     /**

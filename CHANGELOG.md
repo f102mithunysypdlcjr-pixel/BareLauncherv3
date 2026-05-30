@@ -5,6 +5,145 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-30
+
+Top-right toolbar consolidation and the launcher's first user-facing
+preference toggle. The wallpaper pill is gone, the mapper "sliders"
+glyph becomes a gear, and a single dropdown panel under the gear pill
+now hosts every non-daily-frequent action: hide apps, button
+shortcuts, set wallpaper, show-clock toggle, and system Settings.
+Net effect: the home screen drops from three top-right pills to two,
+the daily WiFi action stays a single click on the rightmost edge,
+and every config surface lives in one discoverable place.
+
+### Added
+
+- **Unified settings panel under the gear pill.** Short-press the
+  gear opens a dropdown card with five rows in this order:
+  *Manage hidden apps* › / *Button shortcuts* › / *Set wallpaper* › /
+  *Show clock* ✓ / *System Settings* ›. Drill-throughs (the four
+  rows with `›`) close the panel before launching their next
+  surface; the *Show clock* row toggles in place so the user can
+  flip it without leaving the panel. The *Button shortcuts* and
+  *Manage hidden apps* rows drill into the existing keymap card;
+  pressing **Back** from inside that card returns the user to the
+  settings panel rather than dropping them at the home shelf, so a
+  deep `gear → settings → button shortcuts → bind a key → back`
+  gesture lands exactly where the user left off in the panel.
+  Visual language matches the keymap card (deep slate plate + 1 dp
+  white rim, drop-down animation pivoted at the gear's top-right
+  corner). 252 dp wide, ~5 rows tall — actually smaller than the
+  pre-1.3.0 keymap card.
+- **Show clock toggle.** Default on (existing installs see no
+  behaviour change). When on, the clock pill renders with a
+  locale-aware short day-of-week prefix and the time:
+  `Sat · 12:34 PM`. The day prefix uses
+  `Calendar.getDisplayName(DAY_OF_WEEK, SHORT, Locale.getDefault())`
+  so every system language renders correctly without changes to the
+  launcher's English-only resource bundle. When off, the pill is
+  hidden and the minute tick is *not scheduled* — zero CPU cost
+  per minute on installs that opt out, matching the v1.3.0 design
+  contract that any new feature must be free when unused. The day
+  toggle is intentionally bundled with the time toggle: a real
+  user wanting the time but explicitly *not* wanting the day name
+  is hypothetical, so a single control covers both.
+- **Long-press the gear pill → system Settings.** The most common
+  destination from the panel and the muscle-memory shortcut moved
+  over from the WiFi pill so it sits next to the gear's short-press
+  ("open panel") gesture. WiFi long-press becomes unbound — a
+  reserved slot for a future power-user shortcut without committing
+  to a feature now.
+- **Tap-outside-the-card dismisses the settings panel** with a 20%
+  black backdrop dim, identical to the keymap card and reorder-mode
+  context menu. TV-remote users get the same behaviour via the
+  Back button / predictive-back gesture.
+
+### Changed
+
+- **Top-right toolbar drops from three pills to two.** The wallpaper
+  pill is removed entirely; its action ("set wallpaper from a
+  storage picker") now lives at `Settings → Set wallpaper`. The
+  remaining two pills are `[ ⚙ gear ] [ wifi ]` with the WiFi pill
+  flush at the rightmost edge so its physical position never moves
+  for users with muscle memory from v1.2.x. Total horizontal
+  footprint shrinks from ~132 dp to ~88 dp.
+- **Mapper sliders glyph becomes a gear.** The pill is no longer the
+  "remap remote buttons" entry — it's the unified settings entry —
+  so the visual symbol updates to match. The gear is drawn entirely
+  with `Canvas` primitives via the new
+  `AppleStyle.drawGearGlyph(canvas, cx, cy, r, color, stroke)`
+  helper: 8 teeth, body ring, inner hole, all proportional to the
+  pill radius. No new vector or raster resources.
+- **WiFi pill long-press is now unbound.** The system-Settings
+  shortcut moved to the gear pill (where it sits next to its panel
+  row, the most common destination). Importantly, no
+  `OnLongClickListener` is registered on the WiFi pill — registering
+  one that returns `true` would *swallow* long-press events; leaving
+  the listener absent makes long-press a clean no-op and short-press
+  still fires on key UP / touch UP as before.
+- **Keymap card is now strictly key-binding territory.** The
+  v1.2.x "Manage hidden apps" 7th row + hairline divider that used
+  to sit at the bottom of the slot column moved into the unified
+  settings panel. The HIDE sub-mode the manage row used to enter
+  still exists and is reachable via `Settings → Manage hidden apps`.
+  `handleKeymapSlotsKey` row count drops from
+  `SHORTCUT_LABELS.length + 1` back to `SHORTCUT_LABELS.length`,
+  and the dedicated `keymapManageRow` paint branch in
+  `refreshKeymapRows` is gone.
+- **WiFi pill's d-pad navigation updated for its new rightmost
+  position.** `DOWN` now lands on the *last* shelf cell (taking
+  over the wallpaper pill's behaviour, since "below me is the cell
+  visually under me" stays consistent). `RIGHT` wraps to the *first*
+  shelf cell — symmetric with the gear's `LEFT` wrap to the last
+  shelf cell. `LEFT` focuses the gear (the only neighbour to the
+  left now).
+
+### Performance
+
+- **Show clock = off costs zero per minute.** The minute-aligned
+  `clockTick` `postDelayed` chain is never started when the toggle
+  is off. `tickClock` short-circuits before any allocation,
+  `Calendar` mutation, or `Spannable` work. The `clockView`
+  `setVisibility(GONE)` is set in `buildLayout` (avoiding a
+  one-frame visible-then-hidden flash on cold start) and reasserted
+  on every `onResume` via `startClock`'s opt-out branch. Toggle
+  flip from off → on resets `clockFmt` so the next paint runs
+  unconditionally; toggle flip from on → off calls `stopClock`,
+  removing the pending callback from the looper queue.
+- **Settings panel is lazy-built** on first
+  `showSettingsPanel()` — same pattern as the keymap card and
+  reorder-mode context menu. Cold-start view-tree work pays only
+  for what the user actually opens. The panel itself is ~12 view
+  allocations, 5 click listeners, 1 backdrop. Re-used across
+  opens, torn down on activity destroy.
+- **Wallpaper pill removal saves a `View` + a `Path`-cached
+  landscape-glyph onDraw.** Every focus-change paint on the
+  toolbar dropped one cell from its work; layout-pass cost in
+  `buildLayout` shrinks by ~30 lines of view setup.
+- **Gear glyph is allocation-free per draw.** The 8 tooth angles
+  are computed inline via `Math.cos`/`Math.sin` (HotSpot inlines
+  both on x86 and arm64); the caller-owned `stroke` paint is
+  reused across paints with only colour / width / cap / join
+  mutated. No per-frame allocations.
+
+### Localisation
+
+- **Day-of-week prefix is locale-aware.** Uses
+  `Calendar.getDisplayName(DAY_OF_WEEK, SHORT, Locale.getDefault())`
+  so a Spanish-locale device renders `Sáb · 12:34 PM` and a
+  Japanese-locale device renders `土 · 12:34 PM` — without any
+  changes to the launcher's English-only `strings.xml`. The middle
+  separator (`·`, U+00B7) is locale-neutral. Falls back gracefully
+  to the time-only render if the platform ever returns null from
+  `getDisplayName` (some stripped-down ROMs have been observed
+  shipping with broken `DateFormatSymbols`).
+
+### Versioning
+
+- `versionCode` 10 → 11, `versionName` 1.2.2 → 1.3.0. Feature
+  work, no breaking changes, no behavioural change for anyone who
+  doesn't open the new settings panel.
+
 ## [1.2.2] — 2026-05-30
 
 Two related fixes in the hide-app drawer / keymap-picker management

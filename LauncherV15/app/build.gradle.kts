@@ -81,13 +81,33 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // v1.3.0: top-right toolbar consolidation + Show clock toggle.
+        // The wallpaper pill is gone — its action moved into a unified
+        // gear-pill settings panel that also hosts Manage hidden apps,
+        // Button shortcuts, Set wallpaper, Show clock, and System
+        // Settings. The previous mapper "sliders" glyph becomes a gear
+        // since the same pill is now the entry point for every config
+        // surface, not just keymapping. The home screen drops from
+        // three top-right pills to two without losing any feature, and
+        // the daily-frequent WiFi action stays a single click on the
+        // rightmost edge. Long-press → System Settings moves from the
+        // WiFi pill to the gear pill (most common destination from the
+        // panel; WiFi long-press is now unbound, reserved for a future
+        // power-user shortcut). The home-screen clock gains a "Show
+        // clock" toggle bundled with a locale-aware short day-of-week
+        // prefix (e.g. "Sat · 12:34 PM"). Toggle off hides the pill
+        // entirely and stops the minute tick — zero CPU cost when the
+        // user opts out. Default is on so existing installs see no
+        // behaviour change at upgrade time. Bumped 10 → 11: feature
+        // work, no breaking changes, SemVer MINOR.
+        //
         // Bumped 9 → 10: 1.2.2 ships a single targeted bug fix — the
         // hide-app drawer (and keymap picker / slot rows) was rendering
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 10
-        versionName   = "1.2.2"
+        versionCode   = 11
+        versionName   = "1.3.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
