@@ -6,6 +6,14 @@
     <string name="cd_app_shelf">App shelf</string>
     <string name="cd_clock">Current time</string>
     <string name="cd_network_settings">Network settings</string>
+    <!-- v1.3.0: gear pill replaces the wallpaper pill and the standalone
+         remap-remote pill. Short-press opens the unified settings panel;
+         long-press opens system Settings directly. The remap-remote and
+         change-wallpaper descriptions are kept as the row-level content
+         descriptions inside the panel (Button shortcuts row, Set
+         wallpaper row) so screen readers still surface the same nouns
+         they did in v1.2.x. -->
+    <string name="cd_settings">Settings</string>
     <string name="cd_remap_remote">Remap remote buttons</string>
     <string name="cd_change_wallpaper">Change wallpaper</string>
     <string name="cd_selection_ring">Selection ring</string>
@@ -30,6 +38,16 @@
          the hidden flag for the focused chip; strike-through encodes the
          hidden state in either selected or idle pill. -->
     <string name="keymap_hide_title">Hide apps from shelf · OK toggles</string>
+
+    <!-- Settings panel rows (v1.3.0). The panel opens as a dropdown
+         under the gear toolbar pill and replaces both the wallpaper pill
+         and the standalone "Manage hidden apps" entry that used to sit
+         at the bottom of the keymap card. -->
+    <string name="settings_row_manage_hidden">Manage hidden apps</string>
+    <string name="settings_row_button_shortcuts">Button shortcuts</string>
+    <string name="settings_row_set_wallpaper">Set wallpaper</string>
+    <string name="settings_row_show_clock">Show clock</string>
+    <string name="settings_row_system_settings">System Settings</string>
 
     <!-- Remote key shortcut labels. Order must match SHORTCUT_KEYCODES. -->
     <string name="key_red">Red</string>
