@@ -59,6 +59,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -163,6 +164,26 @@ public class LauncherActivity extends Activity {
     // hot-path consumers (CellView icon delivery, package broadcast
     // refresh) live here.
     private final AtomicBoolean appsLoading     = new AtomicBoolean(false);
+    /** Set true when {@link #loadApps} is called while a previous run is
+     *  still in flight (the {@link #appsLoading} {@code compareAndSet}
+     *  returns false). The in-flight run's UI body checks this in its
+     *  {@code finally} block and posts {@link #pkgReloadRunnable} to
+     *  the next looper cycle so the deferred reload fires immediately
+     *  after the gate releases.
+     *
+     *  <p>Without this flag, a package broadcast that fires during a
+     *  slow reconcile (typical case: 100+ apps installed on a slow
+     *  eMMC TV where the PM scan takes &gt;400 ms, the
+     *  {@link #pkgReloadRunnable} debounce window) would be silently
+     *  dropped. The cell shelf would keep showing stale state until
+     *  another reload trigger fired. The flag converts the dropped
+     *  request into a coalesced "one more reload after this one" — at
+     *  most one extra reconcile per stuck-broadcast burst, regardless
+     *  of how many broadcasts piled up against the in-flight call.
+     *
+     *  <p>UI-thread only — set in {@link #loadApps}, cleared and read
+     *  in the same method's UI-body finally block. */
+    private boolean pendingReload = false;
 
     private PackageManager      pm;
     /** Single shared {@link android.content.SharedPreferences} handle.
@@ -1031,6 +1052,103 @@ public class LauncherActivity extends Activity {
     private static long remainingMs(long deadlineNs) {
         long ns = deadlineNs - System.nanoTime();
         return ns <= 0 ? 0 : TimeUnit.NANOSECONDS.toMillis(ns);
+    }
+
+    /** Wrapper Runnable that tags an icon-executor task with the package
+     *  it is decoding for. The {@link IconRejectionHandler} reads
+     *  {@link #key} on a discarded task to clean up its orphaned
+     *  {@link #iconInflight} entry — without this tag the executor's
+     *  default {@code DiscardOldestPolicy} would silently drop the task
+     *  (no exception thrown) and the {@code iconInflight} map would
+     *  accumulate orphan empty-waiters entries that any subsequently
+     *  binding cell would then wait on forever.
+     *
+     *  <p>Trivial wrapper: stores the key, forwards {@link #run} to the
+     *  underlying {@code body} lambda. The icon-decode + UI-callback
+     *  body is identical to what was previously inlined directly into
+     *  {@code iconExecutor.execute(() -> ...)}. */
+    private static final class IconLoadRunnable implements Runnable {
+        final String key;
+        final Runnable body;
+        IconLoadRunnable(String key, Runnable body) { this.key = key; this.body = body; }
+        @Override public void run() { body.run(); }
+    }
+
+    /**
+     * Custom {@link RejectedExecutionHandler} for the icon executor that
+     * matches {@link ThreadPoolExecutor.DiscardOldestPolicy} semantics
+     * (drop the oldest queued task, accept the new one) AND additionally
+     * cleans up the orphaned {@link #iconInflight} entry of the
+     * discarded task.
+     *
+     * <p>Why this exists: {@link #preWarmIcon} and {@link #loadIconAsync}
+     * register an {@code iconInflight.put(key, waiters)} entry BEFORE
+     * submitting the decode task. The vanilla {@code DiscardOldestPolicy}
+     * silently discards the oldest queued task on overflow — the
+     * discarded task never runs, never invokes its UI callback, never
+     * calls {@code iconInflight.remove(key)}. The map keeps growing
+     * with orphan entries.
+     *
+     * <p>For typical 50-app installs the queue (256 slots) never overflows
+     * and this handler is never invoked. For 200+ app installs (TV
+     * power users, Retroarch / MAME launcher entries, sideloaded app
+     * stores), {@link #setApps}'s prewarm fanout can exceed the queue
+     * cap; without this handler, {@code iconInflight} would orphan one
+     * entry per discarded task, and any cell that later binds to one
+     * of those packages would wait on a task that never runs (visible
+     * as a permanent placeholder ring on the cell).
+     *
+     * <p>Behaviour:
+     * <ol>
+     *   <li>Discard the oldest queued task (matches {@code DiscardOldestPolicy}).</li>
+     *   <li>If the discarded task is an {@link IconLoadRunnable}, post a
+     *       UI-thread cleanup that removes its {@code iconInflight}
+     *       entry. If any cells were waiting on the discarded task,
+     *       re-fire {@link #loadIconAsync} for each so they re-enter
+     *       the new (post-discard) queue.</li>
+     *   <li>Submit the new task. If submitting throws (race with shutdown),
+     *       swallow — the new task is dropped, {@code iconInflight} keeps
+     *       its in-progress entry which will be cleaned up by the
+     *       activity's {@code onDestroy}.</li>
+     * </ol>
+     */
+    private final class IconRejectionHandler implements RejectedExecutionHandler {
+        @Override
+        public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+            if (executor.isShutdown()) return;
+            // Discard the oldest queued task (mirrors DiscardOldestPolicy).
+            Runnable oldest = executor.getQueue().poll();
+            if (oldest instanceof IconLoadRunnable) {
+                final String orphanKey = ((IconLoadRunnable) oldest).key;
+                // Post the cleanup to UI because {@link #iconInflight} is
+                // an ArrayMap touched only from the main thread.
+                uiHandler.post(() -> {
+                    if (destroyed) return;
+                    List<RecyclingShelfView.CellView> waiters = iconInflight.remove(orphanKey);
+                    if (waiters == null || waiters.isEmpty()) return;
+                    // Re-fire loadIconAsync for any cells that were waiting
+                    // on the discarded task. The re-fire registers a fresh
+                    // iconInflight entry and re-queues — the new submission
+                    // joins the (now-with-headroom) queue and runs normally.
+                    for (int i = 0, n = waiters.size(); i < n; i++) {
+                        RecyclingShelfView.CellView cell = waiters.get(i);
+                        if (cell.boundApp != null
+                                && orphanKey.equals(cell.boundApp.packageName)
+                                && cell.getVisibility() == View.VISIBLE) {
+                            loadIconAsync(cell.boundApp, cell);
+                        }
+                    }
+                });
+            }
+            // Submit the new task. If executor shutdown raced us, swallow.
+            try { executor.execute(r); }
+            catch (java.util.concurrent.RejectedExecutionException ignored) {
+                if (r instanceof IconLoadRunnable) {
+                    final String newKey = ((IconLoadRunnable) r).key;
+                    uiHandler.post(() -> { if (!destroyed) iconInflight.remove(newKey); });
+                }
+            }
+        }
     }
 
     @Override
@@ -2997,7 +3115,24 @@ public class LauncherActivity extends Activity {
         }
     }
     private void loadApps() {
-        if (!appsLoading.compareAndSet(false, true)) return;
+        if (!appsLoading.compareAndSet(false, true)) {
+            // H-A fix: another loadApps is in flight. Don't drop the
+            // request — mark a pending reload so the in-flight call's
+            // UI body posts {@link #pkgReloadRunnable} from its finally
+            // block once it finishes.
+            //
+            // Without this flag, a package broadcast that fires during
+            // a slow reconcile (e.g. 100+ apps on a slow eMMC TV where
+            // the PM scan takes >400 ms) would silently drop: the
+            // {@link #pkgReloadRunnable} fires, hits the compareAndSet
+            // false return, and leaves the cell shelf showing stale
+            // state until the next user-triggered reload (onResume,
+            // another broadcast, trim-memory, etc.). With the flag, the
+            // in-flight call drains, then the next reconcile fires
+            // immediately and picks up the change.
+            pendingReload = true;
+            return;
+        }
         // A5 fix: bail before any work if the activity was already torn
         // down. A package broadcast can post pkgReloadRunnable to the
         // shelf's looper just before {@link #onDestroy} nulls the shelf,
@@ -3227,6 +3362,17 @@ public class LauncherActivity extends Activity {
                         }
                     } finally {
                         appsLoading.set(false);
+                        // H-A drain step: a {@link #loadApps} call that
+                        // arrived while this one was running set
+                        // {@link #pendingReload} instead of dropping. Now
+                        // that we've released the gate, fire the deferred
+                        // reload immediately so the just-arrived package
+                        // change reaches the shelf without waiting for
+                        // another user / system trigger.
+                        if (pendingReload) {
+                            pendingReload = false;
+                            uiHandler.post(pkgReloadRunnable);
+                        }
                     }
                 });
             });
@@ -5713,7 +5859,7 @@ public class LauncherActivity extends Activity {
         List<RecyclingShelfView.CellView> waiters = new ArrayList<>(2);
         iconInflight.put(key, waiters);
         try {
-            iconExecutor.execute(() -> {
+            iconExecutor.execute(new IconLoadRunnable(key, () -> {
                 if (destroyed) return;
                 Bitmap bmp = null;
                 try {
@@ -5755,7 +5901,7 @@ public class LauncherActivity extends Activity {
                     // still picks up the new cache entry.
                     if (fb != null) onIconLoaded(key, fb);
                 });
-            });
+            }));
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
     }
 
@@ -5772,7 +5918,7 @@ public class LauncherActivity extends Activity {
         iconInflight.put(key, waiters);
         final List<RecyclingShelfView.CellView> fw = waiters;
         try {
-            iconExecutor.execute(() -> {
+            iconExecutor.execute(new IconLoadRunnable(key, () -> {
                 if (destroyed) return;
                 Bitmap bmp = null;
                 try {
@@ -5804,7 +5950,7 @@ public class LauncherActivity extends Activity {
                     // this package — see preWarmIcon for the same hook.
                     onIconLoaded(key, fb);
                 });
-            });
+            }));
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
     }
 
@@ -6184,8 +6330,42 @@ public class LauncherActivity extends Activity {
         // observable behaviour for the next icon flood is identical
         // (other than a one-time thread-creation cost in the µs range).
         int iconWorkers = Math.max(2, cores);
+        // H-B + H-C fix: queue capacity bumped 128 → 256 (to fit
+        // typical 100–200-app TV power-user installs without ever
+        // tripping the rejection policy), AND the rejection policy
+        // upgraded from a vanilla {@code DiscardOldestPolicy} to
+        // {@link IconRejectionHandler} which cleans up the orphaned
+        // {@link #iconInflight} entry of any task it discards.
+        //
+        // Pre-1.4.4 behaviour (DiscardOldestPolicy + queue 128):
+        // {@link #setApps} calls {@link #preWarmIcon} for every
+        // displayed app. Each preWarmIcon does
+        // {@code iconInflight.put(key, [])} BEFORE submitting to the
+        // executor. With 200 apps, the executor queue fills at 128;
+        // tasks 132–199 trigger DiscardOldest, which silently drops
+        // the OLDEST queued task without throwing. Those discarded
+        // tasks never run, so their UI callbacks never fire, so
+        // {@code iconInflight.remove(key)} never happens — the
+        // {@link #iconInflight} map keeps an orphan empty-waiters
+        // entry for every discarded package. When a cell subsequently
+        // binds to one of those packages,
+        // {@link #loadIconAsync} sees the orphan entry and adds the
+        // cell as a waiter on a task that will never run. The cell
+        // displays a placeholder ring forever (until the user
+        // reinstalls the package, which clears the entry via the
+        // {@code packageReceiver}).
+        //
+        // For a 200-app shelf with focusedIndex = 0, this leaves
+        // ~9 visible cells stuck on placeholder rings. For 500 apps,
+        // the orphan range can cover the entire visible row.
+        // {@link IconRejectionHandler} fixes this by detecting which
+        // package the discarded task was for and removing its
+        // {@link #iconInflight} entry on the UI thread. If any cells
+        // were waiting on the discarded task, it re-fires
+        // {@link #loadIconAsync} for each so they get a fresh decode
+        // attempt.
         iconExecutor = new ThreadPoolExecutor(iconWorkers, iconWorkers, 30L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(128), new ThreadPoolExecutor.DiscardOldestPolicy());
+                new ArrayBlockingQueue<>(256), new IconRejectionHandler());
         iconExecutor.allowCoreThreadTimeOut(true);
         // Wallpaper executor is now owned by {@link WallpaperController}
         // (constructed later inside {@link #buildLayout()}). The activity
