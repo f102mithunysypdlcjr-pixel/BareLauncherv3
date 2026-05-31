@@ -244,6 +244,14 @@ public class LauncherActivity extends Activity {
     // executors remain here; their hot paths live inside this activity.
     private ExecutorService          appExecutor;
     private LruCache<String, Bitmap> iconCache;
+    /** Disk-backed sibling of {@link #iconCache}. Wired through the
+     *  {@link LruCache#create(Object)} extension point so a memory-cache
+     *  miss transparently falls through to a disk read; freshly-decoded
+     *  icons are mirrored to disk via {@link IconDiskCache#writeAsync}
+     *  on a background thread. Persists across cold starts so the
+     *  shelf renders icons in the very first frame. See {@link
+     *  IconDiskCache} javadoc for the full pipeline. */
+    private IconDiskCache            iconDiskCache;
 
     private final ArrayMap<String, List<RecyclingShelfView.CellView>> iconInflight = new ArrayMap<>();
     private final List<AppInfo> appList = new ArrayList<>();
@@ -531,7 +539,19 @@ public class LauncherActivity extends Activity {
     private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
             String action = intent.getAction();
-            if (Intent.ACTION_PACKAGE_REPLACED.equals(action) || Intent.ACTION_PACKAGE_CHANGED.equals(action)) {
+            // Invalidate per-package caches on REPLACED / CHANGED / REMOVED.
+            // PACKAGE_REPLACED  — app upgrade; the icon may have changed.
+            // PACKAGE_CHANGED   — components enabled/disabled etc; same.
+            // PACKAGE_REMOVED   — uninstall; clean up the disk cache so
+            //                     orphan icon files don't accumulate
+            //                     (in-memory cache is invalidated for free
+            //                     on the next loadApps reconcile).
+            // PACKAGE_ADDED is intentionally absent — there's nothing to
+            // invalidate (no entry yet); the loadApps reconcile picks up
+            // the new package and warms the cache normally.
+            if (Intent.ACTION_PACKAGE_REPLACED.equals(action)
+                    || Intent.ACTION_PACKAGE_CHANGED.equals(action)
+                    || Intent.ACTION_PACKAGE_REMOVED.equals(action)) {
                 Uri data = intent.getData();
                 if (data != null) {
                     // SSP is documented non-null for "package:" URIs but
@@ -545,6 +565,15 @@ public class LauncherActivity extends Activity {
                     if (pkg != null) {
                         if (iconCache != null) iconCache.remove(pkg);
                         iconInflight.remove(pkg);
+                        // Mirror invalidation to the on-disk cache so a
+                        // stale icon does not survive a package replace
+                        // / uninstall. Best-effort delete on the write
+                        // executor; the in-memory cache.remove above
+                        // already prevents serving the stale bitmap, so
+                        // a delete failure is bounded to one transient
+                        // disk read of the stale bytes.
+                        IconDiskCache dc = iconDiskCache;
+                        if (dc != null) dc.delete(pkg);
                     }
                 }
             }
@@ -563,16 +592,6 @@ public class LauncherActivity extends Activity {
             s.postDelayed(pkgReloadRunnable, 400);
         }
     };
-
-    static final class AppInfo {
-        final String        packageName;
-        final String        label;
-        final ComponentName component;
-        final ResolveInfo   ri;
-        AppInfo(String pkg, String lbl, ComponentName cmp, ResolveInfo r) {
-            packageName = pkg; label = lbl; component = cmp; ri = r;
-        }
-    }
 
     private void applyStoredOrder(List<AppInfo> apps) {
         String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_APP_ORDER, null);
@@ -598,6 +617,21 @@ public class LauncherActivity extends Activity {
         for (int i = 0; i < appList.size(); i++) pkgs.add(appList.get(i).packageName);
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putString(KEY_APP_ORDER, AppOrder.serialize(pkgs)).apply();
+        // Mirror the order into the AppListCache so the next cold start
+        // renders the shelf in the user's just-saved arrangement instead
+        // of the previous order. Without this nudge, the next cold start
+        // would render in the OLD cached order for ~200 ms before the
+        // PM-scan reconcile detects the order change and re-renders —
+        // visible as a transient flicker after every reorder + reboot.
+        // Best-effort write on a background thread.
+        final ArrayList<AppInfo> snapshot = new ArrayList<>(appList);
+        final Context appCtx = getApplicationContext();
+        try {
+            appExecutor.execute(() -> AppListCache.writeFileFromAppInfo(appCtx, snapshot));
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // Executor saturated; the cache will converge on the next
+            // loadApps reconcile that detects the new order.
+        }
     }
 
     @Override
@@ -768,6 +802,11 @@ public class LauncherActivity extends Activity {
             backInvokedCallback = null;
         }
         shutdown(iconExecutor); shutdown(appExecutor);
+        // Shut the disk-cache write executor. Idempotent and bounded to
+        // 300 ms via the helper inside IconDiskCache. After this returns,
+        // tryRead/writeAsync/delete are all no-ops — even if a stray cell
+        // bind fires during teardown.
+        if (iconDiskCache != null) { iconDiskCache.shutdown(); iconDiskCache = null; }
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
         // Drop any deferred package-reload runnable that may still be
@@ -940,6 +979,14 @@ public class LauncherActivity extends Activity {
                 screenW, screenH,
                 FOCUS_EASE,
                 this::showToast);
+        // Cold-start snapshot pre-paint. Synchronous on the UI thread —
+        // we are still inside buildLayout (called from setContentView,
+        // before any vsync), so a ~30-50 ms decode is invisible to the
+        // user and makes the wallpaper appear in the very first frame.
+        // {@link #loadWallpaper()} called later in onCreate is then a
+        // no-op (the controller's loadStored short-circuits when the
+        // snapshot pre-painted) — no second decode, no flicker.
+        wallpaperCtl.loadSnapshotSync();
 
         shelf = new RecyclingShelfView(this);
         FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
@@ -2739,6 +2786,34 @@ public class LauncherActivity extends Activity {
     }
     private void loadApps() {
         if (!appsLoading.compareAndSet(false, true)) return;
+        // Cold-start instant paint: if appList is empty (we have not loaded
+        // yet), try the on-disk AppListCache synchronously. The shelf
+        // renders the cached entries in the very first frame while the
+        // PM scan continues in the background. When the scan completes,
+        // the reconcile block below either no-ops (cache matched fresh
+        // result) or replaces appList and re-renders. The cached
+        // {@link AppInfo} entries carry a null {@code ri}; the icon-load
+        // path falls back to {@code PackageManager.getActivityIcon(component)}
+        // for those, so cells still get icons via the IconDiskCache hits
+        // (and via direct PM calls for cold caches). Only runs at most
+        // once per process — subsequent loadApps() invocations have a
+        // populated appList from prior reconciles.
+        if (appList.isEmpty()) {
+            boolean ok = AppListCache.readFile(this, (pkg, lbl, cls) -> {
+                AppInfo a = AppListCache.toAppInfo(pkg, lbl, cls);
+                appList.add(a);
+                appByPackage.put(pkg, a);
+            });
+            if (ok && !appList.isEmpty()) {
+                RecyclingShelfView s = shelf;
+                if (s != null) applyShelfApps(s);
+            } else {
+                // Either no cache or it failed to parse. Drop any partial
+                // state defensively (parse() is "all-or-nothing" so this
+                // is hygiene rather than correctness).
+                if (!appList.isEmpty()) { appList.clear(); appByPackage.clear(); }
+            }
+        }
         try {
             appExecutor.execute(() -> {
                 List<AppInfo> fresh;
@@ -2814,6 +2889,28 @@ public class LauncherActivity extends Activity {
                                     pendingScrollIdx = -1;
                                 }
                                 applyShelfApps(s);
+                            }
+                            // Persist the reconciled list to the on-disk
+                            // AppListCache so the next cold start can
+                            // render the shelf instantly. Snapshotted on a
+                            // background thread so the UI body returns
+                            // immediately. Best-effort: a write failure
+                            // (FS full, IOException) just means the next
+                            // cold start does a normal PM scan, no other
+                            // consequence. Application context captured so
+                            // the runnable does not pin the activity past
+                            // its lifecycle.
+                            final ArrayList<AppInfo> snapshot =
+                                    new ArrayList<>(freshFinal);
+                            final Context appCtx = getApplicationContext();
+                            try {
+                                appExecutor.execute(() ->
+                                        AppListCache.writeFileFromAppInfo(appCtx, snapshot));
+                            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                                // Executor saturated by a rapid burst of
+                                // package broadcasts. The cache stays at
+                                // its previous-known-good content; the
+                                // next loadApps reconcile will retry.
                             }
                         } else if (pendingScrollIdx >= 0) {
                             // App list unchanged but a pending index is waiting —
@@ -3082,7 +3179,19 @@ public class LauncherActivity extends Activity {
      *
      *  Fast-paths the empty-hidden-set case to a direct reference pass —
      *  no allocation, no scan. The list is already sorted/ordered by
-     *  loadApps so we preserve order trivially by walking it once. */
+     *  loadApps so we preserve order trivially by walking it once.
+     *
+     *  <h3>Hidden-app icon warming</h3>
+     *  Hidden apps are NOT pre-warmed here (was the v1.2.2 behaviour).
+     *  They get warmed lazily inside {@link #showKeymapOverlay()} which
+     *  is the only consumer that displays their icons. Pre-warming on
+     *  every loadApps reconcile (which fires on every package broadcast)
+     *  triggered N disk reads through the IconDiskCache LruCache.create
+     *  fallback for the empty-memory-cache case — measurable cost on
+     *  installs with many hidden apps. The lazy path runs at most once
+     *  per overlay-open, and {@link #preWarmIcon} early-returns on
+     *  cache hit so the second-and-subsequent opens are O(N) cheap
+     *  containsKey checks. */
     private void applyShelfApps(RecyclingShelfView s) {
         if (s == null) return;
         if (hiddenApps.isEmpty()) { s.setApps(appList); return; }
@@ -3091,20 +3200,29 @@ public class LauncherActivity extends Activity {
             AppInfo a = appList.get(i);
             if (!hiddenApps.contains(a.packageName)) {
                 visible.add(a);
-            } else {
-                // Hidden apps are filtered off the shelf, but their icons
-                // are still rendered inside the hide-manager and keymap-
-                // picker chip strips and the keymap slot-row miniatures.
-                // setApps only preWarms the (filtered) shelf list, so
-                // without this nudge a hidden app's bitmap never lands in
-                // iconCache — the chip strip is built lazily once and the
-                // ImageView for that pkg ends up GONE, so the row shows
-                // only the label. Visible to the user as "icons missing
-                // for previously hidden apps after unhide".
-                preWarmIcon(a);
             }
+            // Hidden apps are intentionally NOT pre-warmed here — see
+            // method javadoc. The keymap overlay show path warms them.
         }
         s.setApps(visible);
+    }
+
+    /** Pre-warm icons for every hidden app. Called from
+     *  {@link #showKeymapOverlay()} so by the time the user drills
+     *  into the picker / hide-manager chip strips, every chip's icon
+     *  is in {@link #iconCache} (or queued on the icon executor) and
+     *  the chip ImageView resolves immediately on first paint.
+     *
+     *  <p>Cheap on warm caches: {@link #preWarmIcon} early-returns on
+     *  cache hit. On a cold install, queues at most ~hidden_count
+     *  loads on the icon executor — runs in background while the
+     *  user is reading the keymap card slot rows. */
+    private void preWarmHiddenAppIcons() {
+        if (hiddenApps.isEmpty()) return;
+        for (int i = 0, n = appList.size(); i < n; i++) {
+            AppInfo a = appList.get(i);
+            if (hiddenApps.contains(a.packageName)) preWarmIcon(a);
+        }
     }
 
     private AppInfo findAppByPackage(String pkg) {
@@ -4009,6 +4127,15 @@ public class LauncherActivity extends Activity {
         FrameLayout ko = keymapOverlay;
         final android.widget.LinearLayout card = keymapCard;
         if (ko == null || card == null) return;
+        // Warm hidden-app icons before any chip strip starts asking
+        // {@code iconCache.get(pkg)}. The chip-strip's bind path doesn't
+        // queue loads on miss — it only renders the cell GONE — so an
+        // unwarmed hidden-app bitmap stays missing until something else
+        // happens to load it. Idempotent, cheap on warm caches; only
+        // does real work on the rare path "package broadcast invalidated
+        // a hidden app's icon since the last overlay open". See
+        // {@link #preWarmHiddenAppIcons} for the cost analysis.
+        preWarmHiddenAppIcons();
         // Hide the focus ring — it belongs to the shelf, which is now
         // logically behind the overlay.
         RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
@@ -5074,13 +5201,14 @@ public class LauncherActivity extends Activity {
                 if (destroyed) return;
                 Bitmap bmp = null;
                 try {
-                    // ResolveInfo.loadIcon throws on a few stripped-down TV ROMs
-                    // when the ResolveInfo was returned with null activityInfo
-                    // fields — caught below as RuntimeException. Guarding `ri`
-                    // explicitly makes the intent obvious and lets the rest of
-                    // the pipeline run for installed-but-iconless apps.
-                    Drawable d = app.ri != null ? app.ri.loadIcon(pm) : null;
-                    bmp = processIcon(d);
+                    // Disk-first, then PM. See {@link #loadIconBlocking}
+                    // for the full pipeline. This consolidated helper
+                    // replaced the v1.4.0 initial draft's separate
+                    // {@code resolveIconDrawable + processIcon + writeAsync}
+                    // sequence so the same disk-fast-path runs for
+                    // every executor-thread icon load (preWarmIcon and
+                    // loadIconAsync alike).
+                    bmp = loadIconBlocking(app);
                     if (bmp != null) iconCache.put(key, bmp);
                 } catch (OutOfMemoryError | RuntimeException ignored) {}
                 if (destroyed) return;
@@ -5131,9 +5259,11 @@ public class LauncherActivity extends Activity {
                 if (destroyed) return;
                 Bitmap bmp = null;
                 try {
-                    // Same `ri` null-guard as preWarmIcon — see the comment there.
-                    Drawable d = app.ri != null ? app.ri.loadIcon(pm) : null;
-                    bmp = processIcon(d);
+                    // Same disk-first → PM path as preWarmIcon (see
+                    // {@link #loadIconBlocking}). Cache miss in this
+                    // codepath comes from a cell.bind that found
+                    // nothing in iconCache (memory-only, fast).
+                    bmp = loadIconBlocking(app);
                     if (bmp != null) iconCache.put(key, bmp);
                 } catch (OutOfMemoryError | RuntimeException ignored) {}
                 if (destroyed) return;
@@ -5168,6 +5298,89 @@ public class LauncherActivity extends Activity {
      *  itself stays Activity-free. */
     private Bitmap processIcon(Drawable d) {
         return IconRenderer.process(d, dp(ICON_DP));
+    }
+
+    /**
+     * Background-thread icon loader: try the on-disk cache first, then
+     * fall through to the PackageManager + IconRenderer pipeline.
+     *
+     * <p>This is the consolidated path for both {@link #preWarmIcon} and
+     * {@link #loadIconAsync}. It runs on the {@code iconExecutor} (NEVER
+     * on the UI thread — disk I/O and PM binder calls combined can run
+     * 30-50 ms each, which would skip multiple frames if invoked from
+     * {@code cell.bind} or similar).
+     *
+     * <p>Sequence:
+     * <ol>
+     *   <li>{@link IconDiskCache#tryRead} — synchronous WEBP decode of
+     *       the cached file. ~2-5 ms on hit, 0 ms on miss.</li>
+     *   <li>If miss: {@link #resolveIconDrawable} (PM binder +
+     *       drawable resolve) → {@link #processIcon}
+     *       ({@link IconRenderer#process}, AdaptiveIcon compositing /
+     *       circle clip / plate detection). ~30-50 ms.</li>
+     *   <li>On a fresh PM-resolved bitmap, mirror to disk via
+     *       {@link IconDiskCache#writeAsync} so the next cold start
+     *       hits the disk fast-path.</li>
+     * </ol>
+     *
+     * <p>Returns {@code null} on any failure — callers handle the null
+     * (cell stays at placeholder until a future load succeeds).
+     */
+    private Bitmap loadIconBlocking(AppInfo app) {
+        if (app == null) return null;
+        IconDiskCache dc = iconDiskCache;
+        if (dc != null) {
+            Bitmap fromDisk = dc.tryRead(app.packageName);
+            if (fromDisk != null) return fromDisk;
+        }
+        Drawable d = resolveIconDrawable(app);
+        Bitmap fresh = processIcon(d);
+        if (fresh != null && dc != null) dc.writeAsync(app.packageName, fresh);
+        return fresh;
+    }
+
+    /**
+     * Resolve the launcher icon Drawable for an {@link AppInfo}.
+     *
+     * <p>Two paths:
+     * <ol>
+     *   <li>{@code app.ri != null} — the AppInfo came from a fresh
+     *       {@link android.content.pm.PackageManager#queryIntentActivities}
+     *       call. {@link android.content.pm.ResolveInfo#loadIcon} returns
+     *       the activity's launcher drawable directly.</li>
+     *   <li>{@code app.ri == null} — the AppInfo was reconstructed from
+     *       the on-disk {@link AppListCache} (which cannot serialise
+     *       ResolveInfo). Fall back to
+     *       {@link android.content.pm.PackageManager#getActivityIcon(android.content.ComponentName)}
+     *       which gives the same drawable via the activity's
+     *       ComponentName — same binder cost, same result. Throws
+     *       {@link android.content.pm.PackageManager.NameNotFoundException}
+     *       when the package vanished between the cache write and the
+     *       read; the next package broadcast invalidates the cache so
+     *       the stale entry doesn't survive long.</li>
+     * </ol>
+     *
+     * <p>Returns {@code null} on any exception — the icon-load callers
+     * already handle null from the previous {@code ri.loadIcon} path
+     * (placeholder cell stays until a future cache refresh succeeds).
+     */
+    private Drawable resolveIconDrawable(AppInfo app) {
+        if (app == null) return null;
+        if (app.ri != null) {
+            try {
+                return app.ri.loadIcon(pm);
+            } catch (RuntimeException ignored) {
+                return null;
+            }
+        }
+        if (app.component != null) {
+            try {
+                return pm.getActivityIcon(app.component);
+            } catch (PackageManager.NameNotFoundException | RuntimeException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private void positionRing(View cell) {
@@ -5383,6 +5596,22 @@ public class LauncherActivity extends Activity {
         getSharedPreferences(PREFS, MODE_PRIVATE);
         int memMb   = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
         int cacheMb = Math.min(memMb / 8, 16);
+        // The on-disk icon cache. Constructed BEFORE iconCache so the
+        // icon-load executor tasks can read from / write to it. Owns
+        // its own write executor; shut down in onDestroy().
+        iconDiskCache = new IconDiskCache(this);
+        // The in-memory icon cache. Pure LRU, no create() fallback —
+        // the disk lookup is performed inside {@link #loadIconBlocking}
+        // on the iconExecutor's worker thread. Earlier drafts wired the
+        // disk cache as a {@code LruCache.create()} override; that path
+        // ran synchronously on the calling thread, which on cold start
+        // meant {@code preWarmIcon}'s early-return check
+        // ({@code iconCache.get(key)}) blocked on a disk read for every
+        // missing app — ~5 ms × 50 apps = 250 ms of UI-thread blocking
+        // inside {@code setApps}. Doing the disk read in the executor
+        // task keeps every UI-thread {@code iconCache.get} memory-only
+        // (instant) and lets the disk reads run in parallel across the
+        // pool's cores-1 workers.
         iconCache = new LruCache<String, Bitmap>(cacheMb * 1024 * 1024) {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
