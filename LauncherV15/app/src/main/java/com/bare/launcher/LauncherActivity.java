@@ -4295,7 +4295,43 @@ public class LauncherActivity extends Activity {
                 card.setScaleX(1f); card.setScaleY(1f);
                 card.setTranslationY(0f);
             }
-            ko.setVisibility(View.GONE);
+            // Order matters: show the settings panel BEFORE hiding the
+            // keymap overlay so {@link #showSettingsPanel}'s
+            // {@code ov.requestFocus()} grabs focus while ko is still
+            // hosting the previously-focused chip / slot row. After
+            // that requestFocus runs, ko has no focused descendant —
+            // it's safe to flip ko to GONE.
+            //
+            // The reverse order (the v1.4.x first cut, fixed in v1.4.x)
+            // produced a user-visible bug: opening hide-apps or
+            // button-shortcuts from the middle of the drawer, then
+            // pressing BACK once, would auto-shift the drawer left or
+            // right "toward an end". Mechanism:
+            //   1. ko.setVisibility(GONE) on a still-focused overlay
+            //      synchronously calls clearFocus on the focused
+            //      descendant and runs a focus search for the next
+            //      focusable view in the tree.
+            //   2. The shelf cells are the next focusable candidates;
+            //      the search picks whichever visible cell is closest
+            //      (geometrically) to the previously-focused chip.
+            //   3. The picked cell's onFocusChange listener fires
+            //      synchronously inside the search:
+            //        - {@code focusedIndex = boundIndex} overwrites the
+            //          shelf's actual saved index with the picked
+            //          cell's index;
+            //        - {@code ensureVisible(boundIndex)} scrolls the
+            //          shelf so the picked cell sits at its preferred
+            //          viewport position.
+            //   4. {@code showSettingsPanel()} ran AFTER, so by the
+            //      time it grabbed focus the shelf had already been
+            //      scrolled — the user saw the drift.
+            //
+            // Showing the panel first short-circuits step 1: ko's
+            // focused descendant relinquishes focus to ov via the
+            // explicit requestFocus, so there's no descendant left to
+            // clear when ko later goes GONE. No focus search, no
+            // accidental {@code focusedIndex} overwrite, no scroll.
+            //
             // NOTE: deliberately do NOT touch keymapMode / sub-view
             // visibilities here. The next showKeymapOverlay call resets
             // them all to SLOTS as its first step, so any state we
@@ -4303,6 +4339,7 @@ public class LauncherActivity extends Activity {
             // keeps the snap-close path zero-work beyond the visibility
             // flip and the alpha reset.
             showSettingsPanel();
+            ko.setVisibility(View.GONE);
             return;
         }
 
