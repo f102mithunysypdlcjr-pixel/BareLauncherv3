@@ -34,7 +34,32 @@ final class AppInfo {
     final String        packageName;
     final String        label;
     final ComponentName component;
-    final ResolveInfo   ri;
+    /**
+     * The platform {@link ResolveInfo} for this app, when known.
+     *
+     * <p>Non-final and {@code volatile} so the {@link LauncherActivity}
+     * reconcile path can graft a fresh {@code ri} onto a cache-sourced
+     * AppInfo that was reconstructed from {@link AppListCache} (which
+     * cannot serialise ResolveInfo and therefore stores it as
+     * {@code null}). Without the graft, every icon load for that
+     * AppInfo falls through to the slower
+     * {@link android.content.pm.PackageManager#getActivityIcon(android.content.ComponentName)}
+     * binder path forever — even after the post-launch PM scan has
+     * resolved the activity.
+     *
+     * <p>Volatile because the field is read on the
+     * {@code iconExecutor} worker thread (inside
+     * {@link LauncherActivity}'s {@code resolveIconDrawable}) and
+     * written on the UI thread (inside the {@code loadApps} reconcile).
+     * The volatile semantics give the worker an immediate visibility
+     * guarantee on the upgraded value; absent it, a worker thread
+     * already running could observe the stale {@code null} for an
+     * arbitrarily long window after the upgrade and still hit the slow
+     * fallback. Worst case is identical to the pre-graft behaviour
+     * (slow path), but volatile makes the upgrade reliable rather than
+     * timing-dependent.
+     */
+    volatile ResolveInfo ri;
 
     AppInfo(String pkg, String lbl, ComponentName cmp, ResolveInfo r) {
         packageName = pkg;

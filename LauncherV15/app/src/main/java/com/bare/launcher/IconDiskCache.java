@@ -358,16 +358,49 @@ final class IconDiskCache {
      * returns, {@link #tryRead}, {@link #writeAsync}, and
      * {@link #delete} are all no-ops via the {@code shuttingDown}
      * guard.
+     *
+     * <p>Equivalent to calling {@link #beginShutdown()} immediately
+     * followed by {@link #awaitShutdown(long)} with a 300 ms budget.
+     * Prefer the two-phase API in callers that need to overlap the
+     * shutdown of multiple executors so the wall-clock cap is shared
+     * across all of them rather than spent serially.
      */
     void shutdown() {
+        beginShutdown();
+        awaitShutdown(300);
+    }
+
+    /**
+     * Phase 1 of a parallel shutdown: flip the shutting-down flag and
+     * mark the write executor as shutdown. Returns immediately; in-flight
+     * writes are allowed to complete on their own. Pair with
+     * {@link #awaitShutdown(long)} to bound the wait.
+     *
+     * <p>Idempotent — safe to call multiple times. After this returns,
+     * {@link #tryRead}, {@link #writeAsync} and {@link #delete} are
+     * no-ops via the {@code shuttingDown} guard.
+     */
+    void beginShutdown() {
         shuttingDown = true;
-        writeExecutor.shutdown();
+        try { writeExecutor.shutdown(); }
+        catch (Throwable ignored) { /* best-effort */ }
+    }
+
+    /**
+     * Phase 2 of a parallel shutdown: wait up to {@code timeoutMs} for
+     * the write executor's in-flight task to complete, then force any
+     * remainder via {@code shutdownNow}. Pair with
+     * {@link #beginShutdown()} so the wall-clock cap is shared across
+     * multiple executors.
+     */
+    void awaitShutdown(long timeoutMs) {
         try {
-            writeExecutor.awaitTermination(300, TimeUnit.MILLISECONDS);
+            if (timeoutMs > 0) writeExecutor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
-            writeExecutor.shutdownNow();
+            try { writeExecutor.shutdownNow(); }
+            catch (Throwable ignored) { /* best-effort */ }
         }
     }
 
