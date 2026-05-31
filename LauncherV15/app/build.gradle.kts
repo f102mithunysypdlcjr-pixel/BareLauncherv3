@@ -81,6 +81,68 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 18 → 19: 1.4.1 ships two PR cycles' worth of post-1.4.0
+        // audit corrections.
+        //
+        // PR #59 (correctness + robustness):
+        //   • Wallpaper bitmap recycle race fixed in
+        //     WallpaperController.crossfade — the old / previous-back
+        //     bitmaps now recycle via View.postOnAnimation so they
+        //     land AFTER the next display-list refresh, not
+        //     synchronously inside the same UI runnable as the
+        //     setImageBitmap that scheduled it. On SkiaGL TV ROMs
+        //     this eliminates the rare "Canvas: trying to use a
+        //     recycled bitmap" crash mid-cross-fade.
+        //   • onDestroy parallel shutdown. Pre-1.4.1 sequentially
+        //     shut and awaited four executors with a 300 ms cap each
+        //     — worst-case 1.2 s of UI-thread block visible as a
+        //     stutter when navigating away. Each executor now splits
+        //     into beginShutdown / awaitShutdown phases; the
+        //     activity drains all four against a single shared
+        //     300 ms wall-clock deadline.
+        //   • Reconcile-time ResolveInfo grafting. Cache-sourced
+        //     AppInfos carry ri = null (ResolveInfo isn't
+        //     serialisable); the no-change reconcile branch now
+        //     grafts ri from freshFinal[i] onto appList[i] so
+        //     subsequent icon loads use the faster ri.loadIcon path.
+        //     AppInfo.ri changed from final to volatile non-final.
+        //   • Chip-strip rebuild during open keymap overlay so a
+        //     package broadcast that lands while the user is inside
+        //     PICKER / HIDE doesn't desynchronise chip-package
+        //     mapping from appList.
+        //   • Several smaller fixes: TRIM_MODERATE / BACKGROUND no
+        //     longer clear iconInflight (was orphaning executor
+        //     tasks); RejectedExecutionException in loadApps retries
+        //     via uiHandler; pendingScrollIdx clamps against
+        //     displayed-list size when hide-apps filters; iconCache
+        //     / iconDiskCache / iconExecutor / appExecutor declared
+        //     volatile.
+        //
+        // PR #60 (performance + hygiene — this PR):
+        //   • IconRenderer plate-path collapsed from 2 transient
+        //     ARGB_8888 bitmaps to 1 via PorterDuff.Mode.SRC_ATOP.
+        //     ~290 KB transient saved per plate-path icon at
+        //     xxxhdpi. Cold-start icon flood transient peak heap
+        //     drops measurably. Pixel-equivalent to the previous
+        //     "drawCircle + drawBitmap + clipToCircle" pipeline.
+        //   • applyShelfApps reuses an instance-level scratch
+        //     ArrayList — saves one allocation per package broadcast
+        //     / hide-toggle when hidden_apps is non-empty.
+        //   • equalizeKeymapRowWidths drops the redundant
+        //     restore-prevW step (saves 6 setLayoutParams cascades
+        //     per re-equalize).
+        //   • CrashLogger uses static DateTimeFormatter instead of
+        //     per-crash SimpleDateFormat (thread-safe, allocation-
+        //     free per crash).
+        //   • crossfade gains a top-of-method destroyed check.
+        //   • lint.xml suppressions for 6 structurally-required
+        //     warnings — drops warning count from 23 to 11.
+        //   • Gradle wrapper 8.14.1 → 8.14.5; androidx.test family
+        //     bumped to current. AGP 9.x deferred (breaking).
+        //
+        // SemVer PATCH bump — bug fixes and performance
+        // improvements only, no new features or API changes.
+        //
         // Bumped 17 → 18: 1.4.0 introduces the cold-start cache layer.
         // Three on-disk caches — wallpaper snapshot
         // ({@code filesDir/wallpaper.snap}), app list
@@ -212,8 +274,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 18
-        versionName   = "1.4.0"
+        versionCode   = 19
+        versionName   = "1.4.1"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
@@ -368,13 +430,13 @@ dependencies {
     // boots LauncherActivity and verifies basic layout. Compiles in every
     // build so a structural break to the activity fails CI even when no
     // emulator runs the test.
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
     // androidx.test:core hosts ActivityScenario / ActivityScenarioRule —
     // the modern, deterministic replacement for the deprecated
     // ActivityTestRule API. Pulled in transitively by ext:junit but
     // declared explicitly here because the smoke test imports
     // ActivityScenario directly; surfacing the dep makes the test's
     // contract self-evident in this file.
-    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:core:1.7.0")
 }

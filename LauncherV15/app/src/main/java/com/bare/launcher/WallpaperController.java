@@ -461,6 +461,17 @@ final class WallpaperController {
     /** Cross-fade implementation. See class-level javadoc for the role
      *  invariant ("front is always front"). */
     private void crossfade(Bitmap fb) {
+        // Defensive top-of-method destroyed check. The
+        // {@link #applyFromUri} / {@link #loadSystem} executor bodies
+        // wrap their {@code runOnUiThread} post in {@code if (!destroyed)},
+        // but the destroy can race AFTER the post is scheduled and BEFORE
+        // its runnable runs. Without this guard we'd kick off an animation
+        // on a destroyed controller — harmless today (the {@code withEndAction}
+        // re-checks {@code destroyed}), but a future refactor could
+        // introduce per-frame work that wasn't expecting a dead view. The
+        // belt-and-braces guard here keeps the contract "no animation
+        // starts after destroy" explicit.
+        if (destroyed) return;
         if (front == null || back == null || fb == null) return;
         boolean coldStart = front.getDrawable() == null;
         if (coldStart) {

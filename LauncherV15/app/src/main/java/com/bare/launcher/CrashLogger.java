@@ -6,9 +6,9 @@ import android.util.Log;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 /**
  * Tiny zero-dependency crash sink for production builds.
@@ -49,6 +49,16 @@ final class CrashLogger {
      *  32 KB easily holds ~50 typical Android stack traces; the log
      *  rotates by truncating from the front in {@link #append}. */
     private static final long   MAX_BYTES = 32L * 1024L;
+
+    /** Pre-built immutable formatter for the per-trace timestamp.
+     *  {@link DateTimeFormatter} is thread-safe (unlike
+     *  {@link java.text.SimpleDateFormat} which would have to be
+     *  thread-locally instantiated or synchronised). Available since
+     *  API 26 (our minSdk floor). UTC zone keeps the timestamp
+     *  unambiguous in shared crash logs across timezones. */
+    private static final DateTimeFormatter TS_FMT = DateTimeFormatter
+            .ofPattern("yyyy-MM-dd HH:mm:ss.SSS'Z'")
+            .withZone(ZoneId.of("UTC"));
 
     private CrashLogger() { /* no instances */ }
 
@@ -127,8 +137,7 @@ final class CrashLogger {
             }
             try (PrintWriter pw = new PrintWriter(new java.io.FileWriter(f, true))) {
                 pw.println("──────────────────────────────────────────");
-                pw.println("time:    " + new SimpleDateFormat(
-                        "yyyy-MM-dd HH:mm:ss.SSSZ", Locale.US).format(new Date()));
+                pw.println("time:    " + TS_FMT.format(Instant.now()));
                 pw.println("thread:  " + t.getName());
                 pw.println("trace:");
                 e.printStackTrace(pw);

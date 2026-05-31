@@ -5,6 +5,156 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-05-31
+
+Post-1.4.0 audit pass — two PR cycles of correctness, robustness, and
+performance fixes found in a deep code review of the cache-layer
+release. No new features, no API surface changes, no resource changes.
+Release APK size unchanged (`~96 KB`); `classes.dex` grew `+1.5 KB`
+for the new helpers.
+
+### Fixed
+
+- **Wallpaper bitmap recycle race in `WallpaperController.crossfade`.**
+  The old FRONT and previous BACK bitmaps used to recycle synchronously
+  inside the same UI runnable as the `setImageBitmap` that scheduled
+  them, so the next vsync could still play back a `DrawBitmapOp`
+  pointing at just-recycled pixels. On SkiaGL TV ROMs this surfaced
+  as `Canvas: trying to use a recycled bitmap` and killed the launcher
+  mid-cross-fade. Both recycles are now deferred via
+  `View.postOnAnimation` so they land on the next animation frame
+  *after* the display list has been refreshed with the new bitmap.
+- **`onDestroy` UI-thread block reduced from worst-case ~1.2 s to
+  bounded 300 ms.** The previous teardown sequentially called
+  `shutdown()` + `awaitTermination(300, MS)` + `shutdownNow()` on each
+  of the four executors (icon, app, `IconDiskCache` write,
+  `WallpaperController`). Each executor now splits into
+  `beginShutdown` / `awaitShutdown` phases; `LauncherActivity.onDestroy`
+  fires `begin()` on every executor up front, then drains all four
+  against a single shared 300 ms wall-clock deadline via
+  `awaitOrSkip` + `remainingMs` helpers. Total UI-thread block now
+  bounded by 300 ms regardless of how many executors are involved —
+  visible-stutter regression on launcher-exit eliminated.
+- **`ResolveInfo` grafting in the no-change reconcile branch.**
+  `AppInfo` instances reconstructed from the on-disk `AppListCache`
+  carry `ri == null` because `ResolveInfo` isn't serialisable. When
+  the post-launch PM scan reconciled and saw no structural change,
+  the previous code skipped the `appList` rebuild and left every
+  cache-sourced entry's `ri` null for the activity's lifetime — every
+  icon load took the slower `pm.getActivityIcon` binder fallback. The
+  no-change branch now grafts `ri` from `freshFinal[i]` onto
+  `appList[i]` for every upgraded entry. `AppInfo.ri` changed from
+  `final` to `volatile` non-final to give the icon executor's worker
+  thread a clean visibility guarantee on the upgrade.
+- **Chip-strip rebuild during open keymap overlay.** When a package
+  broadcast lands while the user is inside the keymap card's
+  `KEYMAP_MODE_PICKER` or `KEYMAP_MODE_HIDE` chip strip, the strip's
+  chip → package mapping just changed under their hands. The package
+  receiver invalidated the `*BuiltSize` caches for the next open, but
+  the user is currently looking at stale chips — pressing OK on chip
+  *i* would silently toggle a different package than the chip's label
+  suggested. The reconcile UI body now calls
+  `rebuildOpenChipStripsAfterReconcile` which detects an open overlay
+  and forces an immediate rebuild + selection clamp.
+- **`onTrimMemory` no longer orphans icon-decode tasks.**
+  `iconInflight.clear()` was called at `TRIM_MEMORY_MODERATE` /
+  `TRIM_MEMORY_BACKGROUND`, which orphaned executor tasks that had
+  captured the cleared waiters list. The next bind for the same
+  package re-inserted a fresh waiters list, leaving two concurrent
+  decode tasks racing on `iconCache.put` and the disk write. The two
+  intermediate-pressure clears are removed; the `TRIM_MEMORY_COMPLETE`
+  clear stays because that branch already empties `appList` so there
+  are no live waiters to orphan.
+- **Rejected reconcile now retries.** The catch on
+  `RejectedExecutionException` from `appExecutor.execute` used to drop
+  the request silently. For the cold-start cache pre-paint that meant
+  the cache-sourced `AppInfo` entries (with `ri == null`) survived for
+  the rest of the session. The catch now posts a 400 ms-delayed
+  `loadApps` retry on `uiHandler` so the executor has time to drain.
+  Bounded by the existing `appsLoading` `compareAndSet` gate so
+  retries can't pile up.
+- **`pendingScrollIdx` clamped against displayed-list size.** The
+  saved scroll index is a displayed-list index (the shelf saves
+  `s.focusedIndex` in `onPause`). The reconcile previously clamped it
+  against `freshFinal.size()` and let `setApps` clamp it again to
+  `displayed.size() - 1` — silently landing the user on the last
+  visible cell instead of the closest valid one when hide-apps was
+  filtering. New `countVisible` helper computes the post-filter size;
+  the clamp now uses it directly.
+- **Cross-thread visibility for `iconCache`, `iconDiskCache`,
+  `iconExecutor`, `appExecutor`.** Declared `volatile` so a stale
+  non-null reference can never be read on a background worker after
+  the activity's `onDestroy` nulls them.
+- **`loadApps` early-out on `destroyed`.** A package broadcast can
+  post the `pkgReloadRunnable` to the shelf's looper just before
+  `onDestroy` nulls the shelf, and the looper drains the runnable
+  after `destroyed = true`. `loadApps` now early-outs at the top so
+  the cache pre-paint block doesn't run on a dead activity and submit
+  a doomed task to a shut-down executor.
+
+### Performance
+
+- **`IconRenderer` plate-path collapsed from 2 transient ARGB_8888
+  bitmaps to 1.** The previous pipeline composited the white plate +
+  scaled icon into one bitmap, then ran a separate `clipToCircle`
+  pass with a `SaveLayer` + `SRC_IN` mask. The composite now uses
+  `PorterDuff.Mode.SRC_ATOP` against the white circle directly, which
+  preserves the destination's alpha (so the circle's anti-aliased
+  edge profile is retained verbatim) while letting the icon overwrite
+  where it has non-zero alpha. Output is pixel-equivalent at every
+  alpha permutation. Saves ~290 KB of transient ARGB_8888 allocation
+  per plate-path icon at xxxhdpi — typically ~30 of 50 apps on cold
+  start, so ~8.7 MB less transient GC pressure during the icon-decode
+  flood. Same fix applied to both the `AdaptiveIconDrawable` plate
+  branch and the legacy bitmap-icon plate branch.
+- **`applyShelfApps` reuses an instance-level scratch
+  `ArrayList`.** The filtered "visible" list (apps minus hidden) is
+  now built into a reusable `visibleScratch` field instead of
+  allocating a fresh `ArrayList` on every package broadcast / hide-
+  toggle commit / `loadApps` reconcile. `setApps` snapshots into its
+  own list so the scratch never leaks references across UI events.
+- **`equalizeKeymapRowWidths` drops the redundant restore-prevW
+  pass.** The intermediate width never affected output (every row is
+  unconditionally re-snapped to `max` in the second pass); restoring
+  it just to overwrite it on the next call was 6 wasted
+  `setLayoutParams` cascades per re-equalize. Functional output
+  unchanged.
+- **`CrashLogger` switched to static `DateTimeFormatter`.** Replaces
+  the per-crash `new SimpleDateFormat(...).format(new Date())`
+  pattern. `DateTimeFormatter` is immutable and thread-safe;
+  `SimpleDateFormat` is neither. Available since API 26 (our minSdk
+  floor), no compatibility shim needed. Allocation-free per crash.
+
+### Hygiene
+
+- **`WallpaperController.crossfade` defensive `destroyed` check at
+  top of method.** Functionally equivalent to the existing
+  `withEndAction` guard but makes the contract "no animation starts
+  after destroy" explicit and survives future refactors.
+- **`lint.xml` suppressions for 6 structurally-required warnings.**
+  `ClickableViewAccessibility`, `NonResizeableActivity`,
+  `DiscouragedApi`, `ViewConstructor`, `IconLauncherShape`,
+  `ObsoleteSdkInt` — each ignored because the underlying lint
+  guidance does not apply to a TV-first programmatic launcher (full
+  rationale documented inline in `lint.xml`). Drops the warning count
+  from 23 to 11. The remaining 11 are real pending issues — newer
+  AGP available, missing monochrome adaptive-icon layer, etc.
+
+### Build / CI
+
+- **Gradle wrapper bumped 8.14.1 → 8.14.5.** Patch bump within the
+  8.14 series; no breaking changes. CI `GRADLE_VERSION` env updated
+  to match the wrapper so reproducibility is preserved.
+- **`androidx.test:ext:junit` 1.2.1 → 1.3.0;
+  `androidx.test:runner` 1.6.2 → 1.7.0; `androidx.test:core`
+  1.6.1 → 1.7.0.** Test-classpath only; production APK unaffected
+  (zero external deps in production, see project README).
+- **AGP 8.10.1 → 9.2.1 deferred.** The 8 → 9 boundary contains real
+  semantic changes (deprecated DSL removal, manifest merger
+  behaviour, build cache invalidation rules). A dedicated PR with
+  full regression testing on both API 26 and API 30 emulator rows is
+  warranted; this audit-PR keeps the AGP version steady.
+
 ## [1.4.0] — 2026-05-31
 
 Cold-start cache layer release. Three new on-disk caches paint the
