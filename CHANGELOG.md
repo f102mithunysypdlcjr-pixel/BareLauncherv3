@@ -5,6 +5,216 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-05-31
+
+Cold-start cache layer release. Three new on-disk caches paint the
+wallpaper, the app shelf, AND the icons in the very first frame on
+every cold start after the first. HARDWARE bitmap config on the
+wallpaper drops 8–32 MB of Java heap. Resolution-keyed icon files
+self-invalidate on DPI / display-mode changes. ProGuard rules
+tightened — `classes.dex` shrank from 97 KB to 78 KB (~20 % smaller).
+Six bugs caught and fixed across the deep audit pass that produced
+this release.
+
+### Added
+
+- **`WallpaperController` cold-start snapshot.** A WEBP-q95 copy of
+  the last-loaded user wallpaper is kept at
+  `filesDir/wallpaper.snap`. The activity calls `loadSnapshotSync()`
+  synchronously from `buildLayout`, before the first vsync — the
+  wallpaper appears in the very first painted frame instead of after
+  the 200–500 ms `ContentResolver` + `BitmapFactory` pipeline.
+  `loadStored()` short-circuits when the snapshot pre-painted so the
+  same URI is not re-decoded over identical bytes (no visible
+  re-fade flicker). Wallpaper bitmaps now use `Bitmap.Config.HARDWARE`
+  (API 26+, our minSdk floor) so the pixel data lives in graphics
+  memory instead of on the Java heap. Saves ~8 MB at 1080p, ~32 MB
+  at 4K. ARGB-fallback path preserved for the rare GPU driver that
+  fails the conversion — zero observable regression.
+- **`AppListCache` (new file).** Line-based version-prefixed text
+  format at `filesDir/applist.cache`: magic `BLAC`, version byte,
+  count, then `(pkg, label, activityClass)` triples. `loadApps()`
+  reads it synchronously before submitting the PM scan; the shelf
+  paints from cache instantly. PM scan reconciles in background;
+  identical results → no re-render, package set differs → replace
+  `appList` and rewrite cache. Cached `AppInfo` instances carry a
+  `null` `ResolveInfo`; the icon-load path falls back to
+  `PackageManager.getActivityIcon(component)` for those — same
+  observable behaviour, same binder cost. `saveOrder()` also writes
+  the cache so a user reorder is reflected on the next cold start
+  without flicker.
+- **`IconDiskCache` (new file).** Per-package WEBP-q95 at
+  `filesDir/icons/{pkg}-{px}.icn`. Disk reads happen on the icon
+  executor (background) inside a new `loadIconBlocking()` helper that
+  consolidates the disk-first → PM-fallback → disk-write pipeline.
+  UI thread is never blocked on icon disk I/O; `cell.bind` calls
+  `iconCache.get` which is memory-only. Atomic writes (tmp +
+  rename). Invalidated by package broadcasts (`REPLACED` /
+  `CHANGED` / `REMOVED`).
+- **Resolution-keyed icon filenames.** Filenames include the
+  current `dp(ICON_DP)` pixel size so DPI / font scale / display
+  configuration changes silently switch the lookup key — a stale-
+  resolution icon never renders inside a different-size cell after
+  the user reconfigures their TV. The constructor purges legacy
+  v1.4.x first-cut `.cache` files in a one-time background sweep
+  so the format change does not leak disk space.
+- **`pruneKeyMap` helper.** Mirror of the existing
+  `pruneHiddenApps`; called from the `loadApps` reconcile to drop
+  remote-key shortcut bindings whose target package has been
+  uninstalled. Without it, the keymap settings slot row showed the
+  raw package name (instead of "Not assigned") for every binding
+  pointing at a vanished app, until the user actually pressed that
+  specific key. Eager prune keeps the slot list visually correct
+  without user action.
+- **`AppInfo.java` extracted to its own top-level file.** Was a
+  nested class inside `LauncherActivity`; pulled out so the new
+  `AppListCache` and `IconDiskCache` helpers can construct
+  `AppInfo` instances without reaching into the activity's
+  namespace. Behaviour identical (still package-private, same
+  constructor).
+- **`AppListCacheTest` unit-test class (30 tests).** Covers the
+  parse rejection paths (bad magic, unsupported version, truncated
+  entries, empty fields, zero count), success paths, serialise
+  round-trip, label sanitisation (no-op fast-path + replacement of
+  `\n` / `\r`), Windows line-ending tolerance, large-list
+  (200 entries), unicode (CJK / RTL / emoji), and pipe-character-
+  in-label round-trips. Pure JVM, no Android dependencies.
+
+### Changed
+
+- **Wallpaper executor switched** from
+  `Executors.newSingleThreadExecutor()` (kept its worker thread
+  alive forever, holding ~512 KB of stack through millions of idle
+  cycles) to a `ThreadPoolExecutor` with `allowCoreThreadTimeOut(true)`.
+  Worker thread now exits when idle, matching the `iconExecutor` /
+  `appExecutor` discipline already in the activity.
+- **Hidden-app icon prewarm made lazy.** Was eager on every
+  `applyShelfApps` call (i.e. every package broadcast); now runs
+  inside `showKeymapOverlay()` only when the user actually opens
+  the surface that displays hidden-app icons. Stops the per-
+  broadcast disk-read storm for installs with many hidden apps.
+- **Package-broadcast invalidation extended** from `REPLACED` /
+  `CHANGED` to also include `REMOVED`. Each invalidation now also
+  calls `iconDiskCache.delete(pkg)` so a stale icon file does not
+  survive a package replace / uninstall.
+- **`onCreate` ordering: `loadKeyMap()` and `loadHiddenApps()`
+  now run BEFORE `loadApps()`.** Both are simple SharedPreferences
+  reads with no dependency on `appList`; the original ordering was
+  an oversight from the pre-cache era when `applyShelfApps` did
+  not run inside `loadApps`. The cache pre-paint now sees the
+  correct `hiddenApps` set on the very first `applyShelfApps` call.
+- **`hideKeymapOverlay` snap-close path now opens the settings
+  panel BEFORE hiding the keymap overlay.** When the previous
+  draft hid the overlay first, Android's synchronous focus search
+  ran on the still-focused descendant and landed focus on a shelf
+  cell — whose `onFocusChange` listener overwrote `focusedIndex`
+  and called `ensureVisible`, scrolling the shelf. Showing the
+  panel first moves focus to `ov` before `ko` goes GONE, so the
+  shelf's `focusedIndex` and `scrollX` stay where the user left
+  them.
+- **Chip strip and keymap slot row icons reserve layout space
+  via `View.INVISIBLE`** instead of dropping it via `View.GONE`.
+  The earlier `GONE` design caused chips with cached icons to
+  render wider than chips without; when an icon arrived
+  asynchronously the chip visibly "popped" wider and shifted
+  every chip after it along the strip. Same effect in the keymap
+  slot list — the binding-label text moved sideways every time an
+  async icon landed. `INVISIBLE` keeps the slot reserved so width
+  and label position are stable across the entire icon-load
+  lifecycle.
+- **`SharedPreferences` handle cached as a field.** Was being
+  resolved 12 times across the activity via repeated
+  `getSharedPreferences(PREFS, MODE_PRIVATE)` calls, each walking
+  Context's name → prefs HashMap. One field read per consumer
+  now.
+- **Reconcile path shares one `ArraySet<String>`** across the
+  icon-cache invalidation, `pruneHiddenApps`, and `pruneKeyMap`
+  helpers. Was building three separate sets from the same
+  `freshFinal` data on every package broadcast; now one
+  N-element pass + one allocation.
+- **`IconDiskCache.purgeOrphans` runs on the write executor**
+  instead of synchronously in the constructor. Same single-thread
+  executor as future writes, so FIFO queue ordering naturally
+  serialises the sweep before any `writeAsync` call (a freshly-
+  written file cannot be mistakenly deleted). Drops ~30 ms of
+  cold-start UI-thread blocking on installs with a heavy icon
+  cache.
+- **`loadIconBlocking` captures `dp(ICON_DP)` once per call.**
+  Without the snapshot, `processIcon`'s internal `dp(ICON_DP)`
+  re-read could race a mid-call density change (HDMI swap,
+  multi-window resize) and produce a `B`-sized bitmap that gets
+  stored under an `A`-keyed filename. The capture guarantees the
+  read key, the rendered bitmap dimensions, and the write key
+  all agree on one resolution.
+- **ProGuard rules tightened.** Removed
+  `-keep public class com.bare.launcher.LauncherActivity { *; }`
+  and `-keep class com.bare.launcher.LauncherActivity$* { *; }`.
+  Both were over-broad. The class-name keep is already covered
+  by AGP's default `-keep public class * extends android.app.Activity`,
+  and the `{ *; }` member wildcards prevented R8 from
+  renaming/inlining private members. The launcher uses zero
+  reflection / XML inflation / Parcelable / `android:onClick`,
+  so R8's standard data-flow analysis correctly tracks every
+  reachable member through the existing entry points.
+  Also removed the unused `-assumenosideeffects class
+  android.util.Log { v/d/i }` rule (codebase has zero `Log.v/d/i`
+  calls). `classes.dex` shrank from 97 KB to 78 KB (~20 %
+  smaller).
+
+### Fixed
+
+- **Hidden apps appeared on every cold start until the user
+  round-tripped the hide manager.** Cold-start ordering bug: the
+  cache pre-paint inside `loadApps()` ran with an empty
+  `hiddenApps` set because `loadHiddenApps()` was called AFTER
+  `loadApps()`. The shelf rendered the full `appList` with no
+  filter; the only paths that re-filtered later were either a
+  PM-scan reconcile that detected `changed = true` (rare) or a
+  user-initiated hide-manager toggle. User-reported bug; fixed
+  by reordering `onCreate`.
+- **Drawer auto-shifted left or right when closing the keymap
+  card opened from the settings panel.** Synchronous focus-search
+  side-effect: `ko.setVisibility(View.GONE)` triggered a focus
+  search that landed on the closest shelf cell, whose
+  `onFocusChange` listener overwrote `focusedIndex` and called
+  `ensureVisible`. Fixed by showing the settings panel (which
+  grabs focus on `ov`) before hiding the keymap overlay.
+- **Chip width jiggle on async icon load.** See the *Changed*
+  entry above for the `GONE` → `INVISIBLE` switch.
+- **Stale keymap entries after package removal.** See the new
+  `pruneKeyMap` helper above.
+- **DPI-change race in `loadIconBlocking`.** See the
+  `dp(ICON_DP)` capture above.
+- **Self-assignment near-miss in PR #57's first cut.** A bulk
+  `sed` replacement of `getSharedPreferences(PREFS, MODE_PRIVATE)`
+  with `prefs` accidentally rewrote the initialisation line into
+  `prefs = prefs;`, leaving the field uninitialised. Every
+  subsequent `prefs.getString` would have NPE'd on cold start;
+  R8 silently dead-code-eliminated ~33 KB of dex through the
+  always-throwing-NPE paths. Caught during pre-merge dex-size
+  validation (a 33 KB drop on a tiny refactor is a red flag, not
+  a celebration). Shipped with the explicit initialisation
+  restored — verified by `apkanalyzer dex packages` showing the
+  expected 49 classes / 188 methods (vs the broken version's
+  30 / 100).
+
+### Tests / CI
+
+- 5 unit-test classes, **93 tests, 0 failures, 0 errors**
+  (was 4 classes, 63 tests pre-1.4.0; +1 class, +30 tests).
+- `:app:lintDebug` — 0 errors, 23 pre-existing warnings unchanged.
+- `:app:assembleRelease` — release APK 95,208 bytes (was 101,492
+  in 1.3.6 — `classes.dex` shrank from 97,496 to 78,088 bytes).
+- `:app:assembleDebugAndroidTest` — instrumentation smoke test
+  compiles against the new helper layout.
+
+### Versioning
+
+- `versionCode` 17 → 18, `versionName` 1.3.6 → 1.4.0. New
+  backward-compatible functionality (the cache layer is purely
+  additive — every failure mode falls through to the pre-1.4.0
+  PM-scan-and-decode path) — SemVer MINOR bump.
+
 ## [1.3.6] — 2026-05-30
 
 Single-fix manifest patch that makes BareLauncher discoverable by

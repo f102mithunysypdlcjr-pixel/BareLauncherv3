@@ -81,6 +81,30 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 17 → 18: 1.4.0 introduces the cold-start cache layer.
+        // Three on-disk caches — wallpaper snapshot
+        // ({@code filesDir/wallpaper.snap}), app list
+        // ({@code filesDir/applist.cache}), and per-package icons
+        // ({@code filesDir/icons/{pkg}-{px}.icn}) — paint the wallpaper,
+        // the app shelf, AND the icons in the very first frame on every
+        // cold start after the first. HARDWARE bitmap config on the
+        // wallpaper saves 8–32 MB of Java heap (lives in graphics
+        // memory instead). Resolution-keyed icon files self-invalidate
+        // on DPI / display-mode changes (filename mismatch on the new
+        // density → cache miss → fresh decode at the new size). All
+        // four caches use atomic tmp + rename writes so a process kill
+        // mid-write never leaves a corrupt file behind. ProGuard rules
+        // tightened — removed the v1.x.x over-broad
+        // {@code -keep ... { *; }} directives that were preventing R8
+        // from minifying private members; classes.dex shrank from 97 KB
+        // to 78 KB (~20 % smaller). Six bugs caught and fixed across
+        // the deep audit pass — see CHANGELOG. New {@code AppListCacheTest}
+        // unit-test class adds 30 JVM tests covering parse rejection /
+        // success / round-trip / label sanitisation paths. New
+        // backward-compatible functionality (the cache layer is
+        // additive — every failure mode falls through to the
+        // pre-v1.4.0 PM-scan-and-decode path) — SemVer MINOR bump.
+        //
         // Bumped 16 → 17: 1.3.6 is a single-fix manifest patch that
         // makes the launcher discoverable by third-party "set default
         // launcher" / "Launcher Manager" tools popular on XDA. The
@@ -188,8 +212,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 17
-        versionName   = "1.3.6"
+        versionCode   = 18
+        versionName   = "1.4.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
