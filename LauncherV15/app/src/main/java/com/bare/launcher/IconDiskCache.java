@@ -157,12 +157,28 @@ final class IconDiskCache {
             //noinspection ResultOfMethodCallIgnored
             dir.mkdirs();
         }
-        purgeOrphans();
         this.writeExecutor = new ThreadPoolExecutor(
                 1, 1, 30L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(QUEUE_CAP),
                 new ThreadPoolExecutor.DiscardOldestPolicy());
         this.writeExecutor.allowCoreThreadTimeOut(true);
+        // Defer the orphan-purge sweep to the write executor so the
+        // activity's onCreate critical path is not blocked on disk
+        // I/O. Running on the same single-thread executor that future
+        // writes target naturally serialises the sweep before any
+        // {@link #writeAsync} call (queue is FIFO), so a freshly-
+        // written file cannot be mistakenly deleted by a sweep that
+        // started later. listFiles + N small deletes is ~30 ms on a
+        // heavy install — invisible when shifted off UI, would be a
+        // one-time cold-start hit otherwise.
+        try {
+            writeExecutor.execute(this::purgeOrphans);
+        } catch (RejectedExecutionException ignored) {
+            // Executor cannot accept tasks (saturated + DiscardOldest
+            // dropping a queue spot is impossible at construct time;
+            // defensive). The legacy files remain until the next
+            // construct or "Clear app data".
+        }
     }
 
     /**
@@ -366,21 +382,23 @@ final class IconDiskCache {
     }
 
     /**
-     * One-time sweep on construct: delete every file in {@link #dir}
-     * that does not match the current naming convention. Today this
-     * targets the v1.4.0 legacy {@code {pkg}.cache} format (no size
-     * suffix), which is unreachable under the resolution-keyed scheme.
-     * Future format bumps can extend the predicate without changing
-     * the sweep's call site.
+     * One-time sweep, queued onto the write executor at construct time:
+     * delete every file in {@link #dir} that does not match the current
+     * naming convention. Today this targets the v1.4.0 legacy
+     * {@code {pkg}.cache} format (no size suffix), which is unreachable
+     * under the resolution-keyed scheme. Future format bumps can extend
+     * the predicate without changing the sweep's call site.
      *
-     * <p>Synchronous on the calling thread (the activity's main thread,
-     * during {@code onCreate}'s {@code initCaches}). The cost is one
-     * {@code listFiles} call plus N small {@code delete}s — negligible
-     * even for a heavy install (~250 ms total at 200 entries on a slow
-     * eMMC, but in practice the legacy format is bounded to whatever
-     * v1.4.0 wrote in the few minutes between merge and this fix).
+     * <p>Runs on the write executor (background, not UI) so the
+     * activity's onCreate critical path is not blocked. The cost is
+     * one {@code listFiles} call plus N small {@code delete}s —
+     * negligible when off-UI even for a heavy install (~30 ms total
+     * at 200 entries on a slow eMMC). The sweep is queued FIRST on
+     * the executor, so any {@link #writeAsync} that follows runs
+     * after it: a freshly-written file cannot be mistakenly deleted.
      */
     private void purgeOrphans() {
+        if (shuttingDown) return;
         File[] files = dir.listFiles();
         if (files == null) return;
         for (File f : files) {
