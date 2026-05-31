@@ -11,8 +11,6 @@ import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 
-import java.nio.ByteBuffer;
-
 /**
  * Pure-static helpers for converting an arbitrary launcher icon
  * {@link Drawable} into the circular {@link Bitmap} that the shelf renders.
@@ -41,12 +39,22 @@ import java.nio.ByteBuffer;
  *
  * <ul>
  *   <li>{@link #sMatrixTL} — one {@link Matrix} per worker thread (icon
- *       executor pool size = cores − 1).</li>
- *   <li>{@link #sPixelBuf} — reusable {@code byte[]} backing
- *       {@link Bitmap#copyPixelsToBuffer} in {@link #needsFill}.</li>
+ *       executor pool size = cores).</li>
  *   <li>{@link #sFillPts} — flat {@code int[24]} of (x,y) sample offsets,
  *       beats a fresh {@code int[][]} allocation per icon.</li>
  * </ul>
+ *
+ * <p>The pre-1.4.2 implementation also held a per-worker
+ * {@code byte[rowBytes * height]} buffer (≈ 290 KB at xxxhdpi) populated
+ * via {@link Bitmap#copyPixelsToBuffer} so {@link #needsFill} could
+ * sample alpha bytes via direct array indexing. That trade made sense
+ * only if the sample count approached the bitmap's pixel count; for a
+ * fixed 12-sample heuristic it amplified read cost by ~25 000× and
+ * pinned ~290 KB of thread-local memory per worker for the entire
+ * activity lifetime. {@link #needsFill} now uses the 12 direct
+ * {@link Bitmap#getPixel} calls (well-documented as "slower per pixel"
+ * but irrelevant at 12 samples — total cost is ~1.2 µs vs the buffer
+ * copy's ~30 µs of memcpy).</p>
  *
  * <h3>Thread safety</h3>
  * Every method is safe to call from any thread. The pipeline is exercised
@@ -73,11 +81,6 @@ final class IconRenderer {
     private static final ThreadLocal<Matrix> sMatrixTL = new ThreadLocal<Matrix>() {
         @Override protected Matrix initialValue() { return new Matrix(); }
     };
-
-    /** Reusable byte buffer for {@link Bitmap#copyPixelsToBuffer}. Sized
-     *  per-call inside {@link #needsFill}; the {@link ThreadLocal} just
-     *  amortises the allocation across icons. */
-    private static final ThreadLocal<byte[]> sPixelBuf = new ThreadLocal<>();
 
     /** Reused {@code int[24]} of packed (x,y) sample points for
      *  {@link #needsFill}. See {@link #needsFill} for the layout. */
@@ -233,21 +236,9 @@ final class IconRenderer {
      * silently slipping through.
      */
     private static boolean needsFill(Bitmap src, int sz) {
-        boolean fast = src.getConfig() == Bitmap.Config.ARGB_8888;
-        int rowBytes = src.getRowBytes();
-        byte[] px = null;
-        if (fast) {
-            int needed = rowBytes * src.getHeight();
-            px = sPixelBuf.get();
-            if (px == null || px.length < needed) {
-                px = new byte[needed];
-                sPixelBuf.set(px);
-            }
-            ByteBuffer buf = ByteBuffer.wrap(px);
-            buf.order(java.nio.ByteOrder.nativeOrder()).rewind();
-            src.copyPixelsToBuffer(buf);
-        }
-
+        // Allocate / reuse the (x,y) sample point table. Same layout as
+        // the pre-1.4.2 version: 4 outer corners + 4 edge midpoints +
+        // 4 deeper-inset corners, packed as int[24] = (x0,y0,x1,y1,...).
         int inset = Math.max(1, sz / 16);
         int e     = sz - 1 - inset;     // edge index after inset
         int q     = sz / 8;
@@ -272,18 +263,47 @@ final class IconRenderer {
         pts[18] = qe; pts[19] = q;
         pts[20] = q;  pts[21] = qe;
         pts[22] = qe; pts[23] = qe;
+        // Sample alpha at each point. {@link Bitmap#getPixel} is
+        // documented as "slower per pixel than a buffered copy", but the
+        // crossover point is in the thousands of samples — at 12 samples
+        // the per-call ~100 ns JNI cost totals ~1.2 µs, vs ~30 µs of
+        // memcpy for a full 290 KB copyPixelsToBuffer at xxxhdpi. The
+        // direct-sample path is also free of any thread-local byte
+        // buffer (the pre-1.4.2 design held one ~290 KB buffer per
+        // icon-executor worker for the activity's lifetime) so peak
+        // worker-thread heap drops by {@code workers × 290 KB}.
         int trans = 0;
         for (int i = 0; i < 24; i += 2) {
-            int x = pts[i], y = pts[i + 1];
-            int a = fast
-                    ? (px[y * rowBytes + x * 4 + 3] & 0xFF)
-                    : Color.alpha(src.getPixel(x, y));
-            if (a < 30) trans++;
+            if (Color.alpha(src.getPixel(pts[i], pts[i + 1])) < 30) trans++;
         }
         return trans >= 6;
     }
 
-    /** Rasterise any drawable to an {@code sz × sz} ARGB_8888 bitmap. */
+    /** Rasterise any drawable to an {@code sz × sz} ARGB_8888 bitmap.
+     *
+     *  <p>Two paths:
+     *  <ul>
+     *    <li>{@link BitmapDrawable} fast-path — pull the inner bitmap
+     *        and matrix-scale it into the result. Avoids reinvoking
+     *        the drawable's {@code draw(Canvas)} (which would have
+     *        rasterised at intrinsic size first).</li>
+     *    <li>Everything else — set bounds to {@code (0, 0, sz, sz)}
+     *        and let the drawable rasterise directly at the target
+     *        size. Pre-1.4.2 used to allocate an intrinsic-size
+     *        intermediate bitmap, draw at intrinsic size, then
+     *        matrix-scale into a target-size bitmap. That two-bitmap
+     *        path was a defensive fallback for hypothetical drawables
+     *        that ignore {@code setBounds}, but every standard
+     *        platform drawable ({@link AdaptiveIconDrawable} —
+     *        handled by the caller — plus {@code VectorDrawable},
+     *        {@code ColorDrawable}, {@code ShapeDrawable},
+     *        {@code GradientDrawable}, {@code LayerDrawable}) honours
+     *        bounds correctly. The PM-loaded launcher icons we rasterise
+     *        here are exactly that universe. Direct-bound drawing saves
+     *        one ARGB_8888 allocation (~290 KB at xxxhdpi) per
+     *        non-BitmapDrawable, non-AdaptiveIcon icon.</li>
+     *  </ul>
+     */
     private static Bitmap renderDrawable(Drawable d, int sz) {
         if (d instanceof BitmapDrawable) {
             Bitmap src = ((BitmapDrawable) d).getBitmap();
@@ -295,17 +315,9 @@ final class IconRenderer {
                 return out;
             }
         }
-        int w = d.getIntrinsicWidth()  > 0 ? d.getIntrinsicWidth()  : sz;
-        int h = d.getIntrinsicHeight() > 0 ? d.getIntrinsicHeight() : sz;
-        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        d.setBounds(0, 0, w, h);
-        d.draw(new Canvas(bmp));
-        if (w == sz && h == sz) return bmp;
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
-        Matrix mx = sMatrixTL.get();
-        mx.setScale((float) sz / w, (float) sz / h);
-        new Canvas(out).drawBitmap(bmp, mx, sDrawPaint);
-        bmp.recycle();
+        d.setBounds(0, 0, sz, sz);
+        d.draw(new Canvas(out));
         return out;
     }
 

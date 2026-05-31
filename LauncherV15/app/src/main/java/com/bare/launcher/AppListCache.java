@@ -3,15 +3,13 @@ package com.bare.launcher;
 import android.content.ComponentName;
 import android.content.Context;
 
-import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -325,19 +323,22 @@ final class AppListCache {
         if (dir == null) return false;
         File f = new File(dir, FILE_NAME);
         if (!f.exists() || f.length() == 0) return false;
-        StringBuilder sb;
-        try (BufferedReader r = new BufferedReader(
-                new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
-            // 16 KB initial cap — typical cache is 5-10 KB so we grow
-            // at most once for installs with many apps.
-            sb = new StringBuilder((int) Math.min(f.length() + 32, 1 << 14));
-            char[] buf = new char[2048];
-            int n;
-            while ((n = r.read(buf)) > 0) sb.append(buf, 0, n);
-        } catch (IOException ignored) {
+        // Single-shot read into a byte array, then UTF-8 decode. Faster
+        // than the BufferedReader + char[] + StringBuilder loop the
+        // pre-1.4.2 implementation used: one syscall + one alloc instead
+        // of N reads each appending into an incrementally growing
+        // StringBuilder. Files.readAllBytes is API 26+ (our minSdk
+        // floor) so no compatibility shim. The cache file is tiny
+        // (~5–10 KB for 50 apps) so memory peak is bounded by 2× the
+        // file size during the byte-array → String decode.
+        String contents;
+        try {
+            byte[] bytes = Files.readAllBytes(f.toPath());
+            contents = new String(bytes, StandardCharsets.UTF_8);
+        } catch (IOException | OutOfMemoryError ignored) {
             return false;
         }
-        boolean ok = parse(sb.toString(), visitor);
+        boolean ok = parse(contents, visitor);
         if (!ok) {
             // The cache is corrupt or version-mismatched. Delete it so
             // the next write doesn't need to compete with stale bytes.
