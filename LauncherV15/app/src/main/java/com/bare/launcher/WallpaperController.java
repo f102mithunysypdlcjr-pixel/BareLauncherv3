@@ -312,10 +312,18 @@ final class WallpaperController {
             try {
                 Drawable d = WallpaperManager.getInstance(host).getDrawable();
                 if (d != null) bmp = wpDrawable(d);
-            } catch (Exception ignored) {
+            } catch (Exception | OutOfMemoryError ignored) {
                 // WallpaperManager throws SecurityException on Android TV
                 // ROMs that strip the active-home implicit grant. Fall
                 // through with bmp == null — the cross-fade just no-ops.
+                //
+                // OutOfMemoryError catch added in v1.4.4: wpDrawable
+                // allocates a screen-sized ARGB_8888 bitmap which can
+                // OOM on memory-constrained TV boxes (1 GB-RAM Fire TV
+                // sticks, older Mi Box variants). Without this catch
+                // the OOM propagates out of the executor task, kills
+                // the wallpaper worker thread, and the wallpaper never
+                // appears for the rest of the session.
             }
             // Promote the ARGB to HARDWARE for display. The ARGB is
             // recycled inside the helper on success.
@@ -673,7 +681,15 @@ final class WallpaperController {
             //noinspection deprecation -- WEBP enum is the only choice on minSdk 26;
             // WEBP_LOSSY/LOSSLESS require API 30+.
             wrote = argb.compress(Bitmap.CompressFormat.WEBP, SNAPSHOT_QUALITY, out);
-        } catch (IOException ignored) {
+        } catch (IOException | OutOfMemoryError ignored) {
+            // Catch OOM: Bitmap.compress on a 1080p ARGB_8888 source
+            // can need ~10–20 MB of transient encoder workspace, which
+            // OOMs on low-memory TV boxes (1 GB-RAM Fire TV sticks,
+            // older Mi Box variants) under post-decode peak heap
+            // pressure. Best-effort write failure → no snapshot file
+            // → next cold start does a full URI re-decode (the
+            // pre-1.4.0 baseline). Same observable behaviour as a
+            // disk write failure, just for a different root cause.
             wrote = false;
         }
         if (!wrote) {

@@ -288,7 +288,17 @@ final class IconDiskCache {
             //noinspection deprecation -- legacy WEBP enum is the only choice
             // on minSdk 26; WEBP_LOSSY/LOSSLESS require API 30+.
             wrote = bmp.compress(Bitmap.CompressFormat.WEBP, QUALITY, out);
-        } catch (IOException ignored) {
+        } catch (IOException | OutOfMemoryError ignored) {
+            // OOM catch added in v1.4.4: Bitmap.compress on a ~272 px
+            // ARGB_8888 icon at xxxhdpi needs ~1–2 MB of transient
+            // encoder workspace. Cumulatively across the cold-start
+            // icon flood (cores worker threads compressing in
+            // parallel) that's a ~5–10 MB transient peak which can
+            // OOM on memory-pressed TV boxes during onTrimMemory
+            // bursts. Best-effort write failure → no disk-cache
+            // entry for this icon at this resolution → next cold
+            // start re-decodes from PM (a few extra ms). Same
+            // observable behaviour as a disk write failure.
             wrote = false;
         }
         if (!wrote) {
