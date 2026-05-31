@@ -394,17 +394,62 @@ final class WallpaperController {
      * Tear down: shut the executor, recycle held bitmaps, drop view refs.
      * Idempotent — safe to call from {@code onDestroy} after the activity
      * has already cleaned up its own view tree.
+     *
+     * <p>Equivalent to calling {@link #beginShutdown()} immediately
+     * followed by {@link #awaitShutdown(long)} with a 300 ms budget,
+     * then {@link #releaseBitmaps()}. Prefer the multi-phase API in
+     * callers that need to overlap shutdowns of several executors so
+     * the wall-clock cap is shared.
      */
     void onDestroy() {
+        beginShutdown();
+        awaitShutdown(300);
+        releaseBitmaps();
+    }
+
+    /**
+     * Phase 1 of a parallel shutdown: flip the destroyed flag and call
+     * {@code shutdown()} on the wallpaper executor. Returns immediately.
+     * Pair with {@link #awaitShutdown(long)} to bound the wait, and with
+     * {@link #releaseBitmaps()} to free the held bitmaps and drawable
+     * references on the ImageViews.
+     *
+     * <p>Idempotent — safe to call multiple times.
+     */
+    void beginShutdown() {
         destroyed = true;
-        executor.shutdown();
+        try { executor.shutdown(); }
+        catch (Throwable ignored) { /* best-effort */ }
+    }
+
+    /**
+     * Phase 2 of a parallel shutdown: wait up to {@code timeoutMs} for
+     * the wallpaper decode (if any) to complete, then force-stop with
+     * {@code shutdownNow}. Pair with {@link #beginShutdown()} so the
+     * wall-clock cap is shared across multiple executors.
+     */
+    void awaitShutdown(long timeoutMs) {
         try {
-            executor.awaitTermination(300, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (timeoutMs > 0) executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
-            executor.shutdownNow();
+            try { executor.shutdownNow(); }
+            catch (Throwable ignored) { /* best-effort */ }
         }
+    }
+
+    /**
+     * Phase 3 of a parallel shutdown: recycle the bitmaps held by the
+     * two ImageViews and clear their drawable references. Safe to call
+     * after {@link #awaitShutdown(long)} so any pending UI runnable from
+     * an in-flight cross-fade has had a chance to land first (those
+     * runnables short-circuit on {@code destroyed} so order is not
+     * strictly required, but the released-then-set sequence avoids any
+     * window where a recycled bitmap is still referenced by an
+     * ImageView's drawable).
+     */
+    void releaseBitmaps() {
         recycleImageViewBitmap(front);
         recycleImageViewBitmap(back);
         if (front != null) front.setImageDrawable(null);
@@ -443,10 +488,22 @@ final class WallpaperController {
         // any). After a previous cross-fade we cleared BACK's drawable to
         // null but didn't recycle its bitmap; do it now before reusing the
         // slot. In steady state this is a no-op.
+        //
+        // Recycle DEFERRED via {@link View#postOnAnimation} so it runs on
+        // the next animation frame, AFTER the {@code back.setImageBitmap}
+        // below has been applied to BACK's display list. Recycling
+        // synchronously here would invalidate a bitmap whose pixels are
+        // still queued for the current frame's draw — on SkiaGL TV ROMs
+        // this surfaces as {@code RuntimeException: Canvas: trying to use
+        // a recycled bitmap}, killing the launcher mid-cross-fade.
         Drawable oldBackDrawable = back.getDrawable();
         if (oldBackDrawable instanceof BitmapDrawable) {
-            Bitmap b = ((BitmapDrawable) oldBackDrawable).getBitmap();
-            if (b != null && !b.isRecycled() && b != fb && b != oldBmp) b.recycle();
+            final Bitmap bRef = ((BitmapDrawable) oldBackDrawable).getBitmap();
+            if (bRef != null && !bRef.isRecycled() && bRef != fb && bRef != oldBmp) {
+                back.postOnAnimation(() -> {
+                    if (!bRef.isRecycled()) bRef.recycle();
+                });
+            }
         }
         back.setImageBitmap(fb);
         back.setAlpha(1f);
@@ -462,7 +519,21 @@ final class WallpaperController {
                     front.setAlpha(1f);
                     back.setImageDrawable(null);
                     back.setAlpha(1f);
-                    if (oldBmp != null && !oldBmp.isRecycled()) oldBmp.recycle();
+                    // Defer the recycle to the next animation frame so
+                    // FRONT's display list has already been rebuilt with
+                    // {@code fb} before the previous bitmap's pixels are
+                    // freed. {@code setImageBitmap} only flags the view
+                    // as dirty (calls invalidate); the actual display-list
+                    // refresh happens at the next vsync. Recycling here
+                    // synchronously could free pixels that are still being
+                    // sampled by the in-flight frame on hardware-accelerated
+                    // pipelines — same shape of crash as the BACK recycle
+                    // above, just on the FRONT side.
+                    if (oldBmp != null && !oldBmp.isRecycled()) {
+                        front.postOnAnimation(() -> {
+                            if (!oldBmp.isRecycled()) oldBmp.recycle();
+                        });
+                    }
                 })
                 .start();
     }

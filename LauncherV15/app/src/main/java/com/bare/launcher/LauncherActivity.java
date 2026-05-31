@@ -251,12 +251,23 @@ public class LauncherActivity extends Activity {
         cv.setText(clockFmt.format(now, true), TextView.BufferType.SPANNABLE);
     }
 
-    private ThreadPoolExecutor       iconExecutor;
+    // Volatile because these fields are nulled on the UI thread inside
+    // {@link #onDestroy} and dereferenced on background workers
+    // ({@code iconExecutor} for {@link #iconCache} / {@link #iconDiskCache},
+    // {@code appExecutor} for {@link #appExecutor}'s self-reference inside
+    // the cache-write runnable). The internal state of each — LruCache is
+    // synchronized, IconDiskCache flips its own volatile {@code shuttingDown}
+    // flag, ThreadPoolExecutor is documented thread-safe — covers the
+    // logical correctness; volatile here covers the visibility of the
+    // null assignment so a worker thread doesn't dereference a stale
+    // non-null reference after the activity has begun teardown. Same
+    // reasoning as the existing {@link #destroyed} volatile.
+    private volatile ThreadPoolExecutor       iconExecutor;
     // Wallpaper executor moved into {@link WallpaperController} along with
     // the loading-guard atomic booleans. Only the icon and app-list
     // executors remain here; their hot paths live inside this activity.
-    private ExecutorService          appExecutor;
-    private LruCache<String, Bitmap> iconCache;
+    private volatile ExecutorService          appExecutor;
+    private volatile LruCache<String, Bitmap> iconCache;
     /** Disk-backed sibling of {@link #iconCache}. Wired through the
      *  {@link LruCache#create(Object)} extension point so a memory-cache
      *  miss transparently falls through to a disk read; freshly-decoded
@@ -264,7 +275,7 @@ public class LauncherActivity extends Activity {
      *  on a background thread. Persists across cold starts so the
      *  shelf renders icons in the very first frame. See {@link
      *  IconDiskCache} javadoc for the full pipeline. */
-    private IconDiskCache            iconDiskCache;
+    private volatile IconDiskCache            iconDiskCache;
 
     private final ArrayMap<String, List<RecyclingShelfView.CellView>> iconInflight = new ArrayMap<>();
     private final List<AppInfo> appList = new ArrayList<>();
@@ -833,12 +844,39 @@ public class LauncherActivity extends Activity {
             catch (Throwable ignored) { /* best-effort */ }
             backInvokedCallback = null;
         }
-        shutdown(iconExecutor); shutdown(appExecutor);
-        // Shut the disk-cache write executor. Idempotent and bounded to
-        // 300 ms via the helper inside IconDiskCache. After this returns,
-        // tryRead/writeAsync/delete are all no-ops — even if a stray cell
-        // bind fires during teardown.
-        if (iconDiskCache != null) { iconDiskCache.shutdown(); iconDiskCache = null; }
+        // Parallel shutdown of every executor the launcher owns.
+        //
+        // Pre-1.4.x serialised the four shutdowns: each one called
+        // {@code shutdown()} + {@code awaitTermination(300, MS)} +
+        // {@code shutdownNow()} in turn, so the worst-case wall-clock
+        // cost was 4 × 300 ms = 1.2 seconds of UI-thread block at
+        // {@code onDestroy} — visible to the user as a stutter when
+        // navigating from the launcher into another activity. Now we:
+        //   1. Phase 1 — call {@code shutdown()} on every executor up
+        //      front (non-blocking; flips internal "shutting down" flags
+        //      so future submits are rejected).
+        //   2. Phase 2 — share a single 300 ms deadline across every
+        //      {@code awaitTermination} call, decrementing the remaining
+        //      budget as each one elapses. Total cap stays 300 ms
+        //      regardless of how many executors are involved.
+        //   3. Phase 3 — force-stop any survivors with {@code shutdownNow}
+        //      and release the wallpaper bitmaps last (so a runnable
+        //      from an in-flight cross-fade — which short-circuits on
+        //      {@code destroyed} anyway — has already run by then).
+        if (iconExecutor   != null) try { iconExecutor.shutdown(); } catch (Throwable ignored) { /* best-effort */ }
+        if (appExecutor    != null) try { appExecutor .shutdown(); } catch (Throwable ignored) { /* best-effort */ }
+        if (iconDiskCache  != null) iconDiskCache.beginShutdown();
+        if (wallpaperCtl   != null) wallpaperCtl .beginShutdown();
+        long deadlineNs = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(300);
+        awaitOrSkip(iconExecutor,  deadlineNs);
+        awaitOrSkip(appExecutor,   deadlineNs);
+        if (iconDiskCache != null) iconDiskCache.awaitShutdown(remainingMs(deadlineNs));
+        if (wallpaperCtl  != null) wallpaperCtl .awaitShutdown(remainingMs(deadlineNs));
+        // Phase 3 — force-stop survivors and release wallpaper bitmaps.
+        if (iconExecutor != null) try { iconExecutor.shutdownNow(); } catch (Throwable ignored) { /* best-effort */ }
+        if (appExecutor  != null) try { appExecutor .shutdownNow(); } catch (Throwable ignored) { /* best-effort */ }
+        if (iconDiskCache != null) iconDiskCache = null;
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
         // Drop any deferred package-reload runnable that may still be
@@ -854,7 +892,7 @@ public class LauncherActivity extends Activity {
         // Wallpaper teardown — controller recycles its own bitmaps and
         // clears the ImageView drawables. Keeps the activity from having
         // to know about wallpaper memory hygiene at all.
-        if (wallpaperCtl != null) { wallpaperCtl.onDestroy(); wallpaperCtl = null; }
+        if (wallpaperCtl != null) { wallpaperCtl.releaseBitmaps(); wallpaperCtl = null; }
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
         netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
@@ -868,6 +906,32 @@ public class LauncherActivity extends Activity {
         super.onDestroy();
     }
 
+    /** Await a single executor up to the shared deadline. No-op when
+     *  {@code ex} is null. Used by {@link #onDestroy} to spread one
+     *  300 ms wall-clock budget across multiple executors. */
+    private static void awaitOrSkip(ExecutorService ex, long deadlineNs) {
+        if (ex == null) return;
+        long ms = remainingMs(deadlineNs);
+        if (ms <= 0) return;
+        try { ex.awaitTermination(ms, TimeUnit.MILLISECONDS); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    /** Milliseconds remaining until {@code deadlineNs}. Clamped to zero
+     *  so callers don't pass a negative timeout to {@code awaitTermination}
+     *  (which is documented to wait forever on negative input). */
+    private static long remainingMs(long deadlineNs) {
+        long ns = deadlineNs - System.nanoTime();
+        return ns <= 0 ? 0 : TimeUnit.NANOSECONDS.toMillis(ns);
+    }
+
+    /** Legacy package-private helper retained for binary-compat with any
+     *  future caller; unused inside the current activity (the parallel
+     *  shared-deadline path in {@link #onDestroy} replaced it). Marked
+     *  {@code @SuppressWarnings("unused")} so lint's UnusedMethod check
+     *  doesn't flag the deliberate retention. Drop it later once the
+     *  refactor is verified across more device targets. */
+    @SuppressWarnings("unused")
     private void shutdown(ExecutorService ex) {
         if (ex == null) return;
         ex.shutdown();
@@ -875,6 +939,7 @@ public class LauncherActivity extends Activity {
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         finally { ex.shutdownNow(); }
     }
+
 
     @Override
     public void onTrimMemory(int level) {
@@ -894,8 +959,18 @@ public class LauncherActivity extends Activity {
             appByPackage.clear();
             uiHandler.postDelayed(this::loadApps, 1000);
         }
-        else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); iconInflight.clear(); }
-        else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); iconInflight.clear(); }
+        // MODERATE / BACKGROUND: trim the in-memory bitmap cache only.
+        // The {@code iconInflight} map is intentionally left untouched —
+        // clearing it while executor tasks still hold the captured
+        // {@code waiters} list orphans those tasks: the next bind for the
+        // same package re-inserts a fresh waiters list and the executor
+        // ends up running TWO concurrent decodes for the same icon, both
+        // of which call {@code iconCache.put} and write to the disk cache.
+        // The natural completion path
+        // ({@code iconInflight.remove(key)} inside the executor's UI body)
+        // drains the map without any extra bookkeeping.
+        else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); }
+        else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); }
     }
 
     @Override public void onWindowFocusChanged(boolean h) { super.onWindowFocusChanged(h); if (h) hideSystemUI(); }
@@ -2818,6 +2893,15 @@ public class LauncherActivity extends Activity {
     }
     private void loadApps() {
         if (!appsLoading.compareAndSet(false, true)) return;
+        // A5 fix: bail before any work if the activity was already torn
+        // down. A package broadcast can post pkgReloadRunnable to the
+        // shelf's looper just before {@link #onDestroy} nulls the shelf,
+        // and the looper drains the runnable after the activity has
+        // gone {@code destroyed = true}. Without this guard, the cache
+        // pre-paint block below would still run, populate appList from
+        // disk on a dead activity, and submit a doomed task to the
+        // already-shut-down appExecutor.
+        if (destroyed) { appsLoading.set(false); return; }
         // Cold-start instant paint: if appList is empty (we have not loaded
         // yet), try the on-disk AppListCache synchronously. The shelf
         // renders the cached entries in the very first frame while the
@@ -2937,14 +3021,39 @@ public class LauncherActivity extends Activity {
                             }
                             RecyclingShelfView s = shelf;
                             if (s != null) {
-                                // Apply any pending scroll-index restore (cold start path).
-                                // onResume stashes it when appList was empty.
+                                // A6 fix: the saved scroll index is a
+                                // {@code displayed}-list index (the shelf
+                                // saves {@code s.focusedIndex} in
+                                // {@link #onPause}). Clamp against the
+                                // count of visible (non-hidden) apps in
+                                // freshFinal, NOT against the master
+                                // freshFinal.size(). Without this clamp,
+                                // an index pointing past the filtered
+                                // tail used to slip through here and
+                                // {@code setApps} clamped it again to
+                                // {@code displayed.size() - 1} — landing
+                                // the user on the last visible cell
+                                // instead of the closest valid one.
                                 if (pendingScrollIdx >= 0 && !freshFinal.isEmpty()) {
-                                    s.focusedIndex = Math.min(pendingScrollIdx, freshFinal.size() - 1);
+                                    int visibleCount = countVisible(freshFinal);
+                                    if (visibleCount > 0) {
+                                        s.focusedIndex = Math.min(pendingScrollIdx, visibleCount - 1);
+                                    }
                                     pendingScrollIdx = -1;
                                 }
                                 applyShelfApps(s);
                             }
+                            // A2 fix: when a package broadcast fires
+                            // while the user is INSIDE the keymap card's
+                            // PICKER or HIDE chip strip, the strip's
+                            // identities just changed under their hands.
+                            // The package receiver invalidated the
+                            // {@code *BuiltSize} caches so the NEXT open
+                            // would rebuild — but the user is currently
+                            // looking at stale chips. Force a rebuild
+                            // here so OK on chip {@code i} hits the right
+                            // package.
+                            rebuildOpenChipStripsAfterReconcile();
                             // Persist the reconciled list to the on-disk
                             // AppListCache so the next cold start can
                             // render the shelf instantly. Snapshotted on a
@@ -2967,25 +3076,141 @@ public class LauncherActivity extends Activity {
                                 // its previous-known-good content; the
                                 // next loadApps reconcile will retry.
                             }
-                        } else if (pendingScrollIdx >= 0) {
-                            // App list unchanged but a pending index is waiting —
-                            // honour it. setApps wasn't called, so manually request focus.
-                            // Clamp against the shelf's currently-rendered size (not
-                            // appList.size()) — when hide-apps is filtering, the saved
-                            // index could exceed the visible list and requestFocusOnIndex
-                            // would otherwise interpret it as an out-of-bounds wrap.
-                            RecyclingShelfView s = shelf;
-                            if (s != null && !appList.isEmpty()) {
-                                s.requestFocusOnIndex(Math.min(pendingScrollIdx, s.lastIndex()));
+                        } else {
+                            // A8 fix: appList content matches but the
+                            // entries reconstructed from {@link AppListCache}
+                            // carry {@code ri == null} (ResolveInfo is not
+                            // serialisable). The fresh batch from
+                            // queryApps does carry a real ResolveInfo on
+                            // every entry. Graft those onto the existing
+                            // AppInfo instances so subsequent icon loads
+                            // use the faster {@code ri.loadIcon(pm)} path
+                            // instead of {@code pm.getActivityIcon}. Same
+                            // observable result, just ~5-15 ms cheaper
+                            // per icon, repeatable across the activity's
+                            // entire lifetime once warmed.
+                            //
+                            // Same-index pairing is safe because the
+                            // {@code !changed} branch already verified
+                            // every {@code freshFinal[i].packageName ==
+                            // appList[i].packageName}. The graft is a
+                            // single volatile write per upgraded entry —
+                            // see {@link AppInfo#ri} for the visibility
+                            // rationale.
+                            for (int i = 0, n = appList.size(); i < n; i++) {
+                                AppInfo old = appList.get(i);
+                                if (old.ri == null) {
+                                    AppInfo upgrade = freshFinal.get(i);
+                                    if (upgrade != null && upgrade.ri != null) {
+                                        old.ri = upgrade.ri;
+                                    }
+                                }
                             }
-                            pendingScrollIdx = -1;
+                            if (pendingScrollIdx >= 0) {
+                                // App list unchanged but a pending index is waiting —
+                                // honour it. setApps wasn't called, so manually request focus.
+                                // Clamp against the shelf's currently-rendered size (not
+                                // appList.size()) — when hide-apps is filtering, the saved
+                                // index could exceed the visible list and requestFocusOnIndex
+                                // would otherwise interpret it as an out-of-bounds wrap.
+                                RecyclingShelfView s = shelf;
+                                if (s != null && !appList.isEmpty()) {
+                                    s.requestFocusOnIndex(Math.min(pendingScrollIdx, s.lastIndex()));
+                                }
+                                pendingScrollIdx = -1;
+                            }
                         }
                     } finally {
                         appsLoading.set(false);
                     }
                 });
             });
-        } catch (java.util.concurrent.RejectedExecutionException e) { appsLoading.set(false); }
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            // A4 fix: the executor refused this task — most likely because
+            // a package broadcast already had one queued in the bounded
+            // ArrayBlockingQueue(1) when {@link #onCreate}'s synchronous
+            // call landed. Pre-1.4.x just dropped the request and never
+            // reconciled, leaving the cache pre-paint's null-{@code ri}
+            // AppInfos in place for the rest of the session — every icon
+            // load took the slower PM-binder fallback. Schedule a retry
+            // 400 ms out (matches the package-broadcast debounce) so the
+            // executor has time to drain its existing task before we
+            // re-submit. Bounded by the {@code appsLoading} compareAndSet
+            // gate at the top of {@link #loadApps} so retries can't
+            // pile up.
+            appsLoading.set(false);
+            uiHandler.postDelayed(this::loadApps, 400);
+        }
+    }
+
+    /** Count of apps in {@code list} that survive the hidden-apps
+     *  filter. Equivalent to the size of the list
+     *  {@link #applyShelfApps} ultimately hands to
+     *  {@code RecyclingShelfView.setApps}. Pure scan, no allocation,
+     *  used by the reconcile to clamp {@code pendingScrollIdx} against
+     *  the displayed-list size before passing it to setApps (which
+     *  would otherwise clamp again to the same bound — but only after
+     *  silently throwing away the user's saved position). */
+    private int countVisible(List<AppInfo> list) {
+        if (list == null || list.isEmpty()) return 0;
+        if (hiddenApps.isEmpty()) return list.size();
+        int n = 0;
+        for (int i = 0, m = list.size(); i < m; i++) {
+            if (!hiddenApps.contains(list.get(i).packageName)) n++;
+        }
+        return n;
+    }
+
+    /** Rebuild the keymap card's PICKER / HIDE chip strips RIGHT NOW
+     *  if the user is currently inside one of them. Called from the
+     *  reconcile path so a package broadcast that lands while the
+     *  overlay is open can never leave the strip's chips and the
+     *  in-memory {@code appList} disagreeing about which chip
+     *  represents which package.
+     *
+     *  <p>The {@code keymapPickerBuiltSize} / {@code keymapHideBuiltSize}
+     *  caches are invalidated in the {@link #packageReceiver} so the
+     *  NEXT enter*() rebuilds; this forces an IMMEDIATE rebuild for
+     *  the case where the user is already inside. After the rebuild,
+     *  the {@code *BuiltSize} caches are updated to match so the next
+     *  enter*() short-circuits via the existing
+     *  refresh{Picker,Hide}ChipIcons fast-path.
+     *
+     *  <p>Selection is clamped to the new strip length — a chip that
+     *  previously sat past the new tail (because a package was
+     *  uninstalled) lands on the last surviving chip instead of an
+     *  out-of-range slot. */
+    private void rebuildOpenChipStripsAfterReconcile() {
+        FrameLayout ko = keymapOverlay;
+        if (ko == null || ko.getVisibility() != View.VISIBLE) return;
+        if (keymapMode == KEYMAP_MODE_PICKER) {
+            rebuildPickerChips();
+            keymapPickerBuiltSize = appList.size();
+            keymapPickerLastIdx   = -1;
+            android.widget.LinearLayout ps = keymapPickerStrip;
+            if (ps != null) {
+                int max = Math.max(0, ps.getChildCount() - 1);
+                if (keymapPickerIdx > max) keymapPickerIdx = max;
+                if (keymapPickerIdx < 0)   keymapPickerIdx = 0;
+            }
+            refreshKeymapPicker();
+        } else if (keymapMode == KEYMAP_MODE_HIDE) {
+            buildHideChips();
+            keymapHideBuiltSize = appList.size();
+            keymapHideLastIdx   = -1;
+            android.widget.LinearLayout hs = keymapHideStrip;
+            if (hs != null) {
+                int max = Math.max(0, hs.getChildCount() - 1);
+                if (keymapHideIdx > max) keymapHideIdx = max;
+                if (keymapHideIdx < 0)   keymapHideIdx = 0;
+            }
+            refreshHideStrip();
+        }
+        // SLOTS mode: the keymap card already calls refreshKeymapRows
+        // on every UP/DOWN press, and the stale-binding fallback in
+        // dispatchKeyEvent's "Mapped to an uninstalled package" path
+        // covers the rare press during a reconcile. No extra work
+        // needed here.
     }
 
     private List<AppInfo> queryApps() {
@@ -5365,9 +5590,10 @@ public class LauncherActivity extends Activity {
                     // Disk-first, then PM. See {@link #loadIconBlocking}
                     // for the full pipeline. This consolidated helper
                     // replaced the v1.4.0 initial draft's separate
-                    // {@code resolveIconDrawable + processIcon + writeAsync}
-                    // sequence so the same disk-fast-path runs for
-                    // every executor-thread icon load (preWarmIcon and
+                    // {@code resolveIconDrawable + IconRenderer.process +
+                    // writeAsync} sequence so the same disk-fast-path
+                    // runs for every executor-thread icon load
+                    // (preWarmIcon and
                     // loadIconAsync alike).
                     bmp = loadIconBlocking(app);
                     if (bmp != null) iconCache.put(key, bmp);
@@ -5452,15 +5678,6 @@ public class LauncherActivity extends Activity {
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
     }
 
-    /** Single-line entry point — the entire icon-bitmap pipeline lives in
-     *  {@link IconRenderer}. The wrapper exists so the activity's call sites
-     *  (preWarmIcon / loadIconAsync) keep their {@code processIcon(d)}
-     *  signature unchanged: dp(ICON_DP) is computed here so {@link IconRenderer}
-     *  itself stays Activity-free. */
-    private Bitmap processIcon(Drawable d) {
-        return IconRenderer.process(d, dp(ICON_DP));
-    }
-
     /**
      * Background-thread icon loader: try the on-disk cache first, then
      * fall through to the PackageManager + IconRenderer pipeline.
@@ -5476,9 +5693,9 @@ public class LauncherActivity extends Activity {
      *   <li>{@link IconDiskCache#tryRead} — synchronous WEBP decode of
      *       the cached file. ~2-5 ms on hit, 0 ms on miss.</li>
      *   <li>If miss: {@link #resolveIconDrawable} (PM binder +
-     *       drawable resolve) → {@link #processIcon}
-     *       ({@link IconRenderer#process}, AdaptiveIcon compositing /
-     *       circle clip / plate detection). ~30-50 ms.</li>
+     *       drawable resolve) → {@link IconRenderer#process}
+     *       (AdaptiveIcon compositing / circle clip / plate
+     *       detection). ~30-50 ms.</li>
      *   <li>On a fresh PM-resolved bitmap, mirror to disk via
      *       {@link IconDiskCache#writeAsync} so the next cold start
      *       hits the disk fast-path.</li>
@@ -5495,12 +5712,12 @@ public class LauncherActivity extends Activity {
         // once also guarantees the disk-read, the IconRenderer.process
         // output dimensions, AND the disk-write key all agree even if
         // density changes mid-call (HDMI swap, multi-window resize) —
-        // without the snapshot, processIcon's internal {@code dp(ICON_DP)}
-        // could produce a B-sized bitmap that we then store under an
-        // A-keyed filename, causing a future read at A to return a
-        // wrong-sized bitmap. We bypass the {@link #processIcon} wrapper
-        // and call {@link IconRenderer#process} with the captured size
-        // directly so every leg of this method shares one resolution.
+        // without the snapshot, an internal {@code dp(ICON_DP)}
+        // re-read could produce a B-sized bitmap that we then store
+        // under an A-keyed filename, causing a future read at A to
+        // return a wrong-sized bitmap. We call
+        // {@link IconRenderer#process} directly with the captured size
+        // so every leg of this method shares one resolution.
         final int iconPx = dp(ICON_DP);
         if (dc != null) {
             Bitmap fromDisk = dc.tryRead(app.packageName, iconPx);
