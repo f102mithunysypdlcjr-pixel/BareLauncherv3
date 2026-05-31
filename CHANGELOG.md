@@ -5,6 +5,142 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.4] — 2026-05-31
+
+Defensive guards for OOM and missing-service crashes on memory-
+constrained / stripped TV ROMs. Each fix is purely additive — zero
+behaviour change on the happy path, only fires when the underlying
+failure mode would otherwise crash a worker thread or the activity.
+
+### Fixed
+
+- **`getSystemService(ACTIVITY_SERVICE)` null guard with 64 MB
+  heap-class fallback.** {@link android.content.Context#getSystemService}
+  is documented to return `null` when the named service does not
+  exist. `ACTIVITY_SERVICE` is a core Android service that should
+  always be present, but stripped TV firmware (some Wear OS /
+  IoT-derived ROMs that have ended up running on cheap TV boxes)
+  have been observed missing it. Without the guard the launcher
+  NPEs inside `initCaches` during `onCreate` and dies on launch —
+  user gets a black home screen with no recovery short of factory
+  reset.
+- **`WallpaperController.loadSystem` catches `OutOfMemoryError`.**
+  Pre-1.4.4 the catch was `catch (Exception ignored)` which doesn't
+  include `Error` subclasses. `wpDrawable` allocates a screen-sized
+  ARGB_8888 bitmap (8 MB at 1080p, 32 MB at 4K) which can OOM on
+  memory-constrained TV boxes (1 GB-RAM Fire TV stick variants,
+  older Mi Box models). Without the OOM catch the throwable
+  propagates out of the wallpaper executor task, kills the worker
+  thread, and the wallpaper never appears for the rest of the
+  session.
+- **`WallpaperController.writeSnapshotBestEffort` catches `OOM`.**
+  `Bitmap.compress` on a 1080p ARGB source needs ~10–20 MB of
+  transient encoder workspace. On low-memory TV boxes under
+  post-decode peak heap pressure, this OOMs. The pre-1.4.4 catch
+  only caught `IOException`, so OOM propagated and crashed the
+  wallpaper executor thread.
+- **`IconDiskCache.writeSync` catches `OOM`.** Same shape as
+  above for the per-icon disk-cache writes during the cold-start
+  icon flood.
+
+## [1.4.3] — 2026-05-31
+
+Skip background CPU work when the activity is paused, plus three
+small consistency cleanups. Real-world impact is the most modest of
+the post-1.4.0 audit series — a few dozen ms of CPU per background
+package update saved on memory-constrained ROMs, plus tighter state
+machine in the package-broadcast / loadApps interaction.
+
+### Fixed
+
+- **Package broadcast no longer schedules a reconcile while the
+  activity is paused.** Pre-1.4.3 the receiver always scheduled a
+  400 ms-delayed `loadApps` reconcile, burning ~50–250 ms of CPU
+  on a background PM scan + cell rebuild that no human was looking
+  at. The pending looper message also kept the launcher process
+  alive past the broadcast, bumping memory pressure on the system's
+  process LRU. New `uiPaused` field (set in `onPause`, cleared in
+  `onResume`) makes the receiver skip the post while paused. The
+  existing `pkgChangedWhilePaused` flag still triggers the same
+  reconcile in `onResume` so no broadcast is missed.
+- **`pkgReloadRunnable` clears `pkgChangedWhilePaused` at start.**
+  Pre-1.4.3 the runnable was a bare `this::loadApps` method-
+  reference; a successful in-foreground reconcile left the flag at
+  `true`, causing the next `onResume` to fire `loadApps` redundantly
+  (short-circuited by `appsLoading.compareAndSet`, but still the
+  cost of allocating the method-reference and walking the entry
+  path). Cleaner state machine, no observable change beyond the
+  redundant call eliminated.
+
+### Cleaned up
+
+- Reused `pkgReloadRunnable` for the trim-memory and
+  rejected-execution retry posts. Pre-1.4.3 each used a fresh
+  `this::loadApps` method-reference; they now share the cached
+  Runnable instance. Side benefit: a future
+  `uiHandler.removeCallbacks(pkgReloadRunnable)` call cancels any
+  of the three deferred-`loadApps` paths.
+- Deleted the unused legacy `shutdown(ExecutorService)` helper
+  retained from 1.4.1 with `@SuppressWarnings("unused")`. The
+  parallel-shutdown path in `onDestroy` has been stable across
+  two release cycles; the legacy helper had no callers.
+
+## [1.4.2] — 2026-05-31
+
+Hot-path performance audit — five real bottlenecks fixed. APK
+*shrank* (96.1 KB → 95.7 KB) because removing the buffer-copy and
+intermediate-bitmap-scale paths deletes more code than the new
+direct paths add.
+
+### Fixed
+
+- **`IconRenderer.needsFill` replaced 290 KB pixel-buffer copy with
+  12 `getPixel` calls.** The white-plate detection heuristic samples
+  12 alpha values to decide whether an icon needs a plate. The
+  pre-1.4.2 implementation copied the *entire* bitmap (~290 KB at
+  xxxhdpi) into a per-worker thread-local byte buffer just to read
+  those 12 bytes — a ~25 000× amplification. Per-icon cost dropped
+  from ~30 µs memcpy to ~1.2 µs (12 × ~100 ns JNI). Per-worker
+  held memory: ~290 KB ThreadLocal → 0. Pool-wide: 3-4 workers ×
+  290 KB ≈ 870 KB – 1.2 MB of held memory eliminated.
+- **`IconRenderer.renderDrawable` non-`BitmapDrawable` path skips
+  the intermediate intrinsic-size bitmap.** For non-`BitmapDrawable`
+  / non-`AdaptiveIconDrawable` drawables, the old path allocated an
+  intrinsic-size bitmap, drew the drawable into it, then matrix-
+  scaled into a target-size bitmap. Every standard Android
+  `Drawable` subclass honours `setBounds` correctly, so the new
+  code draws directly at `sz × sz`. Saves ~290 KB transient
+  ARGB_8888 allocation per such icon at xxxhdpi. `BitmapDrawable`
+  keeps its existing matrix fast-path; `AdaptiveIconDrawable` is
+  handled by the caller.
+- **`iconExecutor` pool sizing raised from `cores − 1` to `cores`.**
+  Pre-1.4.2 used `Math.max(2, cores − 1)` core threads with
+  `max = cores`. On a 4-core TV that's 3 workers running cold-start
+  icon decode in parallel; bumping to `cores = 4` gives a ~25 %
+  wall-clock reduction (~333 ms → ~250 ms on a 50-app cold start).
+  The "cores − 1" tuning assumed leaving a core free for the UI
+  thread, but Android's CFS scheduler rotates threads at sub-ms
+  granularity and the foreground UI thread's priority class gets its
+  fair share regardless. The `Math.max(2, cores)` floor also
+  defensively avoids the latent `IllegalArgumentException` that
+  `core=2 > max=1` would have triggered on a hypothetical 1-core
+  device (Android always reports ≥ 2 logical cores in practice, but
+  the contract is now safe by construction).
+- **`positionRing` caches root location across calls.** The
+  activity's root view doesn't move on screen for the lifetime of a
+  TV launcher (no multi-window, no window position changes).
+  Caching `root.getLocationOnScreen()` eliminates one full
+  view-tree walk (~5 matrix multiplications + 5 offset
+  accumulations) per `positionRing` call. At 60 Hz × 150 ms focus
+  animation = ~9 view-tree walks saved per focus event.
+  Invalidated on `onConfigurationChanged` for HDMI swaps / font
+  scale / multi-window. UI-thread only, no synchronisation.
+- **`AppListCache.readFile` uses `Files.readAllBytes` single-shot.**
+  Replaces the `BufferedReader` + `InputStreamReader` +
+  `StringBuilder` loop with one syscall + one alloc. Faster
+  cold-start cache pre-paint. API 26+ available since our minSdk
+  floor.
+
 ## [1.4.1] — 2026-05-31
 
 Post-1.4.0 audit pass — two PR cycles of correctness, robustness, and

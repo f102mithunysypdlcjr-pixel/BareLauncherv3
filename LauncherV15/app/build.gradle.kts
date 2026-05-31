@@ -81,6 +81,90 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 19 → 22: 1.4.4 ships three waves of post-1.4.1 audit
+        // fixes. Each was a separate merged PR; they're collapsed into a
+        // single versionCode bump because the intermediate states never
+        // shipped to users.
+        //
+        // 1.4.2 (PR #61, hot-path perf — versionCode 20 conceptually):
+        //   • IconRenderer.needsFill replaced the 290 KB
+        //     Bitmap.copyPixelsToBuffer with 12 direct getPixel calls.
+        //     ~25× faster per icon (12 × ~100 ns JNI vs ~30 µs memcpy)
+        //     AND eliminated the per-worker ~290 KB ThreadLocal byte
+        //     buffer (workers × 290 KB = ~870 KB – 1.2 MB of held
+        //     memory across the icon-executor pool, gone).
+        //   • IconRenderer.renderDrawable non-BitmapDrawable path
+        //     collapsed from 2 transient bitmaps to 1 by drawing
+        //     directly at target size via setBounds. Saves ~290 KB
+        //     transient ARGB_8888 allocation per such icon at xxxhdpi.
+        //   • iconExecutor pool sizing raised from
+        //     Math.max(2, cores − 1) to Math.max(2, cores). On a
+        //     4-core TV this is a ~25 % wall-clock reduction in
+        //     cold-start icon flood (333 ms → 250 ms). Also
+        //     defensively avoids the latent IllegalArgumentException
+        //     that core=2 > max=1 would have triggered on a
+        //     hypothetical 1-core device.
+        //   • positionRing caches the activity root's screen location
+        //     across calls. Saves one full View.getLocationOnScreen
+        //     walk per call — at 60 Hz × 150 ms focus animation that's
+        //     ~9 view-tree walks per focus event. Invalidated on
+        //     onConfigurationChanged.
+        //   • AppListCache.readFile uses Files.readAllBytes single-shot
+        //     instead of the BufferedReader + char[] + StringBuilder
+        //     loop. Faster cold-start cache pre-paint, fewer transient
+        //     allocations.
+        //
+        // 1.4.3 (PR #62, paused-CPU savings — versionCode 21 conceptually):
+        //   • Package broadcast receiver no longer schedules the
+        //     400 ms-delayed loadApps reconcile while the activity is
+        //     paused. New uiPaused field tracks pause state; the
+        //     existing pkgChangedWhilePaused flag still triggers a
+        //     reconcile in onResume so no broadcast is missed — the
+        //     work is just deferred to when the user is actually
+        //     looking. Saves ~50–250 ms of CPU per background package
+        //     update + reduces process-LRU pressure (the pending
+        //     looper message no longer pins the activity past the
+        //     broadcast).
+        //   • pkgReloadRunnable clears pkgChangedWhilePaused at the
+        //     start so a successful in-foreground reconcile leaves the
+        //     flag in the right state for the next pause/resume cycle.
+        //     Eliminates a redundant onResume reload.
+        //   • pkgReloadRunnable reused for the trim-memory and
+        //     rejected-execution retry posts (was a fresh
+        //     {@code this::loadApps} method-reference allocation per
+        //     call). All three deferred-loadApps paths now share one
+        //     cancellable Runnable.
+        //   • Deleted the unused legacy
+        //     {@code shutdown(ExecutorService)} helper retained from
+        //     1.4.1 with @SuppressWarnings("unused").
+        //
+        // 1.4.4 (PR #65, defensive guards — versionCode 22):
+        //   • getSystemService(ACTIVITY_SERVICE) null guard with a
+        //     64 MB heap-class fallback. Stripped TV firmware (some
+        //     Wear OS / IoT-derived ROMs that ended up running on
+        //     cheap TV boxes) have been observed missing the service;
+        //     without the guard the launcher NPEs in initCaches and
+        //     dies on launch, leaving the user with a black home
+        //     screen and no recovery short of factory reset.
+        //   • WallpaperController.loadSystem catches OutOfMemoryError.
+        //     wpDrawable allocates a screen-sized ARGB_8888 bitmap
+        //     (8 MB at 1080p, 32 MB at 4K) which can OOM on
+        //     memory-constrained TV boxes. Without the catch, the OOM
+        //     propagates, kills the wallpaper executor thread, and the
+        //     wallpaper never appears for the rest of the session.
+        //   • WallpaperController.writeSnapshotBestEffort catches OOM.
+        //     Bitmap.compress on a 1080p ARGB source needs ~10–20 MB
+        //     of transient encoder workspace; can OOM under
+        //     post-decode peak heap pressure on the same boxes.
+        //   • IconDiskCache.writeSync catches OOM. Same shape as
+        //     above for the per-icon disk-cache writes during the
+        //     cold-start icon flood.
+        //
+        // SemVer PATCH bumps throughout — bug fixes, performance
+        // improvements, and defensive hardening only. No new features,
+        // no API changes, no resource changes. Release APK 95.7 KB →
+        // 95.8 KB across the three releases (essentially unchanged).
+        //
         // Bumped 18 → 19: 1.4.1 ships two PR cycles' worth of post-1.4.0
         // audit corrections.
         //
@@ -274,8 +358,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 19
-        versionName   = "1.4.1"
+        versionCode   = 22
+        versionName   = "1.4.4"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
