@@ -301,6 +301,26 @@ public class LauncherActivity extends Activity {
     private final ArrayList<AppInfo> visibleScratch = new ArrayList<>();
 
     private boolean pkgChangedWhilePaused = false;
+    /** True between {@link #onPause} and {@link #onResume}. Read by the
+     *  package broadcast receiver to decide whether to schedule a
+     *  background {@link #loadApps} reconcile or just set
+     *  {@link #pkgChangedWhilePaused} and let the next {@code onResume}
+     *  fire it.
+     *
+     *  <p>Pre-1.4.3 the receiver always scheduled the post even while
+     *  the user was in another app, burning ~50–250 ms of CPU on a
+     *  background PM scan + cell rebuild that no human was looking at.
+     *  Each scheduled post also kept the launcher process alive past
+     *  the broadcast (the looper's pending message holds a strong
+     *  reference to the activity), bumping memory pressure on the OS's
+     *  LRU eviction order. Skipping the schedule while paused defers
+     *  the same work to {@code onResume}, where the user is actually
+     *  looking and the latency is amortised against the resume
+     *  animation. The {@code pkgChangedWhilePaused} flag still
+     *  triggers the resume-time reconcile so no broadcast is missed.
+     *
+     *  <p>UI-thread only — no synchronisation needed. */
+    private boolean uiPaused = false;
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
@@ -335,7 +355,32 @@ public class LauncherActivity extends Activity {
     private final int[]    anchorRootLoc    = new int[2];
     private       int      ringLayoutSize   = 0;  // full RingView box size (large enough at 1.12x focus scale)
     private       float    cachedIcyOffset  = 0f;
-    private final Runnable pkgReloadRunnable = this::loadApps;
+    /** Runnable that performs the deferred package-broadcast reconcile.
+     *
+     *  <p>Pre-1.4.3 was a bare {@code this::loadApps} method-reference.
+     *  v1.4.3 broadens the body to clear {@link #pkgChangedWhilePaused}
+     *  before delegating, so a successful in-foreground reconcile
+     *  doesn't leave the flag at {@code true} for the NEXT
+     *  {@code onResume} to trip and re-fire {@link #loadApps}
+     *  redundantly. The {@link #appsLoading} {@code compareAndSet}
+     *  guard would short-circuit the redundant call, but the
+     *  short-circuit still allocates the method-reference and walks
+     *  the entry path — clearing the flag here is the cleaner fix.
+     *
+     *  <p>Reused for the {@link #onTrimMemory} 1 s deferred reload
+     *  and the {@code RejectedExecutionException} retry path (see
+     *  {@link #loadApps}'s catch). Both eventually call
+     *  {@link #loadApps}; clearing the flag preemptively is the
+     *  correct behaviour for both because they reconcile the in-memory
+     *  state with PM regardless of the user's pause / resume cycle.
+     *
+     *  <p>Held as a single instance so callers can {@code postDelayed}
+     *  / {@code removeCallbacks} the same Runnable across multiple
+     *  paths without each re-allocating a method-reference. */
+    private final Runnable pkgReloadRunnable = () -> {
+        pkgChangedWhilePaused = false;
+        loadApps();
+    };
 
     private FrameLayout        menuOverlay   = null;
     private       TextView    menuUninstall = null;
@@ -640,9 +685,27 @@ public class LauncherActivity extends Activity {
             // package install / remove / replace. Same applies to the
             // hide-manager toggle rows. Slot rows must be re-measured
             // because a relabelled package can change the equalised width.
+            // These invalidations run regardless of pause state because
+            // the next overlay open (whenever it happens) needs them.
             keymapPickerBuiltSize = -1;
             keymapHideBuiltSize   = -1;
             keymapRowsNeedEqualize = true;
+            // v1.4.3 audit: skip the deferred reconcile while the
+            // activity is paused. The {@link #pkgChangedWhilePaused}
+            // flag set above triggers the same reconcile in the next
+            // {@link #onResume}, so no broadcast is missed — but doing
+            // the work now (while no human is looking) costs ~50–250 ms
+            // of CPU per broadcast and pins the launcher process in
+            // memory past the broadcast (the looper's pending message
+            // holds a strong reference to the activity). On a TV ROM
+            // that processes 5–10 background package updates per day,
+            // this is several seconds of avoidable CPU + several MB of
+            // avoidable memory pressure on the system's process LRU.
+            // The trade-off is that the user-visible reconcile happens
+            // on resume instead of pre-resume; the latency is amortised
+            // against the resume animation and bounded by the existing
+            // {@code appsLoading} guard.
+            if (uiPaused) return;
             RecyclingShelfView s = shelf;
             if (s == null) return;
             s.removeCallbacks(pkgReloadRunnable);
@@ -781,6 +844,12 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // Mark resumed BEFORE any of the receiver-touching helpers below
+        // so a package broadcast that fires during the resume transition
+        // sees us as resumed and schedules its reconcile normally instead
+        // of falling into the paused-skip path. See {@link #uiPaused}
+        // for the full rationale.
+        uiPaused = false;
         hideSystemUI();
         startClock();
         registerTimeReceiver();
@@ -836,6 +905,12 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        // Mark paused FIRST so a package broadcast that fires during the
+        // pause transition takes the paused-skip path. The order pairs
+        // with {@link #onResume}'s "set false first" so the receiver
+        // never observes a stale value during a tight resume / pause
+        // race. See {@link #uiPaused} for the full rationale.
+        uiPaused = true;
         stopClock();
         unregisterTimeReceiver();
         FrameLayout r = root;
@@ -958,22 +1033,6 @@ public class LauncherActivity extends Activity {
         return ns <= 0 ? 0 : TimeUnit.NANOSECONDS.toMillis(ns);
     }
 
-    /** Legacy package-private helper retained for binary-compat with any
-     *  future caller; unused inside the current activity (the parallel
-     *  shared-deadline path in {@link #onDestroy} replaced it). Marked
-     *  {@code @SuppressWarnings("unused")} so lint's UnusedMethod check
-     *  doesn't flag the deliberate retention. Drop it later once the
-     *  refactor is verified across more device targets. */
-    @SuppressWarnings("unused")
-    private void shutdown(ExecutorService ex) {
-        if (ex == null) return;
-        ex.shutdown();
-        try { ex.awaitTermination(300, TimeUnit.MILLISECONDS); }
-        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        finally { ex.shutdownNow(); }
-    }
-
-
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
@@ -990,7 +1049,14 @@ public class LauncherActivity extends Activity {
             // stale AppInfo whose backing identity the user just trimmed.
             // The next loadApps() (1 s post) repopulates both atomically.
             appByPackage.clear();
-            uiHandler.postDelayed(this::loadApps, 1000);
+            // Reuse the cached {@link #pkgReloadRunnable} instead of a
+            // fresh {@code this::loadApps} method-reference. Same effect
+            // (clears the changed-while-paused flag and runs loadApps),
+            // saves one Runnable allocation, and lets a future
+            // {@code uiHandler.removeCallbacks(pkgReloadRunnable)} call
+            // cancel this delayed reload alongside any pending receiver
+            // post.
+            uiHandler.postDelayed(pkgReloadRunnable, 1000);
         }
         // MODERATE / BACKGROUND: trim the in-memory bitmap cache only.
         // The {@code iconInflight} map is intentionally left untouched —
@@ -3178,7 +3244,12 @@ public class LauncherActivity extends Activity {
             // gate at the top of {@link #loadApps} so retries can't
             // pile up.
             appsLoading.set(false);
-            uiHandler.postDelayed(this::loadApps, 400);
+            // Reuse the cached {@link #pkgReloadRunnable}. Same effect
+            // as a fresh {@code this::loadApps} method-reference, plus
+            // matches the {@code postDelayed} pattern used by the
+            // package-broadcast and trim-memory paths so all three
+            // deferred reloads share one cancellable Runnable.
+            uiHandler.postDelayed(pkgReloadRunnable, 400);
         }
     }
 
