@@ -2859,6 +2859,15 @@ public class LauncherActivity extends Activity {
                         // with the actually-installed packages without a
                         // separate scheduling step.
                         pruneHiddenApps(freshFinal);
+                        // Mirror prune for the remote-key shortcut
+                        // map so an uninstalled-app binding is dropped
+                        // automatically (the keymap settings slot row
+                        // shows "Not assigned" instead of a stale raw
+                        // package name). The dispatchKeyEvent fallback
+                        // still handles the rare race where this
+                        // reconcile hasn't run yet by the time the user
+                        // presses the dead-binding key.
+                        pruneKeyMap(freshFinal);
                         boolean changed = freshFinal.size() != appList.size();
                         if (!changed) {
                             for (int i = 0; i < freshFinal.size(); i++) {
@@ -3157,6 +3166,44 @@ public class LauncherActivity extends Activity {
      *  via a single ArraySet pass over fresh package names; the prior
      *  nested loop was O(N · M) and quadratic when many apps were
      *  hidden — fine in practice but trivially fixed. */
+    /** Mirror of {@link #pruneHiddenApps} for the remote-key shortcut
+     *  map. Uninstalled-package bindings persist in {@link #keyMap}
+     *  until the user actually presses the bound key — at which point
+     *  {@link #dispatchKeyEvent}'s "Mapped to an uninstalled package"
+     *  branch cleans up lazily. The lazy cleanup works for the press
+     *  path, but it leaves the keymap settings UI showing the raw
+     *  package name on the slot row (instead of "Not assigned") for
+     *  every binding pointing at an uninstalled app.
+     *
+     *  <p>Eager cleanup on every {@link #loadApps()} reconcile keeps
+     *  the slot list visually correct without user action. Iterates
+     *  the SparseArray in reverse so the {@code removeAt} indices
+     *  stay valid; calls {@link #saveKeyMap()} at most once per
+     *  reconcile no matter how many entries dropped.
+     *
+     *  <p>Cheap on warm runs: {@link #SHORTCUT_KEYCODES} caps the
+     *  binding count at 6, so the inner ArraySet contains() check
+     *  runs at most 6 times. The fresh-set construction is shared
+     *  with {@link #pruneHiddenApps} when the caller batches them
+     *  back-to-back; each helper builds its own to keep the call
+     *  surface decoupled — the cost is one extra ArraySet of
+     *  {@code freshFinal.size()} entries per reconcile, well below
+     *  GC noise. */
+    private void pruneKeyMap(List<AppInfo> fresh) {
+        if (keyMap.size() == 0) return;
+        ArraySet<String> installed = new ArraySet<>(fresh.size());
+        for (int j = 0, m = fresh.size(); j < m; j++) installed.add(fresh.get(j).packageName);
+        boolean changed = false;
+        for (int i = keyMap.size() - 1; i >= 0; i--) {
+            String pkg = keyMap.valueAt(i);
+            if (pkg == null || !installed.contains(pkg)) {
+                keyMap.removeAt(i);
+                changed = true;
+            }
+        }
+        if (changed) saveKeyMap();
+    }
+
     private void pruneHiddenApps(List<AppInfo> fresh) {
         if (hiddenApps.isEmpty()) return;
         ArraySet<String> installed = new ArraySet<>(fresh.size());
@@ -4317,14 +4364,34 @@ public class LauncherActivity extends Activity {
 
             if (pkg == null) {
                 val.setText(R.string.keymap_not_assigned);
+                // Truly unassigned: no icon column at all. GONE collapses
+                // the slot so the val text sits at the natural left
+                // position. (Different from the assigned-but-bitmap-not-
+                // loaded case below, which reserves the slot via
+                // INVISIBLE so the val never shifts when the bitmap
+                // eventually arrives.)
                 icon.setVisibility(View.GONE);
                 icon.setImageDrawable(null);
             } else {
                 AppInfo a = findAppByPackage(pkg);
                 val.setText(a != null ? a.label : pkg);
                 Bitmap bmp = (iconCache != null) ? iconCache.get(pkg) : null;
-                if (bmp != null) { icon.setImageBitmap(bmp); icon.setVisibility(View.VISIBLE); }
-                else             { icon.setImageDrawable(null); icon.setVisibility(View.GONE); }
+                if (bmp != null) {
+                    icon.setImageBitmap(bmp);
+                    icon.setVisibility(View.VISIBLE);
+                } else {
+                    // Bitmap not in iconCache yet — the icon is being
+                    // loaded asynchronously and {@link #onIconLoaded}
+                    // will fire {@link #refreshKeymapRows} when the
+                    // bitmap lands. Keep the icon slot at INVISIBLE
+                    // (reserves layout space, doesn't draw) so the val
+                    // text does NOT shift between "loading" and
+                    // "loaded" states. Without this, the val text
+                    // moved sideways every time an async icon arrived
+                    // — a visible jiggle inside the keymap card.
+                    icon.setImageDrawable(null);
+                    icon.setVisibility(View.INVISIBLE);
+                }
             }
 
             // Apple-TV inversion: selected row becomes a bright plate with
@@ -4622,12 +4689,17 @@ public class LauncherActivity extends Activity {
         bg.setCornerRadius(dp(10));
         chip.setBackground(bg);
 
-        // Icon slot: present for app chips (even if the bitmap isn't cached
-        // yet, keeping a hidden ImageView keeps chip widths consistent).
+        // Icon slot: present for app chips. Cache miss at build time
+        // uses INVISIBLE (reserves layout space, doesn't draw) so a
+        // later icon delivery via {@link #setChipIcon} flips visibility
+        // VISIBLE without changing the chip's measured width. See the
+        // {@link #addHideChip} javadoc for the visual rationale — the
+        // GONE → VISIBLE alternative made chips visibly resize on
+        // every async icon load and shifted neighbours along the strip.
         if (!isNone) {
             ImageView iv = new ImageView(this);
             if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
-            else              { iv.setVisibility(View.GONE); }
+            else              { iv.setVisibility(View.INVISIBLE); }
             android.widget.LinearLayout.LayoutParams ivLp =
                     new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
             ivLp.setMarginEnd(dp(7));
@@ -4995,11 +5067,19 @@ public class LauncherActivity extends Activity {
         bg.setCornerRadius(dp(10));
         chip.setBackground(bg);
 
-        // Icon slot — always present so chip widths stay consistent
-        // whether or not the bitmap has been cached yet.
+        // Icon slot — always present so chip widths stay constant
+        // regardless of icon-load timing. Cache miss at build time uses
+        // INVISIBLE (reserves space, doesn't draw) so a later icon
+        // delivery via {@link #setChipIcon} only changes drawing, never
+        // the chip's measured width. The earlier GONE design dropped
+        // the slot from layout entirely, so chips visibly "popped"
+        // wider as their icons landed asynchronously — every chip to
+        // the right of the just-loaded one shifted, producing a
+        // janky cascade for the first 50-200 ms after the overlay
+        // opened with un-warmed icons.
         ImageView iv = new ImageView(this);
         if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
-        else              { iv.setVisibility(View.GONE); }
+        else              { iv.setVisibility(View.INVISIBLE); }
         android.widget.LinearLayout.LayoutParams ivLp =
                 new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
         ivLp.setMarginEnd(dp(7));
