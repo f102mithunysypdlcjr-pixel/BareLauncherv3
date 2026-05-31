@@ -5329,13 +5329,21 @@ public class LauncherActivity extends Activity {
     private Bitmap loadIconBlocking(AppInfo app) {
         if (app == null) return null;
         IconDiskCache dc = iconDiskCache;
+        // Snapshot the current target pixel size up front. {@link #density}
+        // is volatile so the read is coherent on every CPU; capturing once
+        // also guarantees the disk-read and disk-write below operate on
+        // the same key even in the (extremely rare) case where the
+        // density changes mid-call (HDMI swap, multi-window resize) —
+        // without the capture, a write at the new size could land in a
+        // file the read at the old size never looks for.
+        final int iconPx = dp(ICON_DP);
         if (dc != null) {
-            Bitmap fromDisk = dc.tryRead(app.packageName);
+            Bitmap fromDisk = dc.tryRead(app.packageName, iconPx);
             if (fromDisk != null) return fromDisk;
         }
         Drawable d = resolveIconDrawable(app);
         Bitmap fresh = processIcon(d);
-        if (fresh != null && dc != null) dc.writeAsync(app.packageName, fresh);
+        if (fresh != null && dc != null) dc.writeAsync(app.packageName, iconPx, fresh);
         return fresh;
     }
 

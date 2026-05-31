@@ -47,16 +47,6 @@
 # irrelevant at runtime; the cost is a few bytes of metadata.
 -keepattributes *Annotation*
 
-# Strip verbose / debug / info logging in release builds. Warning and
-# error logs ARE preserved — those signals matter in production.
-# {@code CrashLogger} writes {@code Log.e} for uncaught exceptions; that
-# path is intentionally not stripped.
--assumenosideeffects class android.util.Log {
-    public static int v(...);
-    public static int d(...);
-    public static int i(...);
-}
-
 # ── Targeted -dontwarn: missing-class noise that the platform handles ─
 # Each entry has a one-line justification so future maintainers know
 # whether it can be removed. Anything NOT listed here will surface as a
