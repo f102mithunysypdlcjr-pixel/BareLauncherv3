@@ -31,7 +31,7 @@ on:
 # between gradle invocations.
 env:
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
-  GRADLE_VERSION: "8.14.1"
+  GRADLE_VERSION: "8.14.5"
 
 jobs:
   # ──────────────────────────────────────────────────────────────────

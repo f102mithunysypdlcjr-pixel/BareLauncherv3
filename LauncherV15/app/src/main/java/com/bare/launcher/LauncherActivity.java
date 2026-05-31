@@ -288,6 +288,18 @@ public class LauncherActivity extends Activity {
      *  {@link #appList}, so the two never diverge mid-frame. */
     private final ArrayMap<String, AppInfo> appByPackage = new ArrayMap<>();
 
+    /** Reusable scratch list for the filtered "visible" view of
+     *  {@link #appList} that {@link #applyShelfApps} hands to the
+     *  shelf when {@link #hiddenApps} is non-empty. Cleared and
+     *  refilled in place on every invocation; the shelf's
+     *  {@code setApps} snapshots into its own {@code displayed}
+     *  list, so this scratch never leaks references across UI
+     *  events. Eliminates one ~50-element ArrayList allocation per
+     *  package broadcast / hide-toggle / loadApps reconcile when
+     *  the user has any hidden apps configured. UI thread only —
+     *  no synchronisation needed. */
+    private final ArrayList<AppInfo> visibleScratch = new ArrayList<>();
+
     private boolean pkgChangedWhilePaused = false;
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
@@ -3511,7 +3523,17 @@ public class LauncherActivity extends Activity {
     private void applyShelfApps(RecyclingShelfView s) {
         if (s == null) return;
         if (hiddenApps.isEmpty()) { s.setApps(appList); return; }
-        List<AppInfo> visible = new ArrayList<>(appList.size());
+        // Reuse the instance-level scratch list. setApps copies into its
+        // own {@code displayed} list, so we never leak references across
+        // UI events. Saves one ArrayList allocation per call — fires on
+        // every package broadcast and every hide-manager toggle commit
+        // when the user has any hidden apps configured.
+        ArrayList<AppInfo> visible = visibleScratch;
+        visible.clear();
+        // Pre-grow the backing array so the {@code add} loop below
+        // doesn't trigger intermediate Object[] growth on the first
+        // call (or after a large appList expansion across cold starts).
+        visible.ensureCapacity(appList.size());
         for (int i = 0, n = appList.size(); i < n; i++) {
             AppInfo a = appList.get(i);
             if (!hiddenApps.contains(a.packageName)) {
@@ -4756,18 +4778,30 @@ public class LauncherActivity extends Activity {
      *  column — the {@code instanceof LinearLayout} check is kept as a
      *  defensive guard against future structural drift. Called from
      *  refreshKeymapRows() after every binding/text change so the menu
-     *  auto-fits the longest app label. */
+     *  auto-fits the longest app label.
+     *
+     *  <p>v1.4.1 audit: dropped the per-row "restore prevW between
+     *  measure and final-set" pass. The intermediate width does not
+     *  affect the final result — every row is unconditionally re-snapped
+     *  to {@code max} below — so restoring it just to overwrite it on
+     *  the next pass was one wasted {@code setLayoutParams} call (and
+     *  the {@code requestLayout} cascade it triggers) per row. With
+     *  6 rows that's 6 cascades saved per re-equalize. Functional
+     *  output unchanged. */
     private void equalizeKeymapRowWidths(android.widget.LinearLayout col, int rows) {
         int spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
         int n = col.getChildCount();
         int max = 0;
+        // Pass 1: force every row to WRAP_CONTENT (so {@code measure()}
+        // reports the natural intrinsic width, not the previous
+        // {@code max}-snapped width), then measure. We DO NOT restore
+        // here — pass 2 below sets every row to the new {@code max}
+        // unconditionally, so the WRAP_CONTENT state is transient by
+        // construction.
         for (int i = 0; i < n; i++) {
             View child = col.getChildAt(i);
             if (!(child instanceof android.widget.LinearLayout)) continue;
-            // Force measurement against current content. We pass UNSPECIFIED
-            // on width so each row reports its natural intrinsic width.
             ViewGroup.LayoutParams clp = child.getLayoutParams();
-            int prevW = clp != null ? clp.width : ViewGroup.LayoutParams.WRAP_CONTENT;
             if (clp != null && clp.width != ViewGroup.LayoutParams.WRAP_CONTENT) {
                 clp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
                 child.setLayoutParams(clp);
@@ -4775,12 +4809,10 @@ public class LauncherActivity extends Activity {
             child.measure(spec, spec);
             int w = child.getMeasuredWidth();
             if (w > max) max = w;
-            if (clp != null && prevW != ViewGroup.LayoutParams.WRAP_CONTENT) {
-                clp.width = prevW;
-                child.setLayoutParams(clp);
-            }
         }
         if (max <= 0) return;
+        // Pass 2: snap every row whose width differs from the new max.
+        // Same as before; only the in-between restore pass was redundant.
         for (int i = 0; i < n; i++) {
             View child = col.getChildAt(i);
             if (!(child instanceof android.widget.LinearLayout)) continue;
