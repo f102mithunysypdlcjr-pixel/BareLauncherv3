@@ -165,6 +165,19 @@ public class LauncherActivity extends Activity {
     private final AtomicBoolean appsLoading     = new AtomicBoolean(false);
 
     private PackageManager      pm;
+    /** Single shared {@link android.content.SharedPreferences} handle.
+     *  Android's {@link Context#getSharedPreferences} caches by name
+     *  internally, so every repeated call returns the same instance —
+     *  but the call still walks a HashMap inside Context. Caching the
+     *  reference once at startup eliminates ~12 redundant lookups
+     *  scattered through onCreate / onResume / onPause / loadKeyMap /
+     *  loadHiddenApps / saveOrder / saveKeyMap / saveHiddenApps /
+     *  applyStoredOrder / showSettingsPanel toggle / initCaches. Each
+     *  hit is sub-microsecond; the cumulative saving is below GC
+     *  noise but the field also makes the prefs dependency explicit
+     *  at the activity level (every helper now reads {@code prefs}
+     *  rather than re-resolving a string-keyed lookup). */
+    private android.content.SharedPreferences prefs;
 
     private RecyclingShelfView shelf;
     // Wallpaper rendering uses two stacked ImageViews. wallpaperFront is on
@@ -594,7 +607,7 @@ public class LauncherActivity extends Activity {
     };
 
     private void applyStoredOrder(List<AppInfo> apps) {
-        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_APP_ORDER, null);
+        String raw = prefs.getString(KEY_APP_ORDER, null);
         Map<String, Integer> rank = AppOrder.parse(raw);
         if (rank.isEmpty()) return;
         Collections.sort(apps, (a, b) -> {
@@ -615,7 +628,7 @@ public class LauncherActivity extends Activity {
         if (appList.isEmpty()) return;
         ArrayList<String> pkgs = new ArrayList<>(appList.size());
         for (int i = 0; i < appList.size(); i++) pkgs.add(appList.get(i).packageName);
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+        prefs.edit()
                 .putString(KEY_APP_ORDER, AppOrder.serialize(pkgs)).apply();
         // Mirror the order into the AppListCache so the next cold start
         // renders the shelf in the user's just-saved arrangement instead
@@ -730,7 +743,7 @@ public class LauncherActivity extends Activity {
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         RecyclingShelfView s = shelf;
         if (s != null) {
-            int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_SCROLL_IDX, 0);
+            int saved = prefs.getInt(KEY_SCROLL_IDX, 0);
             if (!appList.isEmpty()) {
                 // Clamp against the shelf's currently-displayed size so a
                 // saved index that points past the end of the filtered
@@ -789,7 +802,7 @@ public class LauncherActivity extends Activity {
         RecyclingShelfView s = shelf;
         if (s != null) {
             if (s.reorderMode) s.exitReorderMode(false);
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_SCROLL_IDX, s.focusedIndex).apply();
+            prefs.edit().putInt(KEY_SCROLL_IDX, s.focusedIndex).apply();
             if (focusRestoreListener != null) {
                 ViewTreeObserver vto = s.getViewTreeObserver();
                 if (vto.isAlive()) vto.removeOnGlobalLayoutListener(focusRestoreListener);
@@ -992,7 +1005,7 @@ public class LauncherActivity extends Activity {
         // its small lifecycle / interaction surface.
         wallpaperCtl = new WallpaperController(
                 this,
-                getSharedPreferences(PREFS, MODE_PRIVATE),
+                prefs,
                 KEY_WP_URI,
                 wallpaperFront, wallpaperBack,
                 screenW, screenH,
@@ -2866,18 +2879,32 @@ public class LauncherActivity extends Activity {
                     // lifetime.
                     try {
                         if (destroyed) return;
+                        // Build the "fresh package set" exactly ONCE per
+                        // reconcile and share it across the icon-cache
+                        // invalidation, pruneHiddenApps, and pruneKeyMap
+                        // paths below. The earlier draft built a separate
+                        // ArraySet inside each helper from the same
+                        // freshFinal data — three N-element passes plus
+                        // three small set allocations on every package
+                        // broadcast. Sharing one set drops the per-
+                        // reconcile cost to a single pass + one
+                        // allocation, with zero behavioural change
+                        // (each helper's containsKey check was the only
+                        // thing it ever did with its locally-built set).
+                        ArraySet<String> freshPkgs = new ArraySet<>(freshFinal.size());
+                        for (int i = 0, n = freshFinal.size(); i < n; i++) {
+                            freshPkgs.add(freshFinal.get(i).packageName);
+                        }
                         LruCache<String, Bitmap> cache = iconCache;
                         if (cache != null) {
-                            ArraySet<String> pkgs = new ArraySet<>(freshFinal.size());
-                            for (AppInfo a : freshFinal) pkgs.add(a.packageName);
                             for (AppInfo old : appList)
-                                if (!pkgs.contains(old.packageName)) cache.remove(old.packageName);
+                                if (!freshPkgs.contains(old.packageName)) cache.remove(old.packageName);
                         }
                         // GC stale hidden-set entries before any other consumer
                         // sees the new appList — keeps the saved set in sync
                         // with the actually-installed packages without a
                         // separate scheduling step.
-                        pruneHiddenApps(freshFinal);
+                        pruneHiddenApps(freshPkgs);
                         // Mirror prune for the remote-key shortcut
                         // map so an uninstalled-app binding is dropped
                         // automatically (the keymap settings slot row
@@ -2886,7 +2913,7 @@ public class LauncherActivity extends Activity {
                         // still handles the rare race where this
                         // reconcile hasn't run yet by the time the user
                         // presses the dead-binding key.
-                        pruneKeyMap(freshFinal);
+                        pruneKeyMap(freshPkgs);
                         boolean changed = freshFinal.size() != appList.size();
                         if (!changed) {
                             for (int i = 0; i < freshFinal.size(); i++) {
@@ -3132,7 +3159,7 @@ public class LauncherActivity extends Activity {
      *  on-disk format converges to the new shape. */
     private void loadKeyMap() {
         keyMap.clear();
-        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_KEYMAP, null);
+        String raw = prefs.getString(KEY_KEYMAP, null);
         boolean dropped = KeymapStore.parseKeyMap(raw, SHORTCUT_KEYCODES, keyMap::put);
         if (dropped) saveKeyMap();
     }
@@ -3153,7 +3180,7 @@ public class LauncherActivity extends Activity {
             keycodes[i] = keyMap.keyAt(i);
             packages[i] = keyMap.valueAt(i);
         }
-        getSharedPreferences(PREFS, MODE_PRIVATE)
+        prefs
                 .edit().putString(KEY_KEYMAP,
                         KeymapStore.serializeKeyMap(keycodes, packages)).apply();
     }
@@ -3163,7 +3190,7 @@ public class LauncherActivity extends Activity {
      *  {@link #loadApps()} runs (see {@link #pruneHiddenApps}). */
     private void loadHiddenApps() {
         hiddenApps.clear();
-        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_HIDDEN, null);
+        String raw = prefs.getString(KEY_HIDDEN, null);
         KeymapStore.parseHiddenApps(raw, hiddenApps::add);
     }
 
@@ -3175,7 +3202,7 @@ public class LauncherActivity extends Activity {
         // to KeymapStore.serializeHiddenApps without an intermediate
         // ArrayList copy. Saves one ArrayList allocation per toggle —
         // not a hot path, but the wrapper was strictly redundant.
-        getSharedPreferences(PREFS, MODE_PRIVATE)
+        prefs
                 .edit().putString(KEY_HIDDEN,
                         KeymapStore.serializeHiddenApps(hiddenApps)).apply();
     }
@@ -3202,20 +3229,19 @@ public class LauncherActivity extends Activity {
      *
      *  <p>Cheap on warm runs: {@link #SHORTCUT_KEYCODES} caps the
      *  binding count at 6, so the inner ArraySet contains() check
-     *  runs at most 6 times. The fresh-set construction is shared
-     *  with {@link #pruneHiddenApps} when the caller batches them
-     *  back-to-back; each helper builds its own to keep the call
-     *  surface decoupled — the cost is one extra ArraySet of
-     *  {@code freshFinal.size()} entries per reconcile, well below
-     *  GC noise. */
-    private void pruneKeyMap(List<AppInfo> fresh) {
+     *  runs at most 6 times. Accepts the freshly-built package set
+     *  from the reconcile body so the v1.4.x first cut's separate-
+     *  ArraySet allocations (three sets built from the same data on
+     *  every reconcile — see the v1.4.x reconcile body comment) are
+     *  collapsed to a single shared instance.
+     */
+    private void pruneKeyMap(ArraySet<String> installedPkgs) {
         if (keyMap.size() == 0) return;
-        ArraySet<String> installed = new ArraySet<>(fresh.size());
-        for (int j = 0, m = fresh.size(); j < m; j++) installed.add(fresh.get(j).packageName);
+        if (installedPkgs == null) return;
         boolean changed = false;
         for (int i = keyMap.size() - 1; i >= 0; i--) {
             String pkg = keyMap.valueAt(i);
-            if (pkg == null || !installed.contains(pkg)) {
+            if (pkg == null || !installedPkgs.contains(pkg)) {
                 keyMap.removeAt(i);
                 changed = true;
             }
@@ -3223,13 +3249,12 @@ public class LauncherActivity extends Activity {
         if (changed) saveKeyMap();
     }
 
-    private void pruneHiddenApps(List<AppInfo> fresh) {
+    private void pruneHiddenApps(ArraySet<String> installedPkgs) {
         if (hiddenApps.isEmpty()) return;
-        ArraySet<String> installed = new ArraySet<>(fresh.size());
-        for (int j = 0, m = fresh.size(); j < m; j++) installed.add(fresh.get(j).packageName);
+        if (installedPkgs == null) return;
         boolean changed = false;
         for (int i = hiddenApps.size() - 1; i >= 0; i--) {
-            if (!installed.contains(hiddenApps.valueAt(i))) {
+            if (!installedPkgs.contains(hiddenApps.valueAt(i))) {
                 hiddenApps.removeAt(i);
                 changed = true;
             }
@@ -3879,7 +3904,7 @@ public class LauncherActivity extends Activity {
                 // exists today, but the design accommodates future
                 // additions trivially).
                 showClock = !showClock;
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                prefs.edit()
                         .putBoolean(KEY_SHOW_CLOCK, showClock).apply();
                 if (showClock) {
                     // Rendering the clock for the first time after a
@@ -5704,7 +5729,11 @@ public class LauncherActivity extends Activity {
         // less UI-thread blocking on slow ROMs at cold start, with
         // zero behavioural change (the load was always going to
         // happen — just now in parallel).
-        getSharedPreferences(PREFS, MODE_PRIVATE);
+        //
+        // Stash the returned handle as {@link #prefs} so every
+        // {@code getString} / {@code edit} site reuses one instance —
+        // see the field's javadoc for the cumulative-savings rationale.
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         int memMb   = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
         int cacheMb = Math.min(memMb / 8, 16);
         // The on-disk icon cache. Constructed BEFORE iconCache so the
@@ -5764,7 +5793,7 @@ public class LauncherActivity extends Activity {
         // clock" toggle is a single bundled control: when true the formatter
         // renders day-of-week + time, when false the pill is hidden and no
         // minute tick is scheduled (zero CPU per minute).
-        showClock = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_SHOW_CLOCK, true);
+        showClock = prefs.getBoolean(KEY_SHOW_CLOCK, true);
     }
 
     @SuppressWarnings("deprecation")
