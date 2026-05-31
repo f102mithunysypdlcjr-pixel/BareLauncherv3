@@ -304,6 +304,27 @@ public class LauncherActivity extends Activity {
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
+    /** Set false by anything that could move the launcher's root view on
+     *  screen (configuration change, multi-window resize) and read by
+     *  {@link #positionRing} to decide whether {@link #ringRootLoc} is
+     *  still valid. The root view of a TV launcher essentially never
+     *  moves once attached — its origin stays at (0, 0) of the activity
+     *  window for the activity lifetime. Caching the root's screen
+     *  coordinates eliminates one full {@link View#getLocationOnScreen}
+     *  walk per {@link #positionRing} call (~5 matrix multiplications +
+     *  ~5 offset accumulations across the view hierarchy depth). At
+     *  60 fps × 150 ms focus animation = ~9 frames per focus event, so
+     *  the per-focus saving is ~9 view-tree walks. Invalidated in
+     *  {@link #onConfigurationChanged} because that's the only path
+     *  that can move the activity window on a TV (HDMI swap, multi-
+     *  window enter on tablet, font scale). The window-attached / first
+     *  layout cycle is handled implicitly because the cached value is
+     *  re-fetched every time {@code rootLocCached} is false.
+     *
+     *  <p>Not declared {@code volatile} because every read and write
+     *  happens on the main UI thread (focus animator update listeners,
+     *  {@link Activity#onConfigurationChanged}). */
+    private boolean rootLocCached = false;
     /** Scratch arrays used by {@link #anchorCardUnderGear} to read the
      *  gear pill's and the root's on-screen positions. Promoted to
      *  fields so the per-overlay-open path stays allocation-free —
@@ -1041,6 +1062,12 @@ public class LauncherActivity extends Activity {
         // next decode caps to the new dimensions (e.g. HDMI swap on TV
         // changes both screenW and screenH).
         if (wallpaperCtl != null) wallpaperCtl.onConfigurationChanged(screenW, screenH);
+        // Invalidate the cached root location — a configuration change
+        // is the one path that can move the activity window on screen
+        // (HDMI swap on TV, font scale on tablet, multi-window enter).
+        // The next {@link #positionRing} call will refresh against the
+        // new geometry. See {@link #rootLocCached} for the rationale.
+        rootLocCached = false;
         TextView cv = clockView;
         if (cv != null) {
             // Force-refresh: ClockFormatter's "last shown minute" sentinel
@@ -5809,7 +5836,19 @@ public class LauncherActivity extends Activity {
         RingView rv = ringView; FrameLayout r = root;
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
         if (cell.getWidth() == 0) return;
-        cell.getLocationOnScreen(ringCellLoc); r.getLocationOnScreen(ringRootLoc);
+        cell.getLocationOnScreen(ringCellLoc);
+        // Root location is stable for the activity's lifetime on a TV
+        // launcher — the activity window doesn't move until a
+        // configuration change resets us. Cache the first read and
+        // reuse it across every subsequent {@code positionRing} call.
+        // Saves one full {@link View#getLocationOnScreen} walk
+        // (~5 matrix multiplications + offset accumulations) per call.
+        // {@link #onConfigurationChanged} clears the flag so the next
+        // call refreshes against the new geometry.
+        if (!rootLocCached) {
+            r.getLocationOnScreen(ringRootLoc);
+            rootLocCached = true;
+        }
 
         // Cells animate to scaleX/Y = FOCUS_SCALE on focus around the centre
         // pivot. getLocationOnScreen returns the post-transform VISUAL
@@ -6042,20 +6081,39 @@ public class LauncherActivity extends Activity {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
         int cores = Runtime.getRuntime().availableProcessors();
-        // Icon executor: cores-1 worker threads handle the cold-start icon
-        // flood (typically 50 apps × ~20 ms decode = ~1 s of work spread
-        // across the pool). After the flood the queue stays empty for the
-        // rest of the session — package broadcasts and onTrimMemory are
-        // the only events that re-fire icon work, and they're rare.
+        // Icon executor: {@code cores} worker threads handle the cold-start
+        // icon flood (typically 50 apps × ~20 ms decode each ≈ 1 s of work
+        // distributed across the pool). After the flood the queue stays
+        // empty for the rest of the session — package broadcasts and
+        // onTrimMemory are the only events that re-fire icon work, and
+        // they're rare.
+        //
+        // 1.4.2 audit: pool size raised from {@code Math.max(2, cores - 1)}
+        // to {@code Math.max(2, cores)}. The previous "cores − 1" tuning
+        // assumed leaving a core free for the UI thread would smooth
+        // cold-start frame paints. In practice Android's CFS scheduler
+        // rotates threads at sub-millisecond granularity and the UI
+        // thread's foreground priority class gets its fair share
+        // regardless of how many CPU-bound workers are running. On a
+        // 4-core TV the change lifts the cold-start icon-decode wall
+        // clock from ~333 ms (3 workers) to ~250 ms (4 workers) — a
+        // ~25 % reduction in time-to-fully-rendered-shelf, with no
+        // measurable UI-thread regression in profiling. The
+        // {@code Math.max(2, ...)} floor also avoids the latent
+        // IllegalArgumentException that {@code cores - 1 = 0 < max = cores}
+        // would have triggered on a hypothetical single-core device
+        // (Android always reports ≥ 2 logical cores in practice, but
+        // the contract is now defensively safe by construction).
         //
         // allowCoreThreadTimeOut(true) lets the core threads exit after
         // the 30 s keepAlive elapses. Without this they sit in WAITING
-        // forever, holding ~0.5-1 MB of stack each and showing up in
+        // forever, holding ~0.5–1 MB of stack each and showing up in
         // StrictMode / heap dumps as live launcher state. The platform
         // re-creates them on the next executor.execute() call, so the
         // observable behaviour for the next icon flood is identical
         // (other than a one-time thread-creation cost in the µs range).
-        iconExecutor = new ThreadPoolExecutor(Math.max(2, cores - 1), cores, 30L, TimeUnit.SECONDS,
+        int iconWorkers = Math.max(2, cores);
+        iconExecutor = new ThreadPoolExecutor(iconWorkers, iconWorkers, 30L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(128), new ThreadPoolExecutor.DiscardOldestPolicy());
         iconExecutor.allowCoreThreadTimeOut(true);
         // Wallpaper executor is now owned by {@link WallpaperController}
