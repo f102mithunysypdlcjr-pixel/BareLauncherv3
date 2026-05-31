@@ -649,12 +649,31 @@ public class LauncherActivity extends Activity {
         pm = getPackageManager();
         initShortcutLabels();
         initCaches();
+        // User-preference-driven state must be loaded BEFORE the shelf is
+        // populated. The v1.4.0 cold-start cache pre-paint inside
+        // {@link #loadApps()} calls {@link #applyShelfApps(RecyclingShelfView)}
+        // synchronously on this thread, and applyShelfApps reads
+        // {@link #hiddenApps} to filter the shelf list. Loading
+        // hidden-apps and the keymap AFTER loadApps left the cache pre-
+        // paint reading an empty {@code hiddenApps} set, so the shelf
+        // rendered every installed app on cold start until either:
+        //   • the background PM scan reconciled with {@code changed = true}
+        //     (rare — only fires when the cache disagrees with PM), OR
+        //   • the user opened the hide-manager and toggled any chip
+        //     (which sets {@code keymapHideDirty} and forces an
+        //     applyShelfApps on overlay close).
+        // The visible symptom: every force-stop / cold-start showed all
+        // apps including hidden ones until the user round-tripped the
+        // hide manager. Loading hiddenApps and the keymap synchronously
+        // BEFORE loadApps closes the window: the very first
+        // applyShelfApps call sees the correct hiddenApps set, and the
+        // shelf paints with the right filter from frame zero.
+        loadKeyMap();
+        loadHiddenApps();
         setContentView(buildLayout());
         hideSystemUI();
         loadWallpaper();
         loadApps();
-        loadKeyMap();
-        loadHiddenApps();
         registerPkgReceiver();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // Predictive-back routes BACK gestures here INSTEAD of through
