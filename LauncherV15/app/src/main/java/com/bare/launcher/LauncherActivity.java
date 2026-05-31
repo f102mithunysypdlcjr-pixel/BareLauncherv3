@@ -6130,7 +6130,19 @@ public class LauncherActivity extends Activity {
         // {@code getString} / {@code edit} site reuses one instance —
         // see the field's javadoc for the cumulative-savings rationale.
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        int memMb   = ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryClass();
+        // {@link Context#getSystemService(String)} is documented to
+        // return {@code null} when the named service does not exist.
+        // {@code ACTIVITY_SERVICE} is a core Android service that
+        // should always be present, but stripped TV firmware (some
+        // Wear OS / IoT-derived ROMs that have ended up running on
+        // cheap TV boxes) have been observed missing it. Without this
+        // guard the launcher NPEs inside onCreate and dies on launch
+        // — user gets a black home screen with no recovery short of
+        // a factory reset. Fall back to a 64 MB heap-class default
+        // so the LruCache cap math below still produces a sensible
+        // value (~8 MB cache).
+        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        int memMb   = (am != null) ? am.getMemoryClass() : 64;
         int cacheMb = Math.min(memMb / 8, 16);
         // The on-disk icon cache. Constructed BEFORE iconCache so the
         // icon-load executor tasks can read from / write to it. Owns
