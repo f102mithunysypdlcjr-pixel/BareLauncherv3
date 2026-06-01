@@ -1134,6 +1134,15 @@ public class LauncherActivity extends Activity {
         // The next {@link #positionRing} call will refresh against the
         // new geometry. See {@link #rootLocCached} for the rationale.
         rootLocCached = false;
+        // Drop the per-AppInfo ellipsised-label memo. A density / font-scale
+        // change moves each cell's label width budget, so a string truncated
+        // against the old metrics could now be too short or too long. Clearing
+        // forces the next bind of each app to recompute against the new
+        // density. Visible cells keep their current text until they are
+        // re-bound (e.g. by the next scroll) — identical to the pre-1.4.5
+        // per-cell behaviour, just now coordinated through the shared memo.
+        // UI-thread only, so no synchronisation against the icon workers.
+        for (int i = 0, n = appList.size(); i < n; i++) appList.get(i).displayLabel = null;
         TextView cv = clockView;
         if (cv != null) {
             // Force-refresh: ClockFormatter's "last shown minute" sentinel
@@ -2980,10 +2989,27 @@ public class LauncherActivity extends Activity {
                 boundApp = app; boundIndex = index; labelStr = app.label;
                 setContentDescription(app.label);
                 if (labelChanged) {
-                    float maxW = dp(CELL_W_DP) - labelMaxWInset;
-                    labelDisplay = labelPaint.measureText(labelStr) > maxW
-                            ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
-                            : labelStr;
+                    // Reuse the per-AppInfo memoised display label when one
+                    // sibling cell has already computed it. The width budget
+                    // (cell width − inset), the label text size, and the
+                    // typeface are constant for the activity's lifetime, so
+                    // the truncated string is byte-identical for every cell
+                    // that ever renders this app — only the first bind pays
+                    // the measure + (on overflow) the ellipsize allocation.
+                    // A recycled cell scrolling back onto an app it showed a
+                    // moment ago during a fling now reads the cache instead
+                    // of re-measuring + re-allocating on the scroll hot path.
+                    // {@link AppInfo#displayLabel} is cleared on a density /
+                    // font-scale change so the truncation stays correct.
+                    String disp = app.displayLabel;
+                    if (disp == null) {
+                        float maxW = dp(CELL_W_DP) - labelMaxWInset;
+                        disp = labelPaint.measureText(labelStr) > maxW
+                                ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
+                                : labelStr;
+                        app.displayLabel = disp;
+                    }
+                    labelDisplay = disp;
                 }
                 Bitmap cached = iconCache.get(app.packageName);
                 if (cached != null) {
@@ -3727,18 +3753,29 @@ public class LauncherActivity extends Activity {
         }
         FrameLayout sp = settingsOverlay;
         if (sp != null && sp.getVisibility() == View.VISIBLE) {
-            // Only consume on ACTION_DOWN. Letting ACTION_UP fall through
-            // matches the keymap overlay's pattern and avoids swallowing
-            // long-press detection when a future row gains one.
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
                 if (handleSettingsKey(event.getKeyCode())) return true;
-            } else {
-                // Swallow non-DOWN events for keys we'd otherwise let
-                // through (volume / power / media handled by the
-                // isLetThroughKey path inside handleSettingsKey).
-                return true;
+                return super.dispatchKeyEvent(event);
             }
-            return super.dispatchKeyEvent(event);
+            // Non-DOWN (KEY_UP / multiple): mirror the keymap overlay's
+            // {@link #handleKeymapOverlayKey} contract exactly. Only swallow
+            // the UP edge for keys we actually consume on DOWN; let the
+            // device-control keys ({@link #isLetThroughKey}: volume / mute /
+            // power / sleep / wake / media-transport) reach the platform on
+            // their UP edge too.
+            //
+            // Why this matters: on DOWN, handleSettingsKey already returns
+            // false for let-through keys so the DOWN edge falls through to
+            // super → the platform's global handler (AudioService,
+            // PowerManager, MediaSession). Pre-1.4.5 the matching UP edge was
+            // unconditionally swallowed here, so on the rare ROMs that route
+            // both edges to user space (HDMI-CEC volume bridges, some set-top
+            // remotes) AudioService saw an unbalanced DOWN-without-UP while
+            // the settings panel was open. Letting the UP through restores
+            // the balanced DOWN+UP pair. Everything else stays swallowed so
+            // an unmapped remote button can't bleed to the shelf underneath.
+            if (isLetThroughKey(event.getKeyCode())) return super.dispatchKeyEvent(event);
+            return true;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN
                 && event.getRepeatCount() == 0

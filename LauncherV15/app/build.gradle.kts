@@ -81,6 +81,38 @@ android {
         // burning ~16 MB at 1080p / ~64 MB at 4K of GPU FBO continuously
         // for a 200 ms cross-fade. Also removes a stray pkgReloadRunnable
         // that could survive onDestroy() in the looper queue.
+        // Bumped 22 → 23: 1.4.5 is a focused polish pass from the deep
+        // post-1.4.4 audit. Three changes, all non-behavioural on the
+        // happy path:
+        //   • Settings-panel KEY_UP symmetry. The panel's dispatchKeyEvent
+        //     branch used to swallow the UP edge of every non-DOWN key —
+        //     including the device-control keys (volume / mute / power /
+        //     media) that its own DOWN path already lets through. It now
+        //     mirrors the keymap overlay's {@code isLetThroughKey}
+        //     contract so AudioService / PowerManager see a balanced
+        //     DOWN+UP pair on the rare ROMs (HDMI-CEC volume bridges,
+        //     some set-top remotes) that route both edges to user space
+        //     while the settings panel is open.
+        //   • Per-AppInfo ellipsised-label memo. A shelf cell's label
+        //     truncation is a pure function of constant inputs (cell
+        //     width budget, label text size, typeface), so it is computed
+        //     once per app and cached on the model instead of being
+        //     re-measured + re-allocated (ellipsize → CharSequence +
+        //     String) every time a recycled cell scrolls back onto an
+        //     already-seen app during a fling. Cleared on a density /
+        //     font-scale change so the truncation point stays correct.
+        //   • Dropped the {@code android:roundIcon} set — the manifest
+        //     attribute, the anydpi-v26 round adaptive XML, and the five
+        //     round PNG fallbacks. On minSdk 26 every device resolves the
+        //     adaptive {@code ic_launcher} and the platform derives the
+        //     round / squircle / teardrop mask from it, so a separate
+        //     round set was pure dead weight. Shrinks the source tree and
+        //     the debug APK (the release APK already stripped them via
+        //     shrinkResources). render_launcher_icons.py updated to match.
+        //
+        // SemVer PATCH bump — bug fix + hot-path perf + dead-resource
+        // cleanup only. No new features, no API changes.
+        //
         // Bumped 19 → 22: 1.4.4 ships three waves of post-1.4.1 audit
         // fixes. Each was a separate merged PR; they're collapsed into a
         // single versionCode bump because the intermediate states never
@@ -358,8 +390,8 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 22
-        versionName   = "1.4.4"
+        versionCode   = 23
+        versionName   = "1.4.5"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
