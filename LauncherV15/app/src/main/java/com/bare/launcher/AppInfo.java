@@ -4,7 +4,12 @@ import android.content.ComponentName;
 import android.content.pm.ResolveInfo;
 
 /**
- * Immutable record describing one launchable app on the home shelf.
+ * Record describing one launchable app on the home shelf.
+ *
+ * <p>The identity fields ({@link #packageName}, {@link #label},
+ * {@link #component}) are immutable; {@link #ri} and {@link #displayLabel}
+ * are mutable per-instance memo caches populated after construction (see
+ * their individual javadocs for the threading contract).
  *
  * <p>Hot-path access pattern:
  * <ul>
@@ -60,6 +65,31 @@ final class AppInfo {
      * timing-dependent.
      */
     volatile ResolveInfo ri;
+
+    /**
+     * Memoised, ellipsised label as drawn under the shelf cell — lazily
+     * computed and cached the first time any {@code CellView} binds this
+     * app, then reused by every subsequent bind.
+     *
+     * <p>The truncation result is a pure function of the label text, the
+     * shelf cell's width budget, the label text size, and the typeface —
+     * all of which are constant for the activity's lifetime. There is
+     * therefore no reason for a recycled cell that scrolls back onto a
+     * previously-seen app during a fast fling to re-run
+     * {@link android.text.TextUtils#ellipsize} (which allocates a
+     * {@code CharSequence} + a {@code String}) or even
+     * {@code Paint.measureText}. Caching the result on the model collapses
+     * that to one measure + at-most-one ellipsize per app for the whole
+     * session.
+     *
+     * <p>{@code null} means "not computed yet". The field is written and
+     * read exclusively on the main/UI thread (inside {@code CellView.bind}
+     * and cleared in {@code LauncherActivity.onConfigurationChanged} when a
+     * density / font-scale change can move the truncation point), so it
+     * needs no {@code volatile} / synchronisation — unlike {@link #ri},
+     * which is touched by the icon-decode worker threads.
+     */
+    String displayLabel;
 
     AppInfo(String pkg, String lbl, ComponentName cmp, ResolveInfo r) {
         packageName = pkg;

@@ -6,10 +6,14 @@
 # which is designed on a 108-unit canvas. This script renders the same
 # composition (deep-ink fill + rounded-square tile + stroke-only focus
 # ring) at the per-density pixel sizes Android expects, with 4x super-
-# sampling and Lanczos downscale for anti-aliasing quality. Round
-# variants are produced by a circular alpha mask of the same square
-# render — same composition, just clipped to a circle for the
-# `android:roundIcon` slot.
+# sampling and Lanczos downscale for anti-aliasing quality.
+#
+# Square (`android:icon`) PNGs only. The round-icon fallbacks were
+# dropped in v1.4.5: minSdk is 26, so every device resolves the adaptive
+# icon (res/mipmap-anydpi-v26/ic_launcher.xml) and the platform derives
+# the round / squircle / teardrop mask from it. A separate
+# `android:roundIcon` set is pure dead weight on this floor, so this
+# script no longer emits it.
 #
 # Run from the repo root:
 #   python3 scripts/render_launcher_icons.py
@@ -87,18 +91,6 @@ def render_square(size_px: int) -> Image.Image:
     return img.resize((size_px, size_px), Image.LANCZOS)
 
 
-def render_round(size_px: int) -> Image.Image:
-    """Same composition as render_square, but clipped to a circle so
-    the deep-ink background doesn't bleed past the round-icon edge.
-    """
-    sq = render_square(size_px)
-    mask = Image.new("L", (size_px, size_px), 0)
-    ImageDraw.Draw(mask).ellipse([(0, 0), (size_px - 1, size_px - 1)], fill=255)
-    out = Image.new("RGBA", (size_px, size_px), (0, 0, 0, 0))
-    out.paste(sq, mask=mask)
-    return out
-
-
 def main() -> None:
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     res_root = os.path.join(repo_root, "LauncherV15", "app", "src", "main", "res")
@@ -108,17 +100,14 @@ def main() -> None:
         os.makedirs(folder, exist_ok=True)
 
         sq_path = os.path.join(folder, "ic_launcher.png")
-        rd_path = os.path.join(folder, "ic_launcher_round.png")
 
         # `optimize=True` strips tEXt chunks and re-runs zlib at level 9;
         # cuts the typical icon from ~1.2 KB to ~0.4 KB at no quality
         # cost (these are flat-colour images with hard edges).
         render_square(size).save(sq_path, "PNG", optimize=True)
-        render_round(size).save(rd_path, "PNG", optimize=True)
 
         sq_kb = os.path.getsize(sq_path) / 1024.0
-        rd_kb = os.path.getsize(rd_path) / 1024.0
-        print(f"  mipmap-{density:8s} {size:3d}px  square={sq_kb:.2f}KB  round={rd_kb:.2f}KB")
+        print(f"  mipmap-{density:8s} {size:3d}px  square={sq_kb:.2f}KB")
 
 
 if __name__ == "__main__":

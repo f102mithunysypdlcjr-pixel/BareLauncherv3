@@ -5,6 +5,57 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.5] — 2026-06-01
+
+Focused polish pass from a deep post-1.4.4 audit. One correctness fix,
+one hot-path optimisation, one dead-resource cleanup. No new features,
+no API changes, no behavioural change on the happy path.
+
+### Fixed
+
+- **Settings panel no longer swallows the KEY_UP edge of device-control
+  keys.** The settings-panel branch of `dispatchKeyEvent` consumed every
+  non-`ACTION_DOWN` event unconditionally, including the volume / mute /
+  power / media keys whose `ACTION_DOWN` edge the same branch already
+  lets fall through to the platform (via the `isLetThroughKey` path in
+  `handleSettingsKey`). On the rare ROMs that deliver both key edges to
+  user space — HDMI-CEC volume bridges and some set-top remotes — that
+  left `AudioService` / `PowerManager` with an unbalanced
+  DOWN-without-UP while the panel was open. The branch now mirrors the
+  keymap overlay's contract exactly: only the UP edge of keys we
+  actually consume on DOWN is swallowed; device-control keys pass
+  through on both edges. On mainstream Android TV ROMs the platform
+  intercepts these keys before dispatch, so this was latent there —
+  the fix matters for the CEC-bridge / set-top hardware in the
+  post-1.2.0 minSdk-26 install base.
+
+### Performance
+
+- **Per-`AppInfo` ellipsised-label memo removes re-measure / re-alloc on
+  the scroll hot path.** A shelf cell's truncated label is a pure
+  function of constant inputs (cell width budget, label text size,
+  typeface), so the result is identical for every cell that ever renders
+  a given app. It is now computed once per app and cached on the model;
+  a recycled cell scrolling back onto an already-seen app during a fling
+  reads the cache instead of re-running `Paint.measureText` and (on
+  overflow) `TextUtils.ellipsize`, the latter of which allocates a
+  `CharSequence` + a `String` on every call. The memo is cleared on a
+  density / font-scale change (`onConfigurationChanged`) so a truncation
+  computed against old metrics can't go stale. UI-thread-confined, so no
+  synchronisation against the icon-decode workers.
+
+### Cleaned up
+
+- **Removed the `android:roundIcon` resource set.** The manifest
+  attribute, the `mipmap-anydpi-v26/ic_launcher_round.xml` adaptive
+  definition, and the five `ic_launcher_round.png` density fallbacks are
+  gone. On the minSdk-26 floor every device resolves the adaptive
+  `ic_launcher` and the platform derives the round / squircle / teardrop
+  mask from it, so a separate round set was pure dead weight — it only
+  fattened the source tree and the debug APK (the release APK already
+  dropped the unreferenced files via `shrinkResources`).
+  `scripts/render_launcher_icons.py` no longer emits the round variants.
+
 ## [1.4.4] — 2026-05-31
 
 Defensive guards for OOM and missing-service crashes on memory-
