@@ -301,6 +301,10 @@ public class LauncherActivity extends Activity {
     private final ArrayList<AppInfo> visibleScratch = new ArrayList<>();
 
     private boolean pkgChangedWhilePaused = false;
+    /** Packages flagged by {@link #packageReceiver} as REPLACED / CHANGED
+     *  whose icons must be re-decoded on the next reconcile. Cleared after
+     *  the reconcile consumes it. UI-thread only — no synchronisation. */
+    private final ArraySet<String> pendingIconInvalidations = new ArraySet<>();
     /** True between {@link #onPause} and {@link #onResume}. Read by the
      *  package broadcast receiver to decide whether to schedule a
      *  background {@link #loadApps} reconcile or just set
@@ -667,6 +671,11 @@ public class LauncherActivity extends Activity {
                     if (pkg != null) {
                         if (iconCache != null) iconCache.remove(pkg);
                         iconInflight.remove(pkg);
+                        // Flag for icon re-decode on the next reconcile.
+                        // The disk delete below is queued on the write
+                        // executor; the reconcile's preWarmIcon runs later
+                        // so its tryRead misses and re-decodes the fresh icon.
+                        pendingIconInvalidations.add(pkg);
                         // Mirror invalidation to the on-disk cache so a
                         // stale icon does not survive a package replace
                         // / uninstall. Best-effort delete on the write
@@ -987,6 +996,7 @@ public class LauncherActivity extends Activity {
         if (iconDiskCache != null) iconDiskCache = null;
         if (iconCache != null) iconCache.evictAll();
         iconInflight.clear();
+        pendingIconInvalidations.clear();
         // Drop any deferred package-reload runnable that may still be
         // queued on the shelf's looper. The shelf field gets nulled below
         // and {@link #loadApps()} short-circuits on {@code destroyed}, so
@@ -1143,6 +1153,19 @@ public class LauncherActivity extends Activity {
         // per-cell behaviour, just now coordinated through the shared memo.
         // UI-thread only, so no synchronisation against the icon workers.
         for (int i = 0, n = appList.size(); i < n; i++) appList.get(i).displayLabel = null;
+        // Evict the in-memory icon cache. A density change moves
+        // dp(ICON_DP), so cached bitmaps are now the WRONG pixel size
+        // for the new cells. The IconDiskCache is keyed by pixel size
+        // and self-invalidates, but iconCache holds old-size bitmaps
+        // under the same package key — CellView.bind would draw them
+        // mis-scaled (centred via iconBitmap.getWidth()/2) until they
+        // happened to be evicted. Drop them all so the next bind
+        // re-decodes at the new size via the disk fast-path. Also clear
+        // any in-flight loads keyed to the old size so their delivery
+        // doesn't paint a stale-resolution bitmap.
+        LruCache<String, Bitmap> ic = iconCache;
+        if (ic != null) ic.evictAll();
+        iconInflight.clear();
         TextView cv = clockView;
         if (cv != null) {
             // Force-refresh: ClockFormatter's "last shown minute" sentinel
@@ -3138,6 +3161,10 @@ public class LauncherActivity extends Activity {
                             }
                         }
                         if (changed) {
+                            // Fresh appList fully replaces the old one; the
+                            // re-render decodes every visible icon, so any
+                            // pending per-package invalidations are subsumed.
+                            pendingIconInvalidations.clear();
                             appList.clear(); appList.addAll(freshFinal);
                             // Rebuild the package → AppInfo index alongside
                             // the master list so every consumer that asks
@@ -3230,13 +3257,32 @@ public class LauncherActivity extends Activity {
                             // rationale.
                             for (int i = 0, n = appList.size(); i < n; i++) {
                                 AppInfo old = appList.get(i);
-                                if (old.ri == null) {
-                                    AppInfo upgrade = freshFinal.get(i);
-                                    if (upgrade != null && upgrade.ri != null) {
-                                        old.ri = upgrade.ri;
-                                    }
+                                AppInfo upgrade = freshFinal.get(i);
+                                // Always adopt the fresh ResolveInfo. After
+                                // ACTION_PACKAGE_REPLACED the old AppInfo holds
+                                // a STALE non-null ResolveInfo pointing at the
+                                // pre-update APK's resources; ri.loadIcon on it
+                                // resolves to the generic / stock icon on most
+                                // ROMs. Unconditional refresh hands the icon
+                                // pipeline the new package's ResolveInfo.
+                                if (upgrade != null && upgrade.ri != null) {
+                                    old.ri = upgrade.ri;
+                                }
+                                // Re-warm ONLY packages the receiver flagged as
+                                // replaced / changed — not every app on every
+                                // reconcile (queryApps returns fresh ResolveInfo
+                                // instances each scan, so an identity check would
+                                // re-warm everything). Drops the stale in-memory
+                                // bitmap and queues a fresh decode that re-writes
+                                // the disk cache from the new ResolveInfo.
+                                if (pendingIconInvalidations.contains(old.packageName)) {
+                                    LruCache<String, Bitmap> c2 = iconCache;
+                                    if (c2 != null) c2.remove(old.packageName);
+                                    iconInflight.remove(old.packageName);
+                                    preWarmIcon(old);
                                 }
                             }
+                            pendingIconInvalidations.clear();
                             if (pendingScrollIdx >= 0) {
                                 // App list unchanged but a pending index is waiting —
                                 // honour it. setApps wasn't called, so manually request focus.
