@@ -390,8 +390,15 @@ android {
         // empty icons for previously hidden apps because their bitmaps
         // never landed in iconCache. Pure bug fix, no new features, no
         // breaking changes — SemVer PATCH bump.
-        versionCode   = 23
-        versionName   = "1.4.5"
+        //
+        // Bumped 23 → 24: 1.4.6 is a targeted bug fix for icon cache
+        // invalidation when apps are updated. The package broadcast
+        // receiver now ensures icon cache entries are properly cleared
+        // on ACTION_PACKAGE_REPLACED to prevent stale icons from
+        // persisting after app updates. Pure bug fix, no new features —
+        // SemVer PATCH bump.
+        versionCode   = 24
+        versionName   = "1.4.6"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
