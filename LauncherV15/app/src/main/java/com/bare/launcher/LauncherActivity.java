@@ -1086,25 +1086,36 @@ public class LauncherActivity extends Activity {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
-        // Dismiss the context menu when the user taps outside its bounds.
-        if (ev.getAction() == MotionEvent.ACTION_DOWN && menuOverlay != null
-                && menuOverlay.getVisibility() == View.VISIBLE) {
-            int mw = menuOverlay.getWidth();
-            int mh = menuOverlay.getHeight();
-            // Fall back to measured size if layout hasn't run yet (first show)
-            if (mw == 0) mw = menuOverlay.getMeasuredWidth();
-            if (mh == 0) mh = menuOverlay.getMeasuredHeight();
-            if (mw > 0 && mh > 0) {
-                int[] loc = menuOverlayLoc;
-                menuOverlay.getLocationOnScreen(loc);
-                float tx = ev.getRawX(), ty = ev.getRawY();
-                boolean inside = tx >= loc[0] && tx <= loc[0] + mw
-                              && ty >= loc[1] && ty <= loc[1] + mh;
-                if (!inside) {
-                    RecyclingShelfView s = shelf;
-                    if (s != null && s.reorderMode) s.exitReorderMode(false);
-                    return true; // consume the event
+        // Safety net: any touch during an active reorder session should back
+        // out of reorder mode rather than leak through to whatever's
+        // underneath (e.g. the shelf's own scroll handling). This used to be
+        // gated on the menu's visibility, since the menu was visible for the
+        // entire reorder session. It no longer is — the menu hides itself
+        // once the user starts moving the app with D-pad L/R — so the gate
+        // is now reorderMode itself. While the menu IS visible, a tap inside
+        // its bounds is still treated as a normal click on its buttons,
+        // exactly as before; everywhere else (including the entire screen
+        // once the menu's hidden) backs out.
+        RecyclingShelfView s0 = shelf;
+        if (ev.getAction() == MotionEvent.ACTION_DOWN && s0 != null && s0.reorderMode) {
+            boolean inside = false;
+            if (menuOverlay != null && menuOverlay.getVisibility() == View.VISIBLE) {
+                int mw = menuOverlay.getWidth();
+                int mh = menuOverlay.getHeight();
+                // Fall back to measured size if layout hasn't run yet (first show)
+                if (mw == 0) mw = menuOverlay.getMeasuredWidth();
+                if (mh == 0) mh = menuOverlay.getMeasuredHeight();
+                if (mw > 0 && mh > 0) {
+                    int[] loc = menuOverlayLoc;
+                    menuOverlay.getLocationOnScreen(loc);
+                    float tx = ev.getRawX(), ty = ev.getRawY();
+                    inside = tx >= loc[0] && tx <= loc[0] + mw
+                          && ty >= loc[1] && ty <= loc[1] + mh;
                 }
+            }
+            if (!inside) {
+                s0.exitReorderMode(false);
+                return true; // consume the event
             }
         }
         return super.dispatchTouchEvent(ev);
@@ -2030,6 +2041,14 @@ public class LauncherActivity extends Activity {
         boolean reorderMode   = false;
         int     dragIndex     = -1;
 
+        // True once the user has pressed LEFT/RIGHT during the current
+        // reorder session — i.e. they've actually started moving the app.
+        // While true, swapWithNeighbour() keeps the context menu hidden
+        // instead of re-showing it on every swap, so the menu doesn't sit
+        // on top of (and obscure) the icon sliding into place. Reset on
+        // every enter/exit so a fresh long-press always shows the menu.
+        boolean menuDismissedForMove = false;
+
         // True while a programmatic D-pad-held navigation is being processed.
         // Triggers two short-circuits in CellView.onFocusChange:
         //   • scale snaps to its target (no animator) — avoids the ~50 ms
@@ -2070,6 +2089,7 @@ public class LauncherActivity extends Activity {
             reorderMode   = true;
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
+            menuDismissedForMove = false;
             rebindAll();
             // Lazy-init the context menu overlay on first entry. Cold start
             // does not pay for this overlay's view-tree construction; users
@@ -2086,6 +2106,7 @@ public class LauncherActivity extends Activity {
             if (!reorderMode) return;
             reorderMode = false;
             dragIndex   = -1;
+            menuDismissedForMove = false;
             hideContextMenu();
             if (persist) saveOrder();
             rebindAll();
@@ -2100,6 +2121,20 @@ public class LauncherActivity extends Activity {
                 if (cv != null && cv.isAttachedToWindow() && cv.getWidth() > 0)
                     LauncherActivity.this.positionRing(cv);
             });
+        }
+
+        /** Bring the context menu back if a move (swapWithNeighbour) hid it.
+         *  Called from DPAD_UP/DOWN before a real selection change — those
+         *  keys are explicit "I want to look at the menu" intent, unlike
+         *  LEFT/RIGHT which mean "keep moving". showContextMenu() already
+         *  cancels any in-flight hide animation and the existing alpha-check
+         *  guard in hideContextMenu()'s withEndAction protects against the
+         *  cancel/restart race, so no extra synchronization is needed here. */
+        private void reshowMenuIfHidden() {
+            if (!menuDismissedForMove) return;
+            menuDismissedForMove = false;
+            CellView cv = attached.get(dragIndex);
+            if (cv != null) LauncherActivity.this.showContextMenu(cv);
         }
 
         void swapWithNeighbour(int targetIdx) {
@@ -2184,8 +2219,15 @@ public class LauncherActivity extends Activity {
                         .start();
             }
 
-            CellView cv = attached.get(dragIndex);
-            if (cv != null) LauncherActivity.this.showContextMenu(cv);
+            // Once the user has actually started moving (first L/R swap),
+            // the menu hides and stays hidden for the rest of this reorder
+            // session — it would otherwise sit on top of the icon sliding
+            // into place. It reappears only on the next fresh long-press
+            // (enterReorderMode resets the flag).
+            if (!menuDismissedForMove) {
+                menuDismissedForMove = true;
+                LauncherActivity.this.hideContextMenu();
+            }
             // Direct call — cell.mLeft is already updated by repositionAttached() above,
             // so getLocationOnScreen() returns the correct coordinate immediately.
             // The animation's update listener keeps it tracking through the slide.
@@ -2824,13 +2866,19 @@ public class LauncherActivity extends Activity {
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_UP:
                                 // Cycle MOVE → APP_INFO → UNINSTALL (top); stop at top.
-                                if      (menuSelection == MENU_MOVE)     { menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_APP_INFO) { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
+                                // Re-show the menu on an actual selection change — UP/DOWN
+                                // are explicit menu-navigation keys, so if the menu is
+                                // currently hidden (post-move, see menuDismissedForMove)
+                                // the user is signalling they want to look at it again.
+                                if      (menuSelection == MENU_MOVE)     { reshowMenuIfHidden(); menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_APP_INFO) { reshowMenuIfHidden(); menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
                                 // Cycle UNINSTALL → APP_INFO → MOVE; DOWN at MOVE confirms.
-                                if      (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_APP_INFO)  { menuSelection = MENU_MOVE;     updateMenuHighlight(); }
+                                // No reshow on the confirm branch — it's about to exit and
+                                // hide anyway, so showing first would just flash the menu.
+                                if      (menuSelection == MENU_UNINSTALL) { reshowMenuIfHidden(); menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_APP_INFO)  { reshowMenuIfHidden(); menuSelection = MENU_MOVE;     updateMenuHighlight(); }
                                 else exitReorderMode(true);
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
@@ -6278,9 +6326,29 @@ public class LauncherActivity extends Activity {
         // re-creates them on the next executor.execute() call, so the
         // observable behaviour for the next icon flood is identical
         // (other than a one-time thread-creation cost in the µs range).
+        //
+        // Queue capacity: RecyclingShelfView.setApps() submits ONE
+        // preWarmIcon() task per app, synchronously, in a tight loop —
+        // every cold-start app count lands on this queue essentially at
+        // once. A 128-deep bound was tight enough that TV boxes shipping
+        // with large pre-installed app catalogues (150-300+ streaming
+        // apps is common on cheap Android TV hardware) could overflow it.
+        // DiscardOldestPolicy silently drops the OLDEST *queued* task to
+        // make room for the new one — it does not throw, so the
+        // RejectedExecutionException cleanup below never runs for the
+        // discarded task, and that task's iconInflight entry is never
+        // removed. The affected package's icon then stays stuck on the
+        // placeholder for the rest of the session (nothing re-queues it
+        // until a package broadcast for that exact app, or a
+        // TRIM_MEMORY_COMPLETE clear, frees the orphaned entry). Bumped
+        // to 1024 — comfortably above any realistic installed-app count
+        // (a queued task is just a tiny Runnable closure, so the memory
+        // cost of the higher bound is negligible and transient) — so the
+        // discard path is no longer reachable in practice while still
+        // keeping the queue bounded against a genuinely runaway producer.
         int iconWorkers = Math.max(2, cores);
         iconExecutor = new ThreadPoolExecutor(iconWorkers, iconWorkers, 30L, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(128), new ThreadPoolExecutor.DiscardOldestPolicy());
+                new ArrayBlockingQueue<>(1024), new ThreadPoolExecutor.DiscardOldestPolicy());
         iconExecutor.allowCoreThreadTimeOut(true);
         // Wallpaper executor is now owned by {@link WallpaperController}
         // (constructed later inside {@link #buildLayout()}). The activity
@@ -6464,6 +6532,15 @@ public class LauncherActivity extends Activity {
      *  the CC variant — getTextBounds allocates internally if no Rect
      *  is supplied, so passing a cached one keeps the draw call
      *  zero-alloc per frame. */
+    // Resolved once per process instead of inside drawShortcutGlyph's
+    // GLYPH_CC branch — Typeface.create(String, int) is not guaranteed
+    // to be a cache hit on every Android version, so re-resolving it on
+    // every redraw of the CC row (every UP/DOWN that crosses it while
+    // the keymap overlay is open) was a small avoidable allocation on
+    // an otherwise zero-alloc draw path.
+    private static final Typeface CC_GLYPH_TYPEFACE =
+            Typeface.create("sans-serif-condensed", Typeface.BOLD);
+
     private static void drawShortcutGlyph(Canvas c, int w, int h,
                                           int kind, int color, boolean selected,
                                           Paint p, Rect ccBounds) {
@@ -6501,7 +6578,7 @@ public class LauncherActivity extends Activity {
         } else { // GLYPH_CC
             p.setStyle(Paint.Style.FILL);
             p.setColor(glyphColor);
-            p.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
+            p.setTypeface(CC_GLYPH_TYPEFACE);
             p.setTextAlign(Paint.Align.CENTER);
             p.setTextSize(h * 0.62f);
             // Vertically centre via the actual rendered glyph bounds
