@@ -343,12 +343,17 @@ jobs:
             -Pandroid.injected.signing.store.type=JKS \
             --no-daemon --stacktrace
 
-      # Rename the gradle-default `app-release.apk` to a user-friendly
-      # `BareLauncher-<versionName>.apk` so the file the user downloads
-      # from a GitHub Release is self-describing. Version is read straight
-      # from app/build.gradle.kts to stay in lock-step with whatever the
-      # build actually compiled — no separate source of truth.
-      - name: Rename APK with version stamp
+      # Rename the gradle-default `app-release.apk` to a single fixed
+      # filename, `BareLauncher.apk` — no version number in the name.
+      # This is deliberate: it's the one and only asset attached to each
+      # release, so there's never a choice of "which file do I download"
+      # on the Releases page, and it lets the website use GitHub's
+      # permanent redirect URL which always serves whatever release is
+      # currently marked "Latest":
+      #   https://github.com/<owner>/<repo>/releases/latest/download/BareLauncher.apk
+      # The actual version is still recorded in the release title/tag
+      # and CHANGELOG.md — just not in the filename.
+      - name: Rename APK
         id: apk
         working-directory: LauncherV15
         run: |
@@ -359,7 +364,7 @@ jobs:
             exit 1
           fi
           SRC="app/build/outputs/apk/release/app-release.apk"
-          DST="app/build/outputs/apk/release/BareLauncher-${VER}.apk"
+          DST="app/build/outputs/apk/release/BareLauncher.apk"
           mv "$SRC" "$DST"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "apk_path=LauncherV15/${DST}" >> "$GITHUB_OUTPUT"
@@ -369,7 +374,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BareLauncher-release-${{ github.run_number }}
-          path: LauncherV15/app/build/outputs/apk/release/BareLauncher-*.apk
+          path: LauncherV15/app/build/outputs/apk/release/BareLauncher.apk
           retention-days: 90
 
   # ──────────────────────────────────────────────────────────────────
@@ -458,13 +463,11 @@ jobs:
       - name: Verify APK is present
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          APKS=(dist/BareLauncher-*.apk)
-          if [ ${#APKS[@]} -eq 0 ]; then
-            echo "::error::No BareLauncher-*.apk found in artifact download."
+          if [ ! -f dist/BareLauncher.apk ]; then
+            echo "::error::dist/BareLauncher.apk not found in artifact download."
             exit 1
           fi
-          ls -lh "${APKS[@]}"
+          ls -lh dist/BareLauncher.apk
 
       - name: Create GitHub Release
         env:
@@ -479,7 +482,7 @@ jobs:
           # of failing. `gh release create` would otherwise error out.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists — uploading assets with --clobber."
-            gh release upload "$TAG" dist/BareLauncher-*.apk --clobber
+            gh release upload "$TAG" dist/BareLauncher.apk --clobber
           else
             PRE_FLAG=()
             if [ "$PRERELEASE" = "true" ]; then
@@ -489,5 +492,5 @@ jobs:
               --title "BareLauncher $VER" \
               --notes-file release-notes.md \
               "${PRE_FLAG[@]}" \
-              dist/BareLauncher-*.apk
+              dist/BareLauncher.apk
           fi
