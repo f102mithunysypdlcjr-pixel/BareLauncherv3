@@ -13,10 +13,16 @@ import java.util.Locale;
 /**
  * Encapsulates the home-screen clock's text formatting.
  *
- * <p>Visual brief: 12-hour wall clock with a small "AM/PM" suffix rendered
- * at ~42 % size in {@code sans-serif-thin} — Apple-TV / iOS lock-screen
- * style. The hour digits inherit the {@link android.widget.TextView}'s
- * heavy base typeface; only the AM/PM suffix overrides via spans.
+ * <p>Visual brief: system-aware wall clock — 12-hour with a small "AM/PM"
+ * suffix rendered at ~42% size in {@code sans-serif-thin} (Apple-TV / iOS
+ * lock-screen style) when the device is in 12-hour mode; plain "HH:MM"
+ * with no suffix when the device is in 24-hour mode.  The caller obtains
+ * the current preference via
+ * {@link android.text.format.DateFormat#is24HourFormat(android.content.Context)}
+ * and passes it as {@code use24h} to {@link #format} and
+ * {@link #shouldRepaint}.  No state about the preference is kept here —
+ * the caller owns that decision so the formatter can be unit-tested
+ * without a Context.
  *
  * <h3>Allocation discipline</h3>
  * The launcher's clock fires once per minute (not per second — see
@@ -70,60 +76,63 @@ final class ClockFormatter {
      *  to the rendered mode so the next paint runs unconditionally. */
     private boolean lastShownWithDate = false;
 
+    /** Whether the most recent {@link #format} call was rendered in
+     *  24-hour mode. Tracked so a system time-format change (e.g. user
+     *  goes to Settings → Date & time → Use 24-hour format and toggles
+     *  it) triggers a repaint on the next tick even when the minute has
+     *  not advanced. */
+    private boolean lastShownAs24h = false;
+
     /**
-     * Whether {@link #format(long, boolean)} would produce a visibly
-     * different string than the one currently shown. Activity uses this
-     * to skip the {@link android.widget.TextView#setText} when the
-     * minute has not advanced (the minute-aligned tick can fire slightly
-     * off and we want to avoid a redundant invalidate).
+     * Whether {@link #format(long, boolean, boolean)} would produce a
+     * visibly different string than the one currently shown.
      *
-     * <p>Three repaint triggers:
+     * <p>Four repaint triggers:
      * <ul>
-     *   <li>The minute number changed since the last paint — the time
-     *       digits need a redraw.</li>
-     *   <li>The day-of-year rolled over — only relevant when the date
-     *       prefix is being rendered, but we always check it so a wall-
-     *       clock correction that lands on a different day still
-     *       repaints.</li>
-     *   <li>The {@code showDate} mode flipped — the user just toggled
-     *       "Show clock" and we need to re-render with or without the
-     *       prefix.</li>
+     *   <li>The minute number changed since the last paint.</li>
+     *   <li>The day-of-year rolled over.</li>
+     *   <li>The {@code showDate} mode flipped.</li>
+     *   <li>The {@code use24h} preference flipped (system setting changed).</li>
      * </ul>
      */
-    boolean shouldRepaint(long ms, boolean showDate) {
+    boolean shouldRepaint(long ms, boolean showDate, boolean use24h) {
         cal.setTimeInMillis(ms);
         if (showDate != lastShownWithDate) return true;
-        if (cal.get(Calendar.MINUTE) != lastShownMinute) return true;
+        if (use24h   != lastShownAs24h)   return true;
+        if (cal.get(Calendar.MINUTE)      != lastShownMinute)    return true;
         return cal.get(Calendar.DAY_OF_YEAR) != lastShownDayOfYear;
     }
 
     /**
      * Reset the "last shown" sentinels so the next call to
-     * {@link #shouldRepaint(long, boolean)} returns {@code true}
-     * unconditionally and {@link #format(long, boolean)} will re-emit
-     * the spans even if nothing actually changed. Used after
-     * configuration changes (RTL flip, font scale change, locale
-     * change) so the next paint redraws against the new environment.
+     * {@link #shouldRepaint(long, boolean, boolean)} returns {@code true}
+     * unconditionally and {@link #format(long, boolean, boolean)} will
+     * re-emit the spans even if nothing actually changed. Used after
+     * configuration changes (RTL flip, font scale change, locale change)
+     * so the next paint redraws against the new environment.
      */
     void reset() {
         lastShownMinute    = -1;
         lastShownDayOfYear = -1;
-        // lastShownWithDate intentionally left as-is: a reset() call
-        // doesn't change the user's "Show clock" preference, only the
-        // dirty-paint flags. shouldRepaint will still trigger a repaint
-        // because lastShownMinute = -1 forces it.
+        // lastShownWithDate / lastShownAs24h intentionally left as-is.
+        // shouldRepaint will still trigger a repaint because
+        // lastShownMinute = -1 forces it.
     }
 
     /**
      * Build the visible clock {@link CharSequence} for the given absolute
-     * time, optionally prefixed with the locale-aware short day-of-week
-     * (e.g. {@code "Sat · 12:34 PM"} when {@code showDate=true}).
+     * time, optionally prefixed with the locale-aware short day-of-week.
      *
-     * <p>The day prefix uses {@link Calendar#getDisplayName} with a
-     * {@link Locale#getDefault()} lookup so the rendering is correct in
-     * every system language without changes to the launcher's
-     * English-only resource bundle. The {@code · } separator is locale-
-     * neutral.
+     * <p>When {@code use24h} is {@code false} (12-hour mode): renders
+     * "h:mm AM" or "h:mm PM" with the AM/PM suffix at ~42% size in
+     * {@code sans-serif-thin} — Apple-TV / iOS lock-screen style.
+     *
+     * <p>When {@code use24h} is {@code true} (24-hour mode): renders
+     * "HH:MM" always two digits for the hour (00–23), no AM/PM suffix.
+     *
+     * <p>Optional date prefix: {@code "EEE · "} (e.g. {@code "Sat · "})
+     * is prepended when {@code showDate=true}, locale-aware via
+     * {@link Calendar#getDisplayName}.
      *
      * <p>The returned object is the internally-pooled
      * {@link SpannableStringBuilder} — callers must not mutate it and
@@ -131,35 +140,47 @@ final class ClockFormatter {
      * so the platform copies the spans. Subsequent calls will reuse
      * the same builder and overwrite its contents.
      */
-    CharSequence format(long ms, boolean showDate) {
+    CharSequence format(long ms, boolean showDate, boolean use24h) {
         cal.setTimeInMillis(ms);
         lastShownMinute    = cal.get(Calendar.MINUTE);
         lastShownDayOfYear = cal.get(Calendar.DAY_OF_YEAR);
         lastShownWithDate  = showDate;
+        lastShownAs24h     = use24h;
 
-        int hour = cal.get(Calendar.HOUR);
-        if (hour == 0) hour = 12;
-        int min  = cal.get(Calendar.MINUTE);
-        int ampm = cal.get(Calendar.AM_PM);
-        int pos  = 0;
-        if (hour >= 10) chars[pos++] = (char) ('0' + hour / 10);
-        chars[pos++] = (char) ('0' + hour % 10);
-        chars[pos++] = ':';
-        chars[pos++] = (char) ('0' + min / 10);
-        chars[pos++] = (char) ('0' + min % 10);
-        chars[pos++] = ' ';
-        int amStart = pos;
-        chars[pos++] = ampm == Calendar.AM ? 'A' : 'P';
-        chars[pos++] = 'M';
+        int pos     = 0;
+        int amStart = 0; // only used in 12-hour mode
+
+        if (use24h) {
+            // 24-hour: always two digits (00:00 – 23:59), no AM/PM.
+            int hour = cal.get(Calendar.HOUR_OF_DAY);
+            int min  = cal.get(Calendar.MINUTE);
+            chars[pos++] = (char)('0' + hour / 10);
+            chars[pos++] = (char)('0' + hour % 10);
+            chars[pos++] = ':';
+            chars[pos++] = (char)('0' + min / 10);
+            chars[pos++] = (char)('0' + min % 10);
+        } else {
+            // 12-hour: leading zero suppressed (1:00 – 12:59), AM/PM suffix.
+            int hour = cal.get(Calendar.HOUR);
+            if (hour == 0) hour = 12;
+            int min  = cal.get(Calendar.MINUTE);
+            int ampm = cal.get(Calendar.AM_PM);
+            if (hour >= 10) chars[pos++] = (char)('0' + hour / 10);
+            chars[pos++] = (char)('0' + hour % 10);
+            chars[pos++] = ':';
+            chars[pos++] = (char)('0' + min / 10);
+            chars[pos++] = (char)('0' + min % 10);
+            chars[pos++] = ' ';
+            amStart = pos;
+            chars[pos++] = ampm == Calendar.AM ? 'A' : 'P';
+            chars[pos++] = 'M';
+        }
 
         ssb.clear();
         ssb.clearSpans();
         // Optional date prefix. Calendar.getDisplayName allocates a small
-        // String per call (locale lookups don't expose a zero-alloc API)
-        // — at one tick per minute this is a single tiny String per
-        // minute, far below GC pressure. Falls back gracefully if the
-        // locale ever returns null (some stripped-down ROMs have been
-        // observed shipping with broken DateFormatSymbols).
+        // String per call — at one tick per minute this is below GC pressure.
+        // Falls back gracefully if the locale ever returns null.
         if (showDate) {
             String day = cal.getDisplayName(Calendar.DAY_OF_WEEK,
                     Calendar.SHORT, Locale.getDefault());
@@ -169,26 +190,22 @@ final class ClockFormatter {
             }
         }
 
-        // String.valueOf builds a tiny throwaway String, but format() now
-        // fires once per minute (not per second), so this is 1 small alloc
-        // per minute — far below GC pressure.
         int timeStart = ssb.length();
         ssb.append(String.valueOf(chars, 0, pos));
-        // Span offsets are relative to ssb, not to the chars buffer, so
-        // shift by timeStart when the date prefix pushed the time down.
-        ssb.setSpan(amPmSize,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        ssb.setSpan(amPmFace,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        ssb.setSpan(amPmStyle, timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+
+        // Apply AM/PM spans only in 12-hour mode.
+        if (!use24h) {
+            ssb.setSpan(amPmSize,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            ssb.setSpan(amPmFace,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            ssb.setSpan(amPmStyle, timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
         return ssb;
     }
 
     /**
      * Compute the delay in ms from {@code now} until the next minute
      * boundary, plus a small 50 ms cushion so the tick lands just AFTER
-     * {@code :00} rather than just before. The 50 ms guard avoids a tick
-     * firing twice in the same minute on a slightly-fast wall clock —
-     * the minute-aligned scheduling pattern that powers the launcher's
-     * once-per-minute clock loop.
+     * {@code :00} rather than just before.
      */
     static long nextMinuteDelay(long now) {
         return 60_000L - (now % 60_000L) + 50L;

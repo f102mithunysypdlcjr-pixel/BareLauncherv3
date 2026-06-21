@@ -11,6 +11,8 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
+import android.content.res.Resources;
+import android.text.format.DateFormat;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -221,7 +223,11 @@ public class LauncherActivity extends Activity {
      *  this field + the {@link #clockView} visibility / tick scheduling
      *  in one step. Default {@code true} preserves v1.2.x behaviour for
      *  existing installs. */
-    private boolean showClock = true;
+    private boolean showClock  = true;
+    // Tracks the system 12/24-hour preference; re-detected in startClock()
+    // so a change in Settings → Date & time is picked up on the next
+    // onResume without a ContentObserver.
+    private boolean is24Hour   = false;
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -247,8 +253,8 @@ public class LauncherActivity extends Activity {
         TextView cv = clockView;
         if (cv == null) return;
         if (!showClock) return;
-        if (!clockFmt.shouldRepaint(now, true)) return; // no visible change
-        cv.setText(clockFmt.format(now, true), TextView.BufferType.SPANNABLE);
+        if (!clockFmt.shouldRepaint(now, true, is24Hour)) return; // no visible change
+        cv.setText(clockFmt.format(now, true, is24Hour), TextView.BufferType.SPANNABLE);
     }
 
     // Volatile because these fields are nulled on the UI thread inside
@@ -620,6 +626,15 @@ public class LauncherActivity extends Activity {
     private final BroadcastReceiver timeReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
             if (destroyed) return;
+            // ACTION_TIME_CHANGED also fires when the user flips Settings →
+            // Date & time → "Use 24-hour format", not just on a manual
+            // clock/timezone change. startClock() already re-detects this
+            // on every onResume, but some TV boxes expose a quick-settings
+            // overlay that can flip the toggle WITHOUT pausing the launcher
+            // — re-checking here means that case is picked up immediately
+            // too, instead of waiting for the next resume.
+            boolean detected = DateFormat.is24HourFormat(ctx);
+            if (detected != is24Hour) is24Hour = detected;
             // Reset the per-minute idempotency sentinel so the next paint
             // is unconditional, then paint and re-anchor the next tick to
             // the (possibly NEW) minute boundary. tickClock walks through
@@ -6017,7 +6032,47 @@ public class LauncherActivity extends Activity {
      */
     private Drawable resolveIconDrawable(AppInfo app) {
         if (app == null) return null;
+        // Request icons at 2× the device's actual screen density (the
+        // standard "give the downscaler headroom" ratio — same idea as
+        // 2x/3x web assets), capped at DENSITY_XXXHIGH (640 dpi).
+        //
+        // Why not just hardcode XXXHIGH for every device? On a TV box
+        // that already reports a high density (xhdpi+, the common case
+        // on modern TVs), 2× naturally saturates at the XXXHIGH cap, so
+        // behaviour there is unchanged. But on the boxes that actually
+        // have the bug — ones reporting a LOW density (e.g. 160 dpi =
+        // mdpi), where ri.loadIcon(pm) fetches the mdpi asset and
+        // upscales it to iconPx, looking blurry — unconditionally
+        // requesting XXXHIGH forces decoding a ~640 dpi asset (e.g. a
+        // 432×432 px adaptive-icon foreground layer) when the screen
+        // only needed roughly 320 dpi worth of sharpness. That's a 4×
+        // larger decode (and proportionally more transient ARGB_8888
+        // memory) for zero additional visible benefit, multiplied across
+        // every app on the shelf during the initial icon-load flood —
+        // exactly the moment low-RAM devices are already under the most
+        // memory pressure. Scaling the request to 2× what the device
+        // actually needs fixes the same blurry-icon bug with a request
+        // proportional to what will actually be visible.
+        int deviceDensityDpi = Math.round(density * DisplayMetrics.DENSITY_DEFAULT);
+        final int targetDensity = Math.min(deviceDensityDpi * 2, DisplayMetrics.DENSITY_XXXHIGH);
         if (app.ri != null) {
+            // Fast path: ri.activityInfo already carries the icon resource ID
+            // in memory. getResourcesForApplication() does cost a binder hop
+            // into system_server the first time it's called for a given
+            // package, but PackageManager caches the returned Resources
+            // object internally, so every subsequent icon load for that
+            // same package is just a HashMap lookup.
+            ActivityInfo ai = app.ri.activityInfo;
+            if (ai != null) {
+                int iconRes = ai.getIconResource();
+                if (iconRes != 0) {
+                    try {
+                        Resources res = pm.getResourcesForApplication(ai.packageName);
+                        Drawable d = res.getDrawableForDensity(iconRes, targetDensity, null);
+                        if (d != null) return d;
+                    } catch (Exception ignored) { /* fall through */ }
+                }
+            }
             try {
                 return app.ri.loadIcon(pm);
             } catch (RuntimeException ignored) {
@@ -6084,6 +6139,14 @@ public class LauncherActivity extends Activity {
     }
 
     private void startClock() {
+        // Re-detect system 12/24-hour preference on every resume.  The user
+        // may have changed Settings → Date & time while away; we pick up the
+        // new value here without requiring a ContentObserver.
+        boolean detected = DateFormat.is24HourFormat(this);
+        if (detected != is24Hour) {
+            is24Hour = detected;
+            clockFmt.reset(); // force repaint with new hour format
+        }
         if (!showClock) {
             // Toggle is off: ensure the pill is hidden and no tick is
             // scheduled. tickClock would short-circuit anyway, but dropping

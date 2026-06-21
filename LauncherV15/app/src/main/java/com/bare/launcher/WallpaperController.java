@@ -152,15 +152,34 @@ final class WallpaperController {
      *  cannot leave a corrupt snapshot in place. */
     private static final String SNAPSHOT_TMP  = "wallpaper.snap.tmp";
 
-    /** WEBP compression quality. 95 is visually indistinguishable from
-     *  lossless for a wallpaper at TV viewing distance, ~3-5× smaller
-     *  than PNG. The legacy {@link Bitmap.CompressFormat#WEBP} enum is
-     *  API 17+ (lossy) and the only choice on our minSdk 26 floor;
-     *  {@code WEBP_LOSSY} / {@code WEBP_LOSSLESS} require API 30+. The
-     *  legacy enum routes to lossless on API 30+ at quality 100, so we
-     *  pick 95 to stay in the lossy compression range across all our
-     *  target APIs (consistent file size budget). */
-    private static final int    SNAPSHOT_QUALITY = 95;
+    /** WEBP compression quality. 99 — deliberately NOT 100.
+     *
+     *  <p>The legacy {@link Bitmap.CompressFormat#WEBP} enum has a cliff:
+     *  per Android's own javadoc, a quality of exactly 100 routes to
+     *  the LOSSLESS encoder from API 29 (Q) onward; any value below 100
+     *  stays in the lossy encoder on every API level. Lossless WebP
+     *  encoding is roughly 5-10× slower than lossy on photographic
+     *  content (the common case for a TV wallpaper) and needs more
+     *  transient encoder workspace — directly bad news for
+     *  {@link #writeSnapshotBestEffort}, which already documents OOMs
+     *  on low-RAM TV boxes (1 GB Fire TV sticks, older Mi Box variants)
+     *  at the OLD quality-95 lossy setting. Crossing into lossless would
+     *  make both the encode-time stall (this call sits on the executor
+     *  thread directly before the crossfade fires, so a slow encode
+     *  delays when the user sees their new wallpaper) and the OOM risk
+     *  measurably worse, on exactly the devices that can least afford
+     *  it — for a quality delta nobody will see at TV viewing distance.
+     *
+     *  <p>99 stays safely in the lossy bucket on every API level while
+     *  still resolving the actual bug report: quality-95 lossy WebP
+     *  showed visible ringing / gradient banding on solid-colour
+     *  wallpapers, because lossy WebP's block quantization doesn't
+     *  auto-detect "this region is already flat" the way the lossless
+     *  path does. Going from 95 → 99 raises the quantizer fidelity
+     *  enough to eliminate that banding without crossing the lossless
+     *  cliff — same code path, same try/catch, same fallback, just a
+     *  different constant. */
+    private static final int    SNAPSHOT_QUALITY = 99;
 
     /**
      * Tiny callback the host implements to surface a transient error toast
