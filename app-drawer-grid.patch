@@ -1,0 +1,351 @@
+--- a/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
++++ b/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
+@@ -1244,7 +1244,7 @@
+         wallpaperCtl.loadSnapshotSync();
+ 
+         shelf = new RecyclingShelfView(this);
+-        FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
++        FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, WRAP);
+         shelfLp.gravity = Gravity.BOTTOM;
+         shelfLp.setMargins(0, 0, 0, dp(12));
+         shelf.setLayoutParams(shelfLp);
+@@ -2014,9 +2014,13 @@
+         private final OverScroller scroller;
+         private VelocityTracker velTracker;
+         private float lastTouchX;
+-        private int   scrollX     = 0;
++        private int   scrollX     = 0;  // kept for reorder-slide compat; grid ignores it
++        private int   scrollY     = 0;  // vertical scroll for the grid
++        private int   numCols     = 1;  // columns, computed from screen width
++        private int   gridLeft    = 0;  // horizontal centering offset
+         private int   totalW      = 0;
+         private int   centerX     = 0;
++        private static final int GRID_ROWS = 4; // max visible rows at once
+         private boolean needsRefill = false;
+         // sidePad — half-stride gutter on each side of every cell (cellW + 2*sidePad = stride)
+         // edgePad — buffer kept between the focused cell and the viewport edge
+@@ -2079,6 +2083,7 @@
+             sidePad = dp(10);
+             edgePad = dp(48);
+             stride  = cellW + sidePad * 2;
++            numCols = Math.max(1, screenW / stride);
+             setFocusable(false);
+             setClipChildren(false);
+             setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
+@@ -2255,14 +2260,16 @@
+ 
+         @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+             int w = r - l;
+-            if (w > 0) centerX = (totalW < w) ? (w - totalW) / 2 : dp(24);
++            gridLeft = w > 0 ? Math.max(0, (w - numCols * stride) / 2) : 0;
+             if (changed || needsRefill) { needsRefill = false; fillVisible(); }
+         }
+ 
+         @Override protected void onMeasure(int wSpec, int hSpec) {
++            int numRows  = displayed.isEmpty() ? 1 : (displayed.size() + numCols - 1) / numCols;
++            int showRows = Math.min(numRows, GRID_ROWS);
+             setMeasuredDimension(
+-                    resolveSize(Math.max(totalW, getSuggestedMinimumWidth()), wSpec),
+-                    resolveSize(cellH, hSpec));
++                    resolveSize(getSuggestedMinimumWidth(), wSpec),
++                    resolveSize(showRows * cellH, hSpec));
+         }
+ 
+         void setApps(List<AppInfo> apps) {
+@@ -2286,9 +2293,9 @@
+             // applyShelfApps is invoked again).
+             displayed.clear();
+             if (apps != null && !apps.isEmpty()) displayed.addAll(apps);
+-            if (displayed.isEmpty()) { focusedIndex = 0; scrollX = 0; }
++            if (displayed.isEmpty()) { focusedIndex = 0; }
+             else                     focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
+-            totalW = displayed.size() * stride; centerX = 0; needsRefill = true;
++            scrollY = 0; needsRefill = true;
+             requestLayout();
+             for (AppInfo app : displayed) preWarmIcon(app);
+             final int targetIdx = focusedIndex;
+@@ -2421,11 +2428,12 @@
+ 
+         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+             super.onSizeChanged(w, h, ow, oh);
+-            if (w > 0) centerX = (totalW < w) ? (w - totalW) / 2 : dp(24);
++            gridLeft = w > 0 ? Math.max(0, (w - numCols * stride) / 2) : 0;
+             repositionAttached(); fillVisible();
+         }
+ 
+-        private int cellLeft(int i) { return centerX + i * stride + sidePad - scrollX; }
++        private int cellLeft(int i) { return gridLeft + (i % numCols) * stride + sidePad; }
++        private int cellTop (int i) { return (i / numCols) * cellH - scrollY; }
+ 
+         /** Maximum legal scrollX. Includes symmetric end-padding equal to
+          *  centerX (= dp(24) when content overflows) so the LAST cell on the
+@@ -2443,21 +2451,19 @@
+          *
+          *  Fits-case (centerX = (w - totalW)/2): the formula evaluates to
+          *  -sidePad which clamps to 0 — no scroll allowed when content fits. */
+-        private int scrollXMax() {
+-            return Math.max(0, totalW + 2 * centerX - sidePad - getWidth());
+-        }
++        private int scrollXMax() { return 0; } // grid uses scrollY; horizontal scroll retired
+ 
+         private void fillVisible() {
+-            int w = getWidth();
+-            if (w == 0 || displayed.isEmpty()) return;
+-            if (centerX == 0) centerX = (totalW < w) ? (w - totalW) / 2 : dp(24);
+-            int first = Math.max(0, (scrollX - centerX) / stride - BUFFER);
+-            int last  = Math.min(displayed.size() - 1, (scrollX + w - centerX) / stride + BUFFER);
++            if (displayed.isEmpty()) return;
++            int h = getHeight(); if (h == 0) h = GRID_ROWS * cellH;
++            int firstRow = scrollY / cellH;
++            int lastRow  = (scrollY + h - 1) / cellH;
++            int first = firstRow * numCols;
++            int last  = Math.min(displayed.size() - 1, (lastRow + 1) * numCols - 1);
+             for (int i = attached.size() - 1; i >= 0; i--) {
+                 int idx = attached.keyAt(i);
+                 if (idx < first || idx > last) {
+                     CellView cv = attached.valueAt(i);
+-                    // Detach from any pending icon load so stale bitmap isn't delivered
+                     if (cv.boundApp != null) {
+                         List<CellView> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                         if (waiters != null) waiters.remove(cv);
+@@ -2499,193 +2505,48 @@
+                 return;
+             }
+             AppInfo app = displayed.get(index);
+-            int left = cellLeft(index), top = (getMeasuredHeight() - cellH) / 2;
++            int left = cellLeft(index), top = cellTop(index);
+             cv.bind(app, index);
+             cv.layout(left, top, left + cellW, top + cellH);
+             cv.invalidate();
+         }
+ 
+         private void repositionAttached() {
+-            // Per-frame hot path during fling / programmatic scroll. We only
+-            // ever change horizontal position here — sizes are fixed at
+-            // bind time. Using offsetLeftAndRight (a pure mLeft/mRight
+-            // mutation + parent invalidate) skips the full layout pipeline
+-            // (onSizeChanged plumbing, requestLayout chains) that
+-            // View.layout(l,t,r,b) triggers even when the size hasn't
+-            // actually changed. Visibly reduces dropped frames during
+-            // fast scrolls on cheap TV ROMs. Cells whose width/height
+-            // somehow drifted (defensive — should never happen with the
+-            // recycler) are repaired with a full layout call.
+-            int top = (getMeasuredHeight() - cellH) / 2;
+-            int bot = top + cellH;
+             for (int i = 0; i < attached.size(); i++) {
+                 int idx = attached.keyAt(i); CellView cv = attached.valueAt(i);
+-                int targetLeft = cellLeft(idx);
+-                if (cv.getWidth() == cellW && cv.getHeight() == cellH
+-                        && cv.getTop() == top) {
+-                    int curLeft = cv.getLeft();
+-                    if (curLeft != targetLeft) {
+-                        cv.offsetLeftAndRight(targetLeft - curLeft);
+-                    }
+-                } else {
+-                    cv.layout(targetLeft, top, targetLeft + cellW, bot);
+-                }
++                int left = cellLeft(idx), top = cellTop(idx);
++                if (cv.getLeft() != left || cv.getTop() != top
++                        || cv.getWidth() != cellW || cv.getHeight() != cellH)
++                    cv.layout(left, top, left + cellW, top + cellH);
+             }
+         }
+ 
+-        private void doScrollTo(int x) {
+-            int max = scrollXMax();
+-            int newX = Math.max(0, Math.min(x, max));
+-            if (newX == scrollX) return; // no-op avoids redundant work
+-            scrollX = newX;
+-            repositionAttached(); fillVisible();
+-            // Keep ring tracking the focused cell during programmatic scrolls
+-            if (!reorderMode) {
+-                CellView fc = attached.get(focusedIndex);
+-                if (fc != null && fc.isFocused()) LauncherActivity.this.positionRing(fc);
+-            }
+-        }
++        private void doScrollTo(int x) { /* grid uses scrollY — horizontal scroll retired */ }
+ 
+-        /** Smooth animated scroll. Used for d-pad navigation so the shelf
+-         *  glides between positions instead of snapping. The OverScroller's
+-         *  computeScrollOffset path delivers per-frame updates which we route
+-         *  through doScrollTo, so the ring naturally tracks the moving cells. */
+-        private void smoothScrollTo(int x) {
+-            int max = scrollXMax();
+-            int target = Math.max(0, Math.min(x, max));
+-            int dx = target - scrollX;
+-            // Always abort any in-flight scroll first, even on a no-op call.
+-            // Otherwise a stale animation from earlier could keep gliding
+-            // under us — the focus-listener path used to call this with
+-            // dx==0 right after a wrap and the early-return left a leftover
+-            // scroller alive, which is exactly how the cyclic-wrap focus
+-            // landed several cells past the edge.
+-            scroller.abortAnimation();
+-            if (dx == 0) return;
+-            // Duration scales gently with distance — short hops feel snappy
+-            // (90 ms) while long jumps still complete in under ~190 ms so
+-            // they never feel sluggish. Held D-pad bypasses this path
+-            // entirely (snap mode) for true fast scroll.
+-            int dist = Math.abs(dx);
+-            int dur  = Math.max(90, Math.min(190, 90 + dist / 8));
+-            scroller.startScroll(scrollX, 0, dx, 0, dur);
+-            postInvalidateOnAnimation();
+-        }
++        private void smoothScrollTo(int x) { /* grid uses scrollY — horizontal scroll retired */ }
+ 
+         private void ensureVisible(int idx) {
+-            int left = centerX + idx * stride + sidePad, right = left + cellW;
+-            // Use animated scroll for d-pad navigation so the shelf glides
+-            // smoothly. Touch fling continues to use the scroller's own path
+-            // via onTouchEvent, and cell-attachment scrolls during reorder
+-            // use doScrollTo synchronously to avoid mid-swap visual races.
+-            if      (left  - edgePad < scrollX)               smoothScrollTo(Math.max(0, left - edgePad));
+-            else if (right + edgePad > scrollX + getWidth())  smoothScrollTo(right + edgePad - getWidth());
+-        }
+-
+-        /** Synchronous variant used by reorder flow — there we need the cells
+-         *  laid out at their final positions BEFORE running the swap-slide
+-         *  animation, so we can't tolerate an in-flight scroll animation. */
+-        private void ensureVisibleSync(int idx) {
+-            int left = centerX + idx * stride + sidePad, right = left + cellW;
+-            if      (left  - edgePad < scrollX)               doScrollTo(Math.max(0, left - edgePad));
+-            else if (right + edgePad > scrollX + getWidth())  doScrollTo(right + edgePad - getWidth());
+-        }
+-
+-        // True from ACTION_DOWN until the fling settles. While set, the ring is
+-        // hidden and focus changes are suppressed. Snapping to the centermost
+-        // visible cell happens once the scroller fully stops, which restores
+-        // the ring on the destination cell in a single frame.
+-        private boolean touchScrolling = false;
+-
+-        @Override public void computeScroll() {
+-            if (scroller.computeScrollOffset()) {
+-                doScrollTo(scroller.getCurrX());
+-                postInvalidateOnAnimation();
+-            } else if (touchScrolling) {
+-                // Fling has settled. Snap focus to the cell whose centre is
+-                // closest to the viewport centre — that's the natural target
+-                // for touch-scroll on a horizontal carousel.
+-                touchScrolling = false;
+-                snapFocusToVisibleCenter();
+-            }
++            int row    = idx / numCols;
++            int rowTop = row * cellH;
++            int rowBot = rowTop + cellH;
++            int h = getHeight(); if (h == 0) return;
++            int numRows   = (displayed.size() + numCols - 1) / numCols;
++            int maxScrollY = Math.max(0, (numRows - GRID_ROWS) * cellH);
++            int newScrollY = scrollY;
++            if      (rowTop < scrollY)      newScrollY = rowTop;
++            else if (rowBot > scrollY + h)  newScrollY = Math.min(rowBot - h, maxScrollY);
++            if (newScrollY == scrollY) return;
++            scrollY = newScrollY;
++            repositionAttached(); fillVisible();
+         }
+ 
+-        /** Finds the attached cell whose centre is closest to the viewport
+-         *  centre and gives it focus. Called only after a touch fling settles. */
+-        private void snapFocusToVisibleCenter() {
+-            int w = getWidth();
+-            if (w <= 0 || displayed.isEmpty()) return;
+-            int viewportCenterX = scrollX + w / 2;
+-            int bestIdx = focusedIndex;
+-            int bestDist = Integer.MAX_VALUE;
+-            // Use the precomputed sidePad (== dp(10) at construction) instead
+-            // of calling dp(10) per iteration — same value, no per-loop math.
+-            int halfCellW = cellW / 2;
+-            for (int i = 0; i < attached.size(); i++) {
+-                int idx = attached.keyAt(i);
+-                int cellCenter = centerX + idx * stride + sidePad + halfCellW;
+-                int dist = Math.abs(cellCenter - viewportCenterX);
+-                if (dist < bestDist) { bestDist = dist; bestIdx = idx; }
+-            }
+-            if (bestIdx != focusedIndex) {
+-                requestFocusOnIndex(bestIdx);
+-                return;
+-            }
+-            // Same cell — make sure focus and ring are restored.
+-            CellView cv = attached.get(bestIdx);
+-            if (cv == null || !cv.isAttachedToWindow() || cv.getWidth() <= 0) {
+-                requestFocusOnIndex(bestIdx);
+-                return;
+-            }
+-            if (!cv.isFocused()) cv.requestFocus();
+-            LauncherActivity.this.positionRing(cv);
+-        }
++        private void ensureVisibleSync(int idx) { ensureVisible(idx); }
+ 
+-        @Override public boolean onTouchEvent(MotionEvent ev) {
+-            if (velTracker == null) velTracker = VelocityTracker.obtain();
+-            velTracker.addMovement(ev);
+-            switch (ev.getActionMasked()) {
+-                case MotionEvent.ACTION_DOWN:
+-                    scroller.abortAnimation();
+-                    lastTouchX = ev.getX();
+-                    touchScrolling = true;
+-                    // Hide the ring immediately — during a touch drag the
+-                    // ring shouldn't track the originally-focused cell as it
+-                    // scrolls off; that produced a "ghost ring slides off the
+-                    // edge" artefact and made the icons appear to overlap as
+-                    // their selection halo dragged across them.
+-                    RingView rvDown = ringView;
+-                    if (rvDown != null) rvDown.setVisibility(View.INVISIBLE);
+-                    break;
+-                case MotionEvent.ACTION_MOVE:
+-                    float dx = lastTouchX - ev.getX(); lastTouchX = ev.getX();
+-                    doScrollTo(scrollX + (int) dx); break;
+-                case MotionEvent.ACTION_UP:
+-                    velTracker.computeCurrentVelocity(1000);
+-                    int vx = (int) velTracker.getXVelocity();
+-                    scroller.fling(scrollX, 0, -vx, 0,
+-                            0, scrollXMax(), 0, 0);
+-                    velTracker.recycle(); velTracker = null;
+-                    if (scroller.isFinished()) {
+-                        // Zero-velocity release: settle handler in computeScroll
+-                        // won't fire because no fling animation was queued.
+-                        // Snap immediately so the ring reappears.
+-                        touchScrolling = false;
+-                        snapFocusToVisibleCenter();
+-                    } else {
+-                        postInvalidateOnAnimation();
+-                    }
+-                    break;
+-                case MotionEvent.ACTION_CANCEL:
+-                    scroller.abortAnimation();
+-                    velTracker.recycle(); velTracker = null;
+-                    touchScrolling = false;
+-                    snapFocusToVisibleCenter();
+-                    break;
+-            }
+-            return true;
+-        }
++        // touchScrolling / computeScroll retired — grid uses D-pad row navigation.
++        private boolean touchScrolling = false; // kept to avoid ref-errors in dead paths
++        @Override public void computeScroll() { /* grid: no fling animation */ }
+ 
++        // snapFocusToVisibleCenter / onTouchEvent removed — grid does not horizontal-fling
+         // ── CellView ──────────────────────────────────────────────────────────
+ 
+         final class CellView extends View {
+@@ -2943,12 +2804,17 @@
+                             requestFocusOnIndex(boundIndex + 1, ev.getRepeatCount() > 0);
+                             return true;
+                         case KeyEvent.KEYCODE_DPAD_UP:
+-                            View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
++                            if (boundIndex / numCols > 0) {
++                                requestFocusOnIndex(boundIndex - numCols, ev.getRepeatCount() > 0);
++                            } else {
++                                View nb = netBtn; if (nb != null) nb.requestFocus();
++                            }
++                            return true;
+                         case KeyEvent.KEYCODE_DPAD_DOWN:
+-                            // Consume — there's nothing below the shelf. Without this,
+-                            // the platform's focus-search may jump to an unrelated
+-                            // descendant or trigger an audible "focus-blocked" beep on
+-                            // some TV ROMs. Returning true keeps focus on the cell.
++                            if (boundIndex + numCols < displayed.size()) {
++                                requestFocusOnIndex(boundIndex + numCols, ev.getRepeatCount() > 0);
++                            }
++                            // Last row: consume to suppress focus-search beep.
+                             return true;
+                         default: return false;
+                     }
