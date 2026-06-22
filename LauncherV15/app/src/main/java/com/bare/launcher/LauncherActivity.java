@@ -963,12 +963,10 @@ public class LauncherActivity extends Activity {
         // draw both grids at once (the drawer's row 0 already mirrors the home
         // row). INVISIBLE (not GONE) avoids a relayout on open/close.
         s.setVisibility(View.INVISIBLE);
-        // Frosted backdrop: blur the wallpaper behind the translucent drawer,
-        // and switch the (shared) ring to a dark colour so it reads on the
-        // light frosted surface.
+        // Frosted backdrop: blur the wallpaper behind the translucent drawer.
+        // The shared selection ring stays WHITE in the drawer (it reads well
+        // over the frosted surface) — same colour as on the home shelf.
         applyDrawerBlur(true);
-        RingView rvOpen = ringView;
-        if (rvOpen != null) rvOpen.setRingColor(0xFF14141A);
         setHomeChromeVisible(false);
     }
 
@@ -982,6 +980,13 @@ public class LauncherActivity extends Activity {
         if (d == null || d.getVisibility() != View.VISIBLE) return;
         final int drawerFocus = d.focusedIndex;
         if (d.reorderMode) d.exitReorderMode(false);
+        // Clear the wallpaper blur NOW (not in the close end-callback). If we
+        // waited until the slide finished, the translucent veil would fade to
+        // zero while the GPU blur was still applied, briefly revealing the bare
+        // blurred wallpaper before it snapped sharp — the "second blur" flash.
+        // Clearing it up front means the veil fades over an already-sharp
+        // wallpaper, and it drops the blur a few frames earlier (cheaper).
+        applyDrawerBlur(false);
         // Snapshot the (possibly reordered) visible list now; the close
         // callback runs ~170 ms later, after which the reusable visibleScratch
         // could have been rewritten by another applyShelfApps.
@@ -991,9 +996,6 @@ public class LauncherActivity extends Activity {
         d.close(() -> {
             RecyclingShelfView s2 = shelf;
             if (s2 == null || destroyed) return;
-            applyDrawerBlur(false);                 // clear the wallpaper blur
-            RingView rv = ringView;
-            if (rv != null) rv.setRingColor(Color.WHITE);   // home ring is white again
             setHomeChromeVisible(true);             // restore toolbar + clock
             s2.setVisibility(View.VISIBLE);   // restore the home shelf hidden on open
             if (hc <= 0 || visibleSnapshot.isEmpty()) {
@@ -3583,7 +3585,7 @@ public class LauncherActivity extends Activity {
             // onDraw, so opt out of the ViewGroup WILL_NOT_DRAW shortcut.
             setWillNotDraw(false);
             dividerPaint.setStyle(Paint.Style.STROKE);
-            dividerPaint.setColor(0x33000000);     // dark hairline (reads on the frosted-white surface)
+            dividerPaint.setColor(0x26FFFFFF);     // subtle white hairline (matches the white drawer content)
             dividerPaint.setStrokeWidth(dp(1));
         }
 
@@ -3973,7 +3975,7 @@ public class LauncherActivity extends Activity {
             LauncherActivity.this.applyDrawerBlur(false);
             LauncherActivity.this.setHomeChromeVisible(true);
             RingView rv = ringView;
-            if (rv != null) { rv.setVisibility(View.INVISIBLE); rv.setRingColor(Color.WHITE); }
+            if (rv != null) rv.setVisibility(View.INVISIBLE);
         }
 
         // ── reorder ──────────────────────────────────────────────────────
@@ -4118,17 +4120,17 @@ public class LauncherActivity extends Activity {
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
-                phRing.setColor(0x33000000);     // dark placeholder ring on the light drawer
+                phRing.setColor(0x55FFFFFF);     // white placeholder ring (matches the home shelf)
                 phRing.setStrokeWidth(phStroke);
 
                 iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
                 labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                labelPaint.setColor(0xFF15151B);                        // dark — reads on the frosted-white drawer
+                labelPaint.setColor(Color.WHITE);                       // white — visible over the frosted blur
                 labelPaint.setTextSize(dp(11));
                 labelPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
                 labelPaint.setTextAlign(Paint.Align.CENTER);
-                labelPaint.setShadowLayer(dp(3), 0, dp(1), 0x66FFFFFF);  // soft light halo
+                labelPaint.setShadowLayer(dp(4), 0, dp(1), 0xCC000000);  // dark halo keeps white legible
                 labelPaint.setLetterSpacing(0.02f);
                 labelTp = new TextPaint(labelPaint);
 
@@ -5869,8 +5871,21 @@ public class LauncherActivity extends Activity {
         hideView.setClipChildren(false);
         hideView.setClipToPadding(false);
 
-        // No title row — the hide list mirrors the button-shortcuts slot list
-        // (title-less) so the card stays minimal with no top dead space.
+        // Header: the "Hide apps from shelf · OK toggles" title. It names the
+        // list and reminds the user that OK toggles the hidden flag — restored
+        // per user request and styled like the picker title (tight padding so
+        // there's no dead space above the list).
+        TextView hideTitle = new TextView(this);
+        hideTitle.setText(R.string.keymap_hide_title);
+        hideTitle.setTextColor(0xFFEFEFEF);
+        hideTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        hideTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        hideTitle.setLetterSpacing(0.03f);
+        hideTitle.setSingleLine(true);
+        hideTitle.setEllipsize(TextUtils.TruncateAt.END);
+        hideTitle.setMaxWidth(dp(248));   // never wider than the list (no right-side dead space)
+        hideTitle.setPadding(dp(4), dp(2), dp(4), dp(6));
+        hideView.addView(hideTitle);
 
         // Vertical scroller capped at HIDE_VISIBLE_ROWS rows tall — content
         // shorter than that wraps (no empty space); longer scrolls.
@@ -5888,7 +5903,7 @@ public class LauncherActivity extends Activity {
         hideScroll.setVerticalScrollBarEnabled(false);
         hideScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         android.widget.LinearLayout.LayoutParams hsLp =
-                new android.widget.LinearLayout.LayoutParams(dp(220), WRAP);
+                new android.widget.LinearLayout.LayoutParams(dp(248), WRAP);
         hideView.addView(hideScroll, hsLp);
 
         android.widget.LinearLayout hideStrip = new android.widget.LinearLayout(this);
@@ -5916,7 +5931,7 @@ public class LauncherActivity extends Activity {
         keymapPickerHsv   = hsv;
         keymapPickerStrip = strip;
         keymapHideView    = hideView;
-        keymapHideTitle   = null;
+        keymapHideTitle   = hideTitle;
         keymapHideScroll  = hideScroll;
         keymapHideStrip   = hideStrip;
     }
