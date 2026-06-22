@@ -16,6 +16,7 @@ import android.text.format.DateFormat;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -41,6 +42,7 @@ import android.view.SoundEffectConstants;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.animation.DecelerateInterpolator;
@@ -67,10 +69,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LauncherActivity extends Activity {
 
-    private static final int    ICON_DP        = 68;
-    private static final int    CELL_W_DP      = 90;
-    private static final int    CELL_H_DP      = 100;
+    private static final int    ICON_DP        = 80;   // round chip/list icon cache size
+    // v1.5.0 Apple-TV style banner tile (5:3) for the home row + app drawer.
+    private static final int    BANNER_W_DP      = 130;
+    private static final int    BANNER_H_DP      = 78;  // 130 * 3/5 (5:3 like tvOS 400x240)
+    private static final int    BANNER_CORNER_DP = 12;  // subtly rounded, Apple-TV-ish
+    private static final int    CELL_W_DP      = BANNER_W_DP;
+    private static final int    CELL_H_DP      = 108;   // banner height + focused-label area
     private static final int    RING_STROKE_DP = 3;
+    /** Hide-apps vertical list: per-row height and how many rows are visible
+     *  before the list scrolls (v1.5.0 redesign). */
+    private static final int    HIDE_ROW_H_DP    = 40;
+    private static final int    HIDE_VISIBLE_ROWS = 6;
     // Clock cadence lives in {@link ClockFormatter#nextMinuteDelay} now.
     // The launcher schedules ticks aligned to the minute boundary so a
     // 1 Hz wakeup loop is avoided; the clock has no seconds, so anything
@@ -79,6 +89,16 @@ public class LauncherActivity extends Activity {
     private static final String KEY_WP_URI     = "wp_uri";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
     private static final String KEY_APP_ORDER  = "app_order";
+    /** v1.5.0: number of leading apps (in the visible / non-hidden order)
+     *  that form the bottom "home favourites" row and, equivalently, the
+     *  centred first row of the pull-down app drawer. Range [0, 8]. Absent on
+     *  first run after the v1.5.0 upgrade → resolved lazily to
+     *  {@link HomeDrawerModel#defaultHomeCount(int)} (the first 8 of the
+     *  user's EXISTING stored order) so an upgrade never resets favourites.
+     *  The flat {@link #KEY_APP_ORDER} string is unchanged and stays the
+     *  single source of truth for ordering; this key only records where the
+     *  home/drawer boundary sits. */
+    private static final String KEY_HOME_COUNT = "home_count";
     // Persisted remote-key→app shortcut map. Format: "kc=pkg,kc=pkg,...".
     // Keys are raw Android keycode integers (e.g. 183 = KEYCODE_PROG_RED).
     // Loaded once at startup into the in-memory keyMap SparseArray; every
@@ -182,6 +202,15 @@ public class LauncherActivity extends Activity {
     private android.content.SharedPreferences prefs;
 
     private RecyclingShelfView shelf;
+    /** v1.5.0 pull-down app drawer (vertical recycling grid). Lives directly
+     *  above the home shelf in {@link #buildLayout}; GONE until the user
+     *  presses DPAD_DOWN on a home cell. */
+    private AppDrawer           drawer;
+    /** Number of leading visible apps that are "home" apps. {@code -1} until
+     *  resolved from {@link #KEY_HOME_COUNT} (or its default) the first time
+     *  the app list is known — see {@link #resolveHomeCount(int)}. Always
+     *  clamped to {@code [0, min(8, visibleCount)]} before use. */
+    private int                 homeCount = -1;
     // Wallpaper rendering uses two stacked ImageViews. wallpaperFront is on
     // top (always visible to the user); wallpaperBack sits below and is the
     // staging slot used during a fade. Roles do NOT swap — the
@@ -274,6 +303,12 @@ public class LauncherActivity extends Activity {
     // executors remain here; their hot paths live inside this activity.
     private volatile ExecutorService          appExecutor;
     private volatile LruCache<String, Bitmap> iconCache;
+    /** In-memory cache of Apple-TV style banner tiles for the home / drawer
+     *  cells. Separate from {@link #iconCache} (which holds the small round
+     *  chip icons): tiles are a different shape, size, and source. No disk
+     *  cache — tiles regenerate per process (cheap: only the visible cells
+     *  are warmed), keeping the icon disk cache untouched. */
+    private volatile LruCache<String, Bitmap> bannerCache;
     /** Disk-backed sibling of {@link #iconCache}. Wired through the
      *  {@link LruCache#create(Object)} extension point so a memory-cache
      *  miss transparently falls through to a disk read; freshly-decoded
@@ -283,7 +318,15 @@ public class LauncherActivity extends Activity {
      *  IconDiskCache} javadoc for the full pipeline. */
     private volatile IconDiskCache            iconDiskCache;
 
-    private final ArrayMap<String, List<RecyclingShelfView.CellView>> iconInflight = new ArrayMap<>();
+    // v1.5.0: widened from List<RecyclingShelfView.CellView> to List<IconTarget>
+    // so the one icon pipeline feeds both the home-row cells and the app
+    // drawer cells. See {@link IconTarget}.
+    private final ArrayMap<String, List<IconTarget>> iconInflight = new ArrayMap<>();
+    /** In-flight banner-tile loads keyed by package. The home / drawer cells
+     *  display Apple-TV style banner tiles (see {@link #bannerCache}); this is
+     *  the banner counterpart of {@link #iconInflight}. Delivers to the same
+     *  {@link IconTarget} cells (their display bitmap is the banner). */
+    private final ArrayMap<String, List<IconTarget>> bannerInflight = new ArrayMap<>();
     private final List<AppInfo> appList = new ArrayList<>();
     /** Companion to {@link #appList} keyed by package name for O(1)
      *  {@link #findAppByPackage} lookups. The previous linear scan was a
@@ -363,7 +406,8 @@ public class LauncherActivity extends Activity {
      *  is needed. */
     private final int[]    anchorMbLoc      = new int[2];
     private final int[]    anchorRootLoc    = new int[2];
-    private       int      ringLayoutSize   = 0;  // full RingView box size (large enough at 1.12x focus scale)
+    private       int      ringLayoutW      = 0;  // RingView box width (landscape banner + margin)
+    private       int      ringLayoutH      = 0;  // RingView box height
     private       float    cachedIcyOffset  = 0f;
     /** Runnable that performs the deferred package-broadcast reconcile.
      *
@@ -393,6 +437,10 @@ public class LauncherActivity extends Activity {
     };
 
     private FrameLayout        menuOverlay   = null;
+    /** Surface that currently owns the shared reorder context menu — set on
+     *  entry to reorder mode by whichever of the home shelf / app drawer is
+     *  reordering. See {@link ReorderHost}. */
+    private ReorderHost        menuHost      = null;
     private       TextView    menuUninstall = null;
     private       TextView    menuAppInfo   = null;
     private       TextView    menuMove      = null;
@@ -504,8 +552,8 @@ public class LauncherActivity extends Activity {
     // state without breaking the picker's visual vocabulary.
     private android.widget.LinearLayout keymapHideView    = null;
     private TextView                    keymapHideTitle   = null;
-    private android.widget.HorizontalScrollView keymapHideHsv = null;
-    private android.widget.LinearLayout keymapHideStrip   = null;  // horizontal chip strip
+    private android.widget.ScrollView   keymapHideScroll  = null;  // vertical list scroller (v1.5.0)
+    private android.widget.LinearLayout keymapHideStrip   = null;  // vertical row list
     private int                         keymapHideIdx     = 0;
     private int                         keymapHideLastIdx = -1;
     // Built-row count cached so we only rebuild the toggle rows when the
@@ -609,7 +657,8 @@ public class LauncherActivity extends Activity {
             (oldFocus, newFocus) -> {
                 if (destroyed) return;
                 if (newFocus == null) return; // transient — let the next focus event decide
-                if (!(newFocus instanceof RecyclingShelfView.CellView)) {
+                if (!(newFocus instanceof RecyclingShelfView.CellView)
+                        && !(newFocus instanceof AppDrawer.DrawerCell)) {
                     RingView rv = ringView;
                     if (rv != null) rv.setVisibility(View.INVISIBLE);
                 }
@@ -686,6 +735,10 @@ public class LauncherActivity extends Activity {
                     if (pkg != null) {
                         if (iconCache != null) iconCache.remove(pkg);
                         iconInflight.remove(pkg);
+                        // Mirror the invalidation to the banner tile so a
+                        // replaced app's tile re-renders too (v1.5.0).
+                        if (bannerCache != null) bannerCache.remove(pkg);
+                        bannerInflight.remove(pkg);
                         // Flag for icon re-decode on the next reconcile.
                         // The disk delete below is queued on the write
                         // executor; the reconcile's preWarmIcon runs later
@@ -778,6 +831,209 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** Persist the home/drawer boundary. Cheap and synchronous — written only
+     *  when the boundary actually moves (a drawer promote/demote, or the
+     *  one-time migration default). See {@link #KEY_HOME_COUNT}. */
+    private void saveHomeCount() {
+        prefs.edit().putInt(KEY_HOME_COUNT, Math.max(0, homeCount)).apply();
+    }
+
+    /** Resolve {@link #homeCount} against the current visible-app count.
+     *
+     *  <p>First call with a non-empty list reads the persisted value or, when
+     *  absent (the v1.5.0 upgrade), falls back to
+     *  {@link HomeDrawerModel#defaultHomeCount(int)} — the first 8 of the
+     *  user's EXISTING stored order — and writes it back so the migration
+     *  default sticks. Later calls only re-clamp in memory (persisting a
+     *  shrink, e.g. when the user hides enough apps that the home row no
+     *  longer fits).
+     *
+     *  <p>Deliberately a no-op while {@code visibleCount == 0}: the cold-start
+     *  cache pre-paint can momentarily see an empty list, and resolving to 0
+     *  there would wrongly stick an empty home row before the authoritative
+     *  PM scan ever runs. */
+    private void resolveHomeCount(int visibleCount) {
+        if (visibleCount <= 0) return;
+        if (homeCount < 0) {
+            int stored = prefs.getInt(KEY_HOME_COUNT, -1);
+            homeCount = (stored < 0)
+                    ? HomeDrawerModel.defaultHomeCount(visibleCount)
+                    : HomeDrawerModel.clampHomeCount(stored, visibleCount);
+            if (homeCount < 1) homeCount = 1;   // never strand an empty home row
+            saveHomeCount();
+        } else {
+            int clamped = HomeDrawerModel.clampHomeCount(homeCount, visibleCount);
+            if (clamped < 1) clamped = 1;
+            if (clamped != homeCount) { homeCount = clamped; saveHomeCount(); }
+        }
+    }
+
+    /** The visible app list = {@link #appList} minus {@link #hiddenApps},
+     *  preserving order. Returns {@link #appList} directly (no copy) when no
+     *  apps are hidden; otherwise fills the reusable {@link #visibleScratch}.
+     *  Callers must treat the result as read-only and short-lived — every
+     *  {@code setApps} consumer snapshots it into its own {@code displayed}
+     *  list, so the scratch never leaks across UI events. */
+    private List<AppInfo> buildVisibleList() {
+        if (hiddenApps.isEmpty()) return appList;
+        ArrayList<AppInfo> v = visibleScratch;
+        v.clear();
+        v.ensureCapacity(appList.size());
+        for (int i = 0, n = appList.size(); i < n; i++) {
+            AppInfo a = appList.get(i);
+            if (!hiddenApps.contains(a.packageName)) v.add(a);
+        }
+        return v;
+    }
+
+    /** Effective, clamped home-row size for the current visible count. Never
+     *  negative; safe to use as a list bound. Enforces a floor of one home app
+     *  whenever any app is visible so the home screen always has a cell to
+     *  focus (and to press DOWN on to open the drawer) — an empty home row
+     *  would otherwise strand the user with no way back into the drawer. */
+    private int effectiveHomeCount(int visibleCount) {
+        if (visibleCount <= 0) return 0;
+        return Math.max(1, HomeDrawerModel.clampHomeCount(homeCount, visibleCount));
+    }
+
+    /** Feed the bottom home row the first {@code hc} visible apps (the shelf
+     *  centres a short list and scrolls a long one — unchanged behaviour). */
+    private void pushHomeRow(RecyclingShelfView s, List<AppInfo> visible, int hc) {
+        if (s == null) return;
+        if (hc >= visible.size()) s.setApps(visible);
+        else                      s.setApps(visible.subList(0, hc));
+    }
+
+    /** Mirror a reordered <em>visible</em> list back into the master
+     *  {@link #appList}, keeping every hidden app pinned at its original
+     *  absolute slot. The non-hidden slots are refilled, in order, from
+     *  {@code newVisible}; {@link #appByPackage} is rebuilt to match. Used by
+     *  the drawer's Move mode (whose {@code displayed} list IS the visible
+     *  list) so a 2-D reorder updates the persisted order without scrambling
+     *  hidden-app placement — the same invariant the shelf's
+     *  {@code swapWithNeighbour} maintains for single swaps. */
+    private void rebuildAppListFromVisible(List<AppInfo> newVisible) {
+        if (hiddenApps.isEmpty()) {
+            if (newVisible != appList) { appList.clear(); appList.addAll(newVisible); }
+        } else {
+            int n = appList.size();
+            AppInfo[] result = new AppInfo[n];
+            boolean[] hiddenSlot = new boolean[n];
+            for (int i = 0; i < n; i++) {
+                AppInfo a = appList.get(i);
+                if (hiddenApps.contains(a.packageName)) { hiddenSlot[i] = true; result[i] = a; }
+            }
+            int vi = 0;
+            for (int i = 0; i < n; i++) {
+                if (!hiddenSlot[i]) {
+                    result[i] = (vi < newVisible.size()) ? newVisible.get(vi++) : appList.get(i);
+                }
+            }
+            appList.clear();
+            for (AppInfo a : result) appList.add(a);
+        }
+        appByPackage.clear();
+        for (int i = 0, n = appList.size(); i < n; i++) {
+            AppInfo a = appList.get(i);
+            appByPackage.put(a.packageName, a);
+        }
+    }
+
+    /** Open the pull-down app drawer, mirroring the current order / home
+     *  boundary and landing focus on the same app the user was on in the home
+     *  row. No-op if the drawer is already open or there are no apps. */
+    private void openDrawer() {
+        AppDrawer d = drawer; RecyclingShelfView s = shelf;
+        if (d == null || s == null) return;
+        if (d.getVisibility() == View.VISIBLE) return;
+        List<AppInfo> visible = buildVisibleList();
+        if (visible.isEmpty()) return;
+        resolveHomeCount(visible.size());
+        int hc = effectiveHomeCount(visible.size());
+        d.setApps(visible, hc);
+        // The drawer's first hc cells ARE the home apps, so a home-row index
+        // maps 1:1 to a drawer index. Clamp defensively.
+        int focus = Math.min(Math.max(0, s.focusedIndex), visible.size() - 1);
+        d.open(focus);
+        // Hide the home shelf while the drawer covers the screen so we never
+        // draw both grids at once (the drawer's row 0 already mirrors the home
+        // row). INVISIBLE (not GONE) avoids a relayout on open/close.
+        s.setVisibility(View.INVISIBLE);
+    }
+
+    /** Close the drawer, re-derive the home row from the (possibly changed)
+     *  order / home boundary, and return focus to the home favourites screen.
+     *  Focus lands on the drawer's focused app when it is a home app,
+     *  otherwise the nearest home app; when the home row is empty it falls
+     *  back to the toolbar so focus is never lost. */
+    private void closeDrawer() {
+        AppDrawer d = drawer; RecyclingShelfView s = shelf;
+        if (d == null || d.getVisibility() != View.VISIBLE) return;
+        final int drawerFocus = d.focusedIndex;
+        if (d.reorderMode) d.exitReorderMode(false);
+        // Snapshot the (possibly reordered) visible list now; the close
+        // callback runs ~170 ms later, after which the reusable visibleScratch
+        // could have been rewritten by another applyShelfApps.
+        final List<AppInfo> visibleSnapshot = new ArrayList<>(buildVisibleList());
+        resolveHomeCount(visibleSnapshot.size());
+        final int hc = effectiveHomeCount(visibleSnapshot.size());
+        d.close(() -> {
+            RecyclingShelfView s2 = shelf;
+            if (s2 == null || destroyed) return;
+            s2.setVisibility(View.VISIBLE);   // restore the home shelf hidden on open
+            if (hc <= 0 || visibleSnapshot.isEmpty()) {
+                pushHomeRow(s2, visibleSnapshot, hc);   // clears the shelf
+                View nb = netBtn; if (nb != null) nb.requestFocus();
+                return;
+            }
+            // Land focus on the drawer's app when it is a home app, else the
+            // nearest home app. Seed focusedIndex so the shelf's setApps posts
+            // its focus request onto the right cell.
+            int homeIdx = (drawerFocus >= 0 && drawerFocus < hc) ? drawerFocus : Math.max(0, hc - 1);
+            s2.focusedIndex = homeIdx;
+            pushHomeRow(s2, visibleSnapshot, hc);
+        });
+    }
+
+    /** Launch the system uninstall flow for {@code app}. Shared by the drawer
+     *  cell's reorder menu; the shelf cell keeps its own copy (which also
+     *  manages its reorder teardown). Mirrors the shelf's ACTION_DELETE →
+     *  ACTION_UNINSTALL_PACKAGE fallback chain. */
+    private void doUninstall(AppInfo app) {
+        if (app == null) return;
+        Uri pkgUri = Uri.fromParts("package", app.packageName, null);
+        Intent primary = new Intent(Intent.ACTION_DELETE, pkgUri)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (tryStartActivityResolved(primary)) return;
+        @SuppressWarnings("deprecation")
+        Intent fallback = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (tryStartActivityResolved(fallback)) return;
+        showToast(getString(R.string.toast_cannot_uninstall, app.label));
+    }
+
+    /** Open the system "App info" page for {@code app}. Shared by the drawer
+     *  cell's reorder menu. */
+    private void doAppInfo(AppInfo app) {
+        if (app == null) return;
+        Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", app.packageName, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (tryStartActivityResolved(i)) return;
+        showToast(getString(R.string.toast_no_app_info));
+    }
+
+    /** Start {@code intent} only if some activity resolves it. Returns whether
+     *  the launch was attempted. Defensive against stripped TV ROMs that lack
+     *  a Settings/uninstaller activity. */
+    private boolean tryStartActivityResolved(Intent intent) {
+        try {
+            if (intent.resolveActivity(pm) == null) return false;
+            startActivity(intent);
+            return true;
+        } catch (Exception ignored) { return false; }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -851,6 +1107,17 @@ public class LauncherActivity extends Activity {
                 //    single exitReorderMode call hides both.
                 RecyclingShelfView s = shelf;
                 if (s != null && s.reorderMode) { s.exitReorderMode(false); return; }
+                // 3.5. App drawer open → exit its Move mode, else close it.
+                //      Lower priority than the overlays (which can sit on top
+                //      of the home screen) but it owns BACK whenever it is
+                //      visible. Mirrors the legacy key-event path handled by
+                //      the drawer cell's KEYCODE_BACK case.
+                AppDrawer dr = drawer;
+                if (dr != null && dr.getVisibility() == View.VISIBLE) {
+                    if (dr.reorderMode) dr.exitReorderMode(false);
+                    else                closeDrawer();
+                    return;
+                }
                 // 4. Otherwise no-op: the launcher is HOME — back from the
                 //    home screen should stay home.
             };
@@ -937,6 +1204,21 @@ public class LauncherActivity extends Activity {
         uiPaused = true;
         stopClock();
         unregisterTimeReceiver();
+        // v1.5.0: if the drawer is open when we pause, persist any in-progress
+        // move, dismiss it without animation (the close tween can't run while
+        // pausing), and refresh the home row so a resume lands on an
+        // up-to-date home screen rather than a stale drawer.
+        AppDrawer d = drawer;
+        if (d != null && d.getVisibility() == View.VISIBLE) {
+            if (d.reorderMode) d.exitReorderMode(true);
+            d.forceHide();
+            RecyclingShelfView sh = shelf;
+            if (sh != null) {
+                sh.setVisibility(View.VISIBLE);   // undo the open-time hide
+                List<AppInfo> vis = buildVisibleList();
+                pushHomeRow(sh, vis, effectiveHomeCount(vis.size()));
+            }
+        }
         FrameLayout r = root;
         if (r != null) {
             ViewTreeObserver rvto = r.getViewTreeObserver();
@@ -1010,7 +1292,9 @@ public class LauncherActivity extends Activity {
         if (appExecutor  != null) try { appExecutor .shutdownNow(); } catch (Throwable ignored) { /* best-effort */ }
         if (iconDiskCache != null) iconDiskCache = null;
         if (iconCache != null) iconCache.evictAll();
+        if (bannerCache != null) bannerCache.evictAll();
         iconInflight.clear();
+        bannerInflight.clear();
         pendingIconInvalidations.clear();
         // Drop any deferred package-reload runnable that may still be
         // queued on the shelf's looper. The shelf field gets nulled below
@@ -1027,6 +1311,7 @@ public class LauncherActivity extends Activity {
         // to know about wallpaper memory hygiene at all.
         if (wallpaperCtl != null) { wallpaperCtl.releaseBitmaps(); wallpaperCtl = null; }
         wallpaperFront = null; wallpaperBack = null; clockView = null; shelf = null;
+        drawer = null;
         netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
         settingsOverlay = null; settingsCard = null; settingsColumn = null;
@@ -1035,7 +1320,7 @@ public class LauncherActivity extends Activity {
         keymapPickerView = null; keymapPickerTitle = null;
         keymapPickerHsv = null; keymapPickerStrip = null;
         keymapHideView = null; keymapHideTitle = null;
-        keymapHideHsv  = null; keymapHideStrip = null;
+        keymapHideScroll = null; keymapHideStrip = null;
         super.onDestroy();
     }
 
@@ -1064,6 +1349,8 @@ public class LauncherActivity extends Activity {
         if (iconCache == null) return;
         if      (level >= TRIM_MEMORY_COMPLETE)   {
             iconCache.evictAll(); iconInflight.clear();
+            if (bannerCache != null) bannerCache.evictAll();
+            bannerInflight.clear();
             RecyclingShelfView sv = shelf;
             if (sv != null) {
                 sv.setApps(Collections.emptyList());
@@ -1093,8 +1380,10 @@ public class LauncherActivity extends Activity {
         // The natural completion path
         // ({@code iconInflight.remove(key)} inside the executor's UI body)
         // drains the map without any extra bookkeeping.
-        else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); }
-        else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); }
+        else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2);
+            if (bannerCache != null) bannerCache.trimToSize(bannerCache.maxSize() / 2); }
+        else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4);
+            if (bannerCache != null) bannerCache.trimToSize(bannerCache.maxSize() * 3 / 4); }
     }
 
     @Override public void onWindowFocusChanged(boolean h) { super.onWindowFocusChanged(h); if (h) hideSystemUI(); }
@@ -1112,7 +1401,10 @@ public class LauncherActivity extends Activity {
         // exactly as before; everywhere else (including the entire screen
         // once the menu's hidden) backs out.
         RecyclingShelfView s0 = shelf;
-        if (ev.getAction() == MotionEvent.ACTION_DOWN && s0 != null && s0.reorderMode) {
+        AppDrawer d0 = drawer;
+        boolean shelfReorder  = s0 != null && s0.reorderMode;
+        boolean drawerReorder = d0 != null && d0.getVisibility() == View.VISIBLE && d0.reorderMode;
+        if (ev.getAction() == MotionEvent.ACTION_DOWN && (shelfReorder || drawerReorder)) {
             boolean inside = false;
             if (menuOverlay != null && menuOverlay.getVisibility() == View.VISIBLE) {
                 int mw = menuOverlay.getWidth();
@@ -1129,7 +1421,8 @@ public class LauncherActivity extends Activity {
                 }
             }
             if (!inside) {
-                s0.exitReorderMode(false);
+                if (shelfReorder) s0.exitReorderMode(false);
+                else              d0.exitReorderMode(false);
                 return true; // consume the event
             }
         }
@@ -1141,6 +1434,13 @@ public class LauncherActivity extends Activity {
         FrameLayout sp = settingsOverlay;
         if (sp != null && sp.getVisibility() == View.VISIBLE) {
             hideSettingsPanel(); return;
+        }
+        // v1.5.0: drawer open → exit its Move mode, else close the drawer.
+        AppDrawer d = drawer;
+        if (d != null && d.getVisibility() == View.VISIBLE) {
+            if (d.reorderMode) d.exitReorderMode(false);
+            else              closeDrawer();
+            return;
         }
         RecyclingShelfView s = shelf;
         if (s != null && s.reorderMode) { s.exitReorderMode(false); return; }
@@ -1192,6 +1492,11 @@ public class LauncherActivity extends Activity {
         LruCache<String, Bitmap> ic = iconCache;
         if (ic != null) ic.evictAll();
         iconInflight.clear();
+        // Banners are sized in px too — drop them on a density change so the
+        // next bind re-renders at the new size.
+        LruCache<String, Bitmap> bc = bannerCache;
+        if (bc != null) bc.evictAll();
+        bannerInflight.clear();
         TextView cv = clockView;
         if (cv != null) {
             // Force-refresh: ClockFormatter's "last shown minute" sentinel
@@ -1413,15 +1718,30 @@ public class LauncherActivity extends Activity {
         mpLocal.setContentDescription(getString(R.string.cd_settings));
         root.addView(mpLocal);
 
-        int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Ring view diameter = icon + headroom for the focus scale-up.
-        // Ring sits with ZERO gap on the icon edge now, so headroom is just
-        // enough to fit the scaled-up ring (icon + stroke) at focus scale.
-        int ringSize = iconPx + dp(12);
-        ringLayoutSize  = ringSize;
-        cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
-        ringView = new RingView(this, strokePx, iconPx);
-        FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(ringSize, ringSize);
+        // v1.5.0 pull-down app drawer. Added to the z-order ABOVE the
+        // wallpaper / shelf / clock / toolbar so that when it is shown its own
+        // scrim cleanly covers them, but BELOW the ring (added next) so the
+        // focus halo still draws over the drawer's cells. GONE until the user
+        // presses DPAD_DOWN on a home cell; the lazy context-menu overlay
+        // (added last, on first reorder) stays above everything including the
+        // ring, exactly as on the home shelf.
+        drawer = new AppDrawer(this);
+        drawer.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        drawer.setVisibility(View.GONE);
+        drawer.setContentDescription(getString(R.string.cd_app_drawer));
+        drawer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        root.addView(drawer);
+
+        int strokePx = dp(RING_STROKE_DP);
+        // Selection ring wraps the Apple-TV banner tile (landscape rounded
+        // rect). Box = banner + headroom for the focus scale-up.
+        int bw = dp(BANNER_W_DP), bh = dp(BANNER_H_DP);
+        int ringBoxW = bw + dp(12), ringBoxH = bh + dp(12);
+        ringLayoutW    = ringBoxW;
+        ringLayoutH    = ringBoxH;
+        cachedIcyOffset = bh / 2f;  // banner centred at top of the cell
+        ringView = new RingView(this, strokePx, bw, bh, dp(BANNER_CORNER_DP));
+        FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(ringBoxW, ringBoxH);
         ringView.setLayoutParams(ringLp);
         ringView.setVisibility(View.INVISIBLE);
         ringView.setContentDescription(getString(R.string.cd_selection_ring));
@@ -1516,13 +1836,8 @@ public class LauncherActivity extends Activity {
         uBg.setColor(Color.TRANSPARENT);
         menuUninstall.setBackground(uBg);
         menuUninstall.setOnClickListener(v -> {
-            RecyclingShelfView s = shelf;
-            if (s != null && s.reorderMode) {
-                s.menuSelection = RecyclingShelfView.MENU_UNINSTALL;
-                RecyclingShelfView.CellView cv = s.attached.get(s.dragIndex);
-                if (cv != null) cv.triggerUninstall();
-                else s.exitReorderMode(false);
-            }
+            ReorderHost h = menuHost;
+            if (h != null) h.onMenuUninstall();
         });
 
         menuAppInfo = new TextView(this);
@@ -1541,13 +1856,8 @@ public class LauncherActivity extends Activity {
         iBg.setColor(Color.TRANSPARENT);
         menuAppInfo.setBackground(iBg);
         menuAppInfo.setOnClickListener(v -> {
-            RecyclingShelfView s = shelf;
-            if (s != null && s.reorderMode) {
-                s.menuSelection = RecyclingShelfView.MENU_APP_INFO;
-                RecyclingShelfView.CellView cv = s.attached.get(s.dragIndex);
-                if (cv != null) cv.triggerAppInfo();
-                else s.exitReorderMode(false);
-            }
+            ReorderHost h = menuHost;
+            if (h != null) h.onMenuAppInfo();
         });
 
         menuMove = new TextView(this);
@@ -1566,13 +1876,8 @@ public class LauncherActivity extends Activity {
         mBg.setColor(Color.TRANSPARENT);
         menuMove.setBackground(mBg);
         menuMove.setOnClickListener(v -> {
-            RecyclingShelfView s = shelf;
-            if (s != null && s.reorderMode) {
-                s.menuSelection = RecyclingShelfView.MENU_MOVE;
-                updateMenuHighlight();
-                // "Move" confirm: exit reorder saving order
-                s.exitReorderMode(true);
-            }
+            ReorderHost h = menuHost;
+            if (h != null) h.onMenuMove();
         });
 
         // Dividers removed — the rounded-pill selection state is enough to
@@ -1625,9 +1930,9 @@ public class LauncherActivity extends Activity {
         int mw = menuOverlay.getMeasuredWidth();
         int mh = menuOverlay.getMeasuredHeight();
 
-        int iconPx        = dp(ICON_DP);
-        int iconTopInRoot = cellRelY + (int)(cachedIcyOffset - iconPx / 2f);
-        int iconBotInRoot = iconTopInRoot + iconPx;
+        int bannerHpx     = dp(BANNER_H_DP);
+        int iconTopInRoot = cellRelY + (int)(cachedIcyOffset - bannerHpx / 2f);
+        int iconBotInRoot = iconTopInRoot + bannerHpx;
 
         // Prefer above the icon; fall back to below if it would clip the top
         int menuY = iconTopInRoot - dp(6) - mh;
@@ -1708,9 +2013,9 @@ public class LauncherActivity extends Activity {
     }
 
     void updateMenuHighlight() {
-        RecyclingShelfView s = shelf; if (s == null) return;
+        ReorderHost h = menuHost; if (h == null) return;
         if (menuUninstall == null || menuAppInfo == null || menuMove == null) return;
-        int sel = s.menuSelection;
+        int sel = h.menuSelection();
         // Bright frosted-white pill for the selected item, mirroring the
         // toolbar buttons & keymap rows. The selected item's text inverts
         // to dark for contrast; non-destructive items invert to near-black,
@@ -2020,7 +2325,7 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    final class RecyclingShelfView extends ViewGroup {
+    final class RecyclingShelfView extends ViewGroup implements ReorderHost {
 
         private static final int BUFFER = 4;
 
@@ -2099,12 +2404,34 @@ public class LauncherActivity extends Activity {
             setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
         }
 
+        // ── ReorderHost (shared context menu) ────────────────────────────
+        @Override public int menuSelection() { return menuSelection; }
+        @Override public void onMenuUninstall() {
+            if (!reorderMode) return;
+            menuSelection = MENU_UNINSTALL;
+            CellView cv = attached.get(dragIndex);
+            if (cv != null) cv.triggerUninstall(); else exitReorderMode(false);
+        }
+        @Override public void onMenuAppInfo() {
+            if (!reorderMode) return;
+            menuSelection = MENU_APP_INFO;
+            CellView cv = attached.get(dragIndex);
+            if (cv != null) cv.triggerAppInfo(); else exitReorderMode(false);
+        }
+        @Override public void onMenuMove() {
+            if (!reorderMode) return;
+            menuSelection = MENU_MOVE;
+            LauncherActivity.this.updateMenuHighlight();
+            exitReorderMode(true);   // "Move" confirm persists the order
+        }
+
         void enterReorderMode(int idx) {
             if (reorderMode) return;
             reorderMode   = true;
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
             menuDismissedForMove = false;
+            LauncherActivity.this.menuHost = this;   // shelf owns the shared menu now
             rebindAll();
             // Lazy-init the context menu overlay on first entry. Cold start
             // does not pay for this overlay's view-tree construction; users
@@ -2287,7 +2614,7 @@ public class LauncherActivity extends Activity {
                 CellView cv = attached.valueAt(i);
                 // Detach from any pending icon loads
                 if (cv.boundApp != null) {
-                    List<CellView> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                    List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
                     if (waiters != null) waiters.remove(cv);
                 }
                 cv.iconBitmap = null;
@@ -2305,7 +2632,7 @@ public class LauncherActivity extends Activity {
             else                     focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
             totalW = displayed.size() * stride; centerX = 0; needsRefill = true;
             requestLayout();
-            for (AppInfo app : displayed) preWarmIcon(app);
+            for (AppInfo app : displayed) preWarmBanner(app);
             final int targetIdx = focusedIndex;
             post(() -> requestFocusOnIndex(targetIdx));
         }
@@ -2474,7 +2801,7 @@ public class LauncherActivity extends Activity {
                     CellView cv = attached.valueAt(i);
                     // Detach from any pending icon load so stale bitmap isn't delivered
                     if (cv.boundApp != null) {
-                        List<CellView> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                        List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
                         if (waiters != null) waiters.remove(cv);
                     }
                     cv.iconBitmap = null;
@@ -2703,7 +3030,7 @@ public class LauncherActivity extends Activity {
 
         // ── CellView ──────────────────────────────────────────────────────────
 
-        final class CellView extends View {
+        final class CellView extends View implements IconTarget {
 
             Bitmap  iconBitmap;
             AppInfo boundApp;
@@ -2719,12 +3046,14 @@ public class LauncherActivity extends Activity {
             private final Paint   labelPaint;
             private final Paint   iconPaint;
             private final TextPaint labelTp;
-            private final int     iconPx;
-            private final float   phR;
+            private final int     bannerW;
+            private final int     bannerH;
+            private final float   bannerCorner;
             private final float   phStroke;
             private final float   labelOffsetY;
             private final float   labelMaxWInset;
             private final float   icyOffset;
+            private final RectF   phRect       = new RectF();
             private       String  labelStr     = "";
             private       String  labelDisplay = "";
 
@@ -2739,12 +3068,13 @@ public class LauncherActivity extends Activity {
 
             CellView(Context ctx) {
                 super(ctx);
-                iconPx         = dp(ICON_DP);
-                phR            = iconPx / 2f - dp(2);
+                bannerW        = dp(BANNER_W_DP);
+                bannerH        = dp(BANNER_H_DP);
+                bannerCorner   = dp(BANNER_CORNER_DP);
                 phStroke       = dp(1);
-                labelOffsetY   = iconPx / 2f + dp(17);
+                labelOffsetY   = bannerH / 2f + dp(16);  // label below the banner
                 labelMaxWInset = dp(6);
-                icyOffset      = iconPx / 2f;  // centred in cell — ring aligns to this
+                icyOffset      = bannerH / 2f;  // banner centred at the cell top — ring aligns to this
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
@@ -2960,10 +3290,13 @@ public class LauncherActivity extends Activity {
                         case KeyEvent.KEYCODE_DPAD_UP:
                             View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
                         case KeyEvent.KEYCODE_DPAD_DOWN:
-                            // Consume — there's nothing below the shelf. Without this,
-                            // the platform's focus-search may jump to an unrelated
-                            // descendant or trigger an audible "focus-blocked" beep on
-                            // some TV ROMs. Returning true keeps focus on the cell.
+                            // v1.5.0: DOWN on a home cell pulls down the app
+                            // drawer (Apple-TV style). The drawer mirrors the
+                            // current order and lands focus on the same app.
+                            // If there are no apps to show, openDrawer no-ops
+                            // and we still consume so focus stays put (avoids
+                            // the platform "focus-blocked" beep on some ROMs).
+                            openDrawer();
                             return true;
                         default: return false;
                     }
@@ -3058,17 +3391,26 @@ public class LauncherActivity extends Activity {
 
             private void drawIcon(Canvas canvas, float cx, float icy) {
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
-                    float half = iconBitmap.getWidth() / 2f;
-                    canvas.drawBitmap(iconBitmap, cx - half, icy - half, iconPaint);
+                    float hw = iconBitmap.getWidth() / 2f, hh = iconBitmap.getHeight() / 2f;
+                    canvas.drawBitmap(iconBitmap, cx - hw, icy - hh, iconPaint);
                 } else {
-                    canvas.drawCircle(cx, icy, phR, sPhFill);
-                    canvas.drawCircle(cx, icy, phR - phStroke / 2f, phRing);
+                    // Rounded-rect banner-tile placeholder.
+                    float hw = bannerW / 2f, hh = bannerH / 2f;
+                    phRect.set(cx - hw, icy - hh, cx + hw, icy + hh);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, sPhFill);
+                    float in = phStroke / 2f;
+                    phRect.set(cx - hw + in, icy - hh + in, cx + hw - in, icy + hh - in);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, phRing);
                 }
             }
 
 
 
-            void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
+            @Override public void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
+
+            // ── IconTarget ──────────────────────────────────────────────
+            @Override public String  iconTargetPackage() { return boundApp != null ? boundApp.packageName : null; }
+            @Override public boolean iconTargetVisible() { return getVisibility() == View.VISIBLE; }
 
             void bind(AppInfo app, int index) {
                 boolean labelChanged = !app.label.equals(labelStr);
@@ -3097,17 +3439,862 @@ public class LauncherActivity extends Activity {
                     }
                     labelDisplay = disp;
                 }
-                Bitmap cached = iconCache.get(app.packageName);
+                Bitmap cached = bannerCache.get(app.packageName);
                 if (cached != null) {
                     if (cached != iconBitmap) { iconBitmap = cached; invalidate(); }
                 } else {
                     // Icon not yet loaded — clear any stale bitmap and request load
                     if (iconBitmap != null) { iconBitmap = null; invalidate(); }
-                    loadIconAsync(app, this);
+                    loadBannerAsync(app, this);
                 }
             }
         }
     }
+
+    /**
+     * v1.5.0 pull-down app drawer — a vertical recycling grid that reuses the
+     * exact same recycling technique as {@link RecyclingShelfView}: a
+     * {@code pool} of recycled cells, an {@code attached} {@link SparseArray}
+     * keyed by flat app index, and an {@link OverScroller} for fling. It is
+     * the drawer counterpart of the horizontal shelf and shares the icon
+     * pipeline (via {@link IconTarget}), the focus {@link RingView}, and the
+     * reorder context menu (via {@link ReorderHost}).
+     *
+     * <h3>Layout (driven by {@link HomeDrawerModel})</h3>
+     * {@link HomeDrawerModel#COLS} cells per row. Row 0 is the home row — the
+     * first {@code homeCount} apps, rendered centred to mirror the bottom home
+     * shelf exactly. Rows 1+ hold the remaining apps, {@code COLS} per row,
+     * left-aligned within a horizontally-centred grid block; the last row is a
+     * left-aligned remainder. {@code displayed} is the visible (non-hidden)
+     * app list and the rendering source of truth, identical in spirit to the
+     * shelf's {@code displayed}.
+     *
+     * <h3>Reorder (two stage)</h3>
+     * A long-press opens the shared Move / App Info / Uninstall menu (stage 1,
+     * D-pad UP/DOWN cycles, CENTER confirms). Choosing Move enters the active
+     * 2-D move (stage 2) where UP/DOWN/LEFT/RIGHT relocate the app via
+     * {@link HomeDrawerModel}; pushing an app up across the home boundary
+     * promotes it into the home row, pushing a home app down demotes it. Each
+     * move mirrors the new order into {@link #appList} (keeping hidden apps
+     * pinned) so a mid-reorder reconcile stays consistent; the order +
+     * {@code homeCount} are persisted on commit.
+     */
+    final class AppDrawer extends ViewGroup implements ReorderHost {
+
+        private static final int BUFFER_ROWS = 2;
+
+        private final ArrayList<DrawerCell>   pool     = new ArrayList<>(HomeDrawerModel.COLS * 4);
+        private final SparseArray<DrawerCell> attached = new SparseArray<>();
+        private final OverScroller scroller;
+        private VelocityTracker velTracker;
+        private float lastTouchY;
+        private boolean touchScrolling = false;
+
+        /** Visible (non-hidden) app list — the drawer's rendering source of
+         *  truth, snapshotted from the activity on every {@link #setApps}. */
+        private final ArrayList<AppInfo> displayed = new ArrayList<>();
+
+        private final int cellW, cellH, sidePad, stride, rowGap, rowStride, topPad, bottomPad;
+        private int gridLeft = 0;   // left edge of the centred grid block (rows 1+)
+        private int scrollY  = 0;
+        private int contentH = 0;
+        private final Paint dividerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        int     focusedIndex = 0;
+        boolean reorderMode  = false;
+        boolean moveActive   = false;   // stage 2: D-pad performs 2-D moves
+        int     dragIndex    = -1;
+        int     menuSelection = RecyclingShelfView.MENU_MOVE;
+        boolean fastNav      = false;
+
+        AppDrawer(Context ctx) {
+            super(ctx);
+            scroller = new OverScroller(ctx, SCROLL_EASE);
+            cellW     = dp(CELL_W_DP);
+            cellH     = dp(CELL_H_DP);
+            sidePad   = dp(10);
+            stride    = cellW + sidePad * 2;
+            rowGap    = dp(14);
+            rowStride = cellH + rowGap;
+            topPad    = dp(28);
+            bottomPad = dp(28);
+            // Near-opaque dark scrim so the wallpaper / toolbar / clock behind
+            // the drawer don't ghost through (we also hide the home shelf on
+            // open). Clickable so touches don't fall through to the shelf.
+            setBackgroundColor(0xF5101012);
+            setFocusable(false);
+            setClickable(true);
+            setClipChildren(false);
+            setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
+            // We paint a thin divider between the home row and the grid in
+            // onDraw, so opt out of the ViewGroup WILL_NOT_DRAW shortcut.
+            setWillNotDraw(false);
+            dividerPaint.setStyle(Paint.Style.STROKE);
+            dividerPaint.setColor(0x26FFFFFF);     // ~15% white hairline
+            dividerPaint.setStrokeWidth(dp(1));
+        }
+
+        /** Clamped, effective home-row size for the current visible count. */
+        private int hc() { return LauncherActivity.this.effectiveHomeCount(displayed.size()); }
+
+        // ── ReorderHost (shared context menu) ────────────────────────────
+        @Override public int menuSelection() { return menuSelection; }
+        @Override public void onMenuUninstall() {
+            if (!reorderMode) return;
+            menuSelection = RecyclingShelfView.MENU_UNINSTALL;
+            triggerUninstall();
+        }
+        @Override public void onMenuAppInfo() {
+            if (!reorderMode) return;
+            menuSelection = RecyclingShelfView.MENU_APP_INFO;
+            triggerAppInfo();
+        }
+        @Override public void onMenuMove() {
+            if (!reorderMode) return;
+            menuSelection = RecyclingShelfView.MENU_MOVE;
+            enterActiveMove();   // Move confirm → stage 2 (2-D move)
+        }
+
+        void setApps(List<AppInfo> apps, int hcIgnored) {
+            if (reorderMode) exitReorderMode(false);
+            hideContextMenu();
+            for (int i = 0; i < attached.size(); i++) {
+                DrawerCell cv = attached.valueAt(i);
+                if (cv.boundApp != null) {
+                    List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
+                    if (waiters != null) waiters.remove(cv);
+                }
+                cv.iconBitmap = null;
+                cv.setVisibility(GONE); pool.add(cv);
+            }
+            attached.clear();
+            displayed.clear();
+            if (apps != null && !apps.isEmpty()) displayed.addAll(apps);
+            if (displayed.isEmpty()) { focusedIndex = 0; scrollY = 0; }
+            else focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
+            recomputeContentHeight();
+            requestLayout();
+            // No eager pre-warm of the whole list: banner tiles are heavier
+            // than chip icons, so cells load their banner lazily on bind
+            // (visible rows only) via loadBannerAsync — fillVisible warms more
+            // as the grid scrolls. Pre-warming all N here would decode every
+            // app's banner up front, which the user explicitly flagged as a
+            // perf concern.
+            // Focus is normally driven by open(); but if a package-broadcast
+            // reconcile rebuilds us while the drawer is already open, re-focus
+            // the (clamped) current index after the relayout so focus is not
+            // silently lost mid-browse.
+            if (getVisibility() == View.VISIBLE && !displayed.isEmpty()) {
+                final int fi = focusedIndex;
+                post(() -> { if (getVisibility() == View.VISIBLE) requestFocusOnIndex(fi, true); });
+            }
+        }
+
+        private void recomputeContentHeight() {
+            int rows = HomeDrawerModel.rowCount(displayed.size(), hc());
+            contentH = topPad + blockHeight(rows) + bottomPad;
+        }
+
+        /** Pixel height of the {@code rows} themselves (no leading/trailing
+         *  padding): rows*cellH + gaps between them. */
+        private int blockHeight(int rows) {
+            if (rows <= 0) return 0;
+            return rows * cellH + (rows - 1) * rowGap;
+        }
+
+        /** Content-space Y of row 0. When the whole grid fits on screen (few
+         *  apps) the block is centred vertically for an Apple-TV look;
+         *  otherwise it starts at {@code topPad} and scrolls. */
+        private int firstRowTop() {
+            int rows = HomeDrawerModel.rowCount(displayed.size(), hc());
+            int bh = blockHeight(rows);
+            int vh = getHeight();
+            if (vh > 0 && topPad + bh + bottomPad <= vh) {
+                return Math.max(topPad, (vh - bh) / 2);
+            }
+            return topPad;
+        }
+
+        @Override protected void onMeasure(int wSpec, int hSpec) {
+            // MATCH_PARENT in both axes — the FrameLayout passes EXACTLY specs.
+            setMeasuredDimension(
+                    resolveSize(getSuggestedMinimumWidth(),  wSpec),
+                    resolveSize(getSuggestedMinimumHeight(), hSpec));
+        }
+
+        @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            int w = r - l;
+            if (w > 0) gridLeft = Math.max(dp(24), (w - HomeDrawerModel.COLS * stride) / 2);
+            scrollY = clampScrollY(scrollY);
+            fillVisible();
+        }
+
+        @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+            super.onSizeChanged(w, h, ow, oh);
+            if (w > 0) gridLeft = Math.max(dp(24), (w - HomeDrawerModel.COLS * stride) / 2);
+            recomputeContentHeight();
+            repositionAttached(); fillVisible();
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            super.onDetachedFromWindow();
+            if (velTracker != null) { velTracker.recycle(); velTracker = null; }
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            // Thin modern divider between the home row (row 0) and the rest of
+            // the drawer grid. Only when there is a home row AND at least one
+            // app below it. Drawn in the row gap so it never overlaps an icon;
+            // scrolls with the content.
+            int hc = hc();
+            if (hc <= 0 || displayed.size() <= hc) return;
+            int base = firstRowTop();
+            float y = base + cellH + rowGap / 2f - scrollY;
+            int h = getHeight();
+            if (y < 0 || y > h) return;
+            int left  = gridLeft + sidePad;
+            int right = gridLeft + HomeDrawerModel.COLS * stride - sidePad;
+            canvas.drawLine(left, y, right, y, dividerPaint);
+        }
+
+        private int rowLeftPad(int row, int len) {
+            int hc = hc();
+            if (hc > 0 && row == 0) {
+                // Home row: centre its (≤ COLS) cells within the view width,
+                // pixel-mirroring the bottom home shelf's centring.
+                int w = getWidth() > 0 ? getWidth() : screenW;
+                return Math.max(dp(24), (w - len * stride) / 2);
+            }
+            return gridLeft;   // rows 1+ left-aligned at the centred block edge
+        }
+
+        private int cellLeft(int index) {
+            int hc = hc();
+            int row = HomeDrawerModel.rowOf(index, hc);
+            int col = HomeDrawerModel.colOf(index, hc);
+            int len = HomeDrawerModel.rowLength(row, displayed.size(), hc);
+            return rowLeftPad(row, len) + col * stride + sidePad;
+        }
+        private int cellTop(int index) {
+            int row = HomeDrawerModel.rowOf(index, hc());
+            return firstRowTop() + row * rowStride - scrollY;
+        }
+
+        private int scrollYMax() { return Math.max(0, contentH - getHeight()); }
+        private int clampScrollY(int y) { return Math.max(0, Math.min(y, scrollYMax())); }
+
+        private void fillVisible() {
+            int h = getHeight();
+            if (h == 0 || displayed.isEmpty()) return;
+            int hc = hc();
+            int size = displayed.size();
+            int rows = HomeDrawerModel.rowCount(size, hc);
+            int base = firstRowTop();
+            int firstRow = Math.max(0, (scrollY - base) / rowStride - BUFFER_ROWS);
+            int lastRow  = Math.min(rows - 1, (scrollY + h - base) / rowStride + BUFFER_ROWS);
+            // Detach cells whose row scrolled out (or whose index is now stale).
+            for (int i = attached.size() - 1; i >= 0; i--) {
+                int idx = attached.keyAt(i);
+                int row = HomeDrawerModel.rowOf(idx, hc);
+                if (idx >= size || row < firstRow || row > lastRow) {
+                    DrawerCell cv = attached.valueAt(i);
+                    if (cv.boundApp != null) {
+                        List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
+                        if (waiters != null) waiters.remove(cv);
+                    }
+                    cv.iconBitmap = null;
+                    cv.setVisibility(GONE); pool.add(cv); attached.removeAt(i);
+                }
+            }
+            // Attach the cells that are now in range.
+            for (int row = firstRow; row <= lastRow; row++) {
+                int len = HomeDrawerModel.rowLength(row, size, hc);
+                for (int col = 0; col < len; col++) {
+                    int idx = HomeDrawerModel.indexAt(row, col, size, hc);
+                    if (idx < 0) continue;
+                    if (attached.get(idx) != null) continue;
+                    DrawerCell cv = obtainCell(); bindCell(cv, idx); attached.put(idx, cv);
+                }
+            }
+        }
+
+        private DrawerCell obtainCell() {
+            if (!pool.isEmpty()) {
+                DrawerCell cv = pool.remove(pool.size() - 1);
+                cv.animate().cancel();
+                cv.animate().setUpdateListener(null).setListener(null);
+                cv.setScaleX(1f); cv.setScaleY(1f);
+                cv.setTranslationX(0f); cv.setTranslationY(0f);
+                cv.setAlpha(1f);
+                cv.iconBitmap = null; cv.boundApp = null; cv.boundIndex = -1;
+                cv.setVisibility(VISIBLE); cv.invalidate();
+                return cv;
+            }
+            DrawerCell cv = new DrawerCell(getContext()); addView(cv); return cv;
+        }
+
+        private void bindCell(DrawerCell cv, int index) {
+            if (index < 0 || index >= displayed.size()) return;
+            AppInfo app = displayed.get(index);
+            int left = cellLeft(index), top = cellTop(index);
+            cv.bind(app, index);
+            cv.layout(left, top, left + cellW, top + cellH);
+            cv.invalidate();
+        }
+
+        private void repositionAttached() {
+            for (int i = 0; i < attached.size(); i++) {
+                int idx = attached.keyAt(i); DrawerCell cv = attached.valueAt(i);
+                int left = cellLeft(idx), top = cellTop(idx);
+                if (cv.getWidth() == cellW && cv.getHeight() == cellH) {
+                    int dx = left - cv.getLeft();
+                    int dy = top  - cv.getTop();
+                    if (dx != 0) cv.offsetLeftAndRight(dx);
+                    if (dy != 0) cv.offsetTopAndBottom(dy);
+                } else {
+                    cv.layout(left, top, left + cellW, top + cellH);
+                }
+            }
+        }
+
+        /** Rebind every attached cell to its (possibly new) app and position.
+         *  Used after a Move shifts the order so cells reflect the new
+         *  identities without a recycle churn. */
+        private void rebindAttached() {
+            for (int i = 0; i < attached.size(); i++) {
+                int idx = attached.keyAt(i);
+                if (idx >= 0 && idx < displayed.size()) bindCell(attached.valueAt(i), idx);
+            }
+        }
+
+        private void doScrollTo(int y) {
+            int newY = clampScrollY(y);
+            if (newY == scrollY) return;
+            scrollY = newY;
+            repositionAttached(); fillVisible();
+            if (!reorderMode) {
+                DrawerCell fc = attached.get(focusedIndex);
+                if (fc != null && fc.isFocused()) LauncherActivity.this.positionRing(fc);
+            }
+        }
+
+        private void smoothScrollTo(int y) {
+            int target = clampScrollY(y);
+            int dy = target - scrollY;
+            scroller.abortAnimation();
+            if (dy == 0) return;
+            int dur = Math.max(120, Math.min(260, 120 + Math.abs(dy) / 8));
+            scroller.startScroll(0, scrollY, 0, dy, dur);
+            postInvalidateOnAnimation();
+        }
+
+        @Override public void computeScroll() {
+            if (scroller.computeScrollOffset()) {
+                doScrollTo(scroller.getCurrY());
+                postInvalidateOnAnimation();
+            } else if (touchScrolling) {
+                touchScrolling = false;
+            }
+        }
+
+        /** Scroll so the row of {@code index} is fully visible. */
+        private void ensureVisible(int index, boolean snap) {
+            int viewH = getHeight();
+            if (viewH <= 0) return;   // not laid out yet — open()'s retry handles it
+            int row = HomeDrawerModel.rowOf(index, hc());
+            int top    = firstRowTop() + row * rowStride;   // content-space (no scroll)
+            int bottom = top + cellH;
+            int pad    = rowGap;
+            int target = scrollY;
+            if      (top - pad < scrollY)             target = top - pad;
+            else if (bottom + pad > scrollY + viewH)  target = bottom + pad - viewH;
+            target = clampScrollY(target);
+            if (snap) { if (target != scrollY) doScrollTo(target); }
+            else      smoothScrollTo(target);
+        }
+
+        void requestFocusOnIndex(int idx) { requestFocusOnIndex(idx, false); }
+        void requestFocusOnIndex(int idx, boolean snap) {
+            if (displayed.isEmpty()) return;
+            if (idx < 0) idx = 0;
+            if (idx >= displayed.size()) idx = displayed.size() - 1;
+            focusedIndex = idx;
+            scroller.abortAnimation();
+            boolean prevFast = fastNav;
+            fastNav = snap;
+            try {
+                ensureVisible(idx, snap);
+                fillVisible();
+                DrawerCell cv = attached.get(idx);
+                if (cv != null) {
+                    cv.requestFocus();
+                } else {
+                    final int target = idx;
+                    final boolean deferredFast = snap;
+                    post(() -> {
+                        fillVisible();
+                        DrawerCell cv2 = attached.get(target);
+                        if (cv2 != null) {
+                            boolean p = fastNav; fastNav = deferredFast;
+                            try { cv2.requestFocus(); } finally { fastNav = p; }
+                        }
+                    });
+                }
+            } finally { fastNav = prevFast; }
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent ev) {
+            if (velTracker == null) velTracker = VelocityTracker.obtain();
+            velTracker.addMovement(ev);
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    scroller.abortAnimation();
+                    lastTouchY = ev.getY();
+                    touchScrolling = true;
+                    RingView rvd = ringView; if (rvd != null) rvd.setVisibility(View.INVISIBLE);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    float dy = lastTouchY - ev.getY(); lastTouchY = ev.getY();
+                    doScrollTo(scrollY + (int) dy); break;
+                case MotionEvent.ACTION_UP:
+                    velTracker.computeCurrentVelocity(1000);
+                    int vy = (int) velTracker.getYVelocity();
+                    scroller.fling(0, scrollY, 0, -vy, 0, 0, 0, scrollYMax());
+                    velTracker.recycle(); velTracker = null;
+                    postInvalidateOnAnimation();
+                    break;
+                case MotionEvent.ACTION_CANCEL:
+                    scroller.abortAnimation();
+                    if (velTracker != null) { velTracker.recycle(); velTracker = null; }
+                    touchScrolling = false;
+                    break;
+            }
+            return true;
+        }
+
+        // ── open / close ─────────────────────────────────────────────────
+        void open(int focusIdx) {
+            setVisibility(VISIBLE);
+            setAlpha(0f);
+            int h = getHeight() > 0 ? getHeight() : screenH;
+            setTranslationY(h * 0.10f);
+            animate().cancel();
+            animate().alpha(1f).translationY(0f)
+                    .setDuration(220).setInterpolator(SCROLL_EASE)
+                    // Keep the ring glued to the focused cell as the whole
+                    // drawer slides up (the cells move with the parent
+                    // translation, so a one-shot positionRing would be left
+                    // offset by the residual slide once the tween ends).
+                    .setUpdateListener(a -> {
+                        DrawerCell fc = attached.get(focusedIndex);
+                        if (fc != null && fc.isFocused()) LauncherActivity.this.positionRing(fc);
+                    })
+                    .start();
+            final int fi = focusIdx;
+            // Focus after a layout pass so the target cell exists.
+            post(() -> requestFocusOnIndex(fi, true));
+        }
+
+        void close(Runnable after) {
+            animate().cancel();
+            // Hide the ring up front so it doesn't trail the downward slide.
+            RingView rv0 = ringView; if (rv0 != null) rv0.setVisibility(View.INVISIBLE);
+            int h = getHeight() > 0 ? getHeight() : screenH;
+            animate().alpha(0f).translationY(h * 0.10f)
+                    .setDuration(170).setInterpolator(SCROLL_EASE)
+                    .withEndAction(() -> {
+                        setVisibility(GONE);
+                        setTranslationY(0f); setAlpha(1f);
+                        if (after != null) after.run();
+                    }).start();
+        }
+
+        /** Dismiss instantly with no animation (used from onPause where the
+         *  close tween can't run). */
+        void forceHide() {
+            if (reorderMode) exitReorderMode(false);
+            animate().cancel();
+            setVisibility(GONE);
+            setTranslationY(0f); setAlpha(1f);
+            RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+        }
+
+        // ── reorder ──────────────────────────────────────────────────────
+        void enterReorderMode(int idx) {
+            if (reorderMode || idx < 0 || idx >= displayed.size()) return;
+            reorderMode = true;
+            moveActive  = false;
+            dragIndex   = idx;
+            focusedIndex = idx;
+            menuSelection = RecyclingShelfView.MENU_MOVE;
+            LauncherActivity.this.menuHost = this;
+            LauncherActivity.this.ensureMenuOverlay();
+            rebindAttached(); // repaint drag dimming
+            DrawerCell cv = attached.get(idx);
+            if (cv != null) LauncherActivity.this.showContextMenu(cv);
+            post(() -> { DrawerCell c = attached.get(dragIndex);
+                         if (c != null) LauncherActivity.this.positionRing(c); });
+        }
+
+        /** Stage-2 entry: hide the menu; D-pad now performs 2-D moves. */
+        private void enterActiveMove() {
+            moveActive = true;
+            hideContextMenu();
+            DrawerCell cv = attached.get(dragIndex);
+            if (cv != null) LauncherActivity.this.positionRing(cv);
+        }
+
+        void exitReorderMode(boolean persist) {
+            if (!reorderMode) return;
+            reorderMode = false; moveActive = false;
+            int idx = dragIndex; dragIndex = -1;
+            hideContextMenu();
+            if (persist) { saveOrder(); saveHomeCount(); }
+            rebindAttached(); // clear drag dimming
+            final int f = Math.min(Math.max(0, idx), Math.max(0, displayed.size() - 1));
+            focusedIndex = f;
+            post(() -> {
+                if (getVisibility() != View.VISIBLE) return;
+                DrawerCell cv = attached.get(f);
+                if (cv != null && cv.isAttachedToWindow() && cv.getWidth() > 0) {
+                    cv.requestFocus();
+                    LauncherActivity.this.positionRing(cv);
+                }
+            });
+        }
+
+        /** Apply a {@link HomeDrawerModel} move result: adopt the new
+         *  homeCount, mirror the new visible order into the master appList,
+         *  then rebind + reposition cells and re-focus the dragged app. */
+        private void applyMove(HomeDrawerModel.MoveResult r) {
+            int size = displayed.size();
+            int newHc = HomeDrawerModel.clampHomeCount(r.homeCount, size);
+            if (size >= 1 && newHc < 1) newHc = 1;   // keep at least one home app
+            LauncherActivity.this.homeCount = newHc;
+            LauncherActivity.this.rebuildAppListFromVisible(displayed);
+            // Persist immediately on every move so the live in-memory order can
+            // never diverge from what is saved — a Back/reconcile exit then has
+            // nothing to lose, and a process death mid-reorder keeps the moves
+            // the user already saw. saveOrder's AppListCache write is throttled
+            // by its bounded executor (rejections ignored) and prefs.apply() is
+            // async-batched, so per-move persistence is cheap even on held keys.
+            saveOrder();
+            saveHomeCount();
+            dragIndex    = r.index;
+            focusedIndex = r.index;
+            recomputeContentHeight();
+            ensureVisible(r.index, true);
+            rebindAttached();
+            repositionAttached();
+            fillVisible();
+            DrawerCell cv = attached.get(dragIndex);
+            if (cv != null) {
+                cv.requestFocus(); cv.invalidate();
+                LauncherActivity.this.positionRing(cv);
+            }
+        }
+
+        private void moveDir(int kc) {
+            int hc = hc();
+            HomeDrawerModel.MoveResult r;
+            switch (kc) {
+                case KeyEvent.KEYCODE_DPAD_LEFT:  r = HomeDrawerModel.moveLeft (displayed, dragIndex, hc); break;
+                case KeyEvent.KEYCODE_DPAD_RIGHT: r = HomeDrawerModel.moveRight(displayed, dragIndex, hc); break;
+                case KeyEvent.KEYCODE_DPAD_UP:    r = HomeDrawerModel.moveUp   (displayed, dragIndex, hc); break;
+                case KeyEvent.KEYCODE_DPAD_DOWN:  r = HomeDrawerModel.moveDown (displayed, dragIndex, hc); break;
+                default: return;
+            }
+            applyMove(r);
+        }
+
+        void triggerUninstall() {
+            AppInfo app = (dragIndex >= 0 && dragIndex < displayed.size()) ? displayed.get(dragIndex) : null;
+            exitReorderMode(false);
+            LauncherActivity.this.closeDrawer();   // return to home before the system dialog
+            if (app != null) LauncherActivity.this.doUninstall(app);
+        }
+        void triggerAppInfo() {
+            AppInfo app = (dragIndex >= 0 && dragIndex < displayed.size()) ? displayed.get(dragIndex) : null;
+            exitReorderMode(false);
+            LauncherActivity.this.closeDrawer();
+            if (app != null) LauncherActivity.this.doAppInfo(app);
+        }
+
+        // ── DrawerCell ─────────────────────────────────────────────────────
+        final class DrawerCell extends View implements IconTarget {
+
+            Bitmap  iconBitmap;
+            AppInfo boundApp;
+            int     boundIndex;
+            private long    centerKeyDownAt      = 0;
+            private boolean longPressArmed       = false;
+            private boolean longPressFired       = false;
+            private boolean suppressCenterUntilUp = false;
+
+            private final Paint     phRing;
+            private final Paint     labelPaint;
+            private final Paint     iconPaint;
+            private final TextPaint labelTp;
+            private final int       bannerW;
+            private final int       bannerH;
+            private final float     bannerCorner;
+            private final float     phStroke;
+            private final float     labelOffsetY;
+            private final float     labelMaxWInset;
+            private final float     icyOffset;
+            private final RectF     phRect       = new RectF();
+            private       String    labelStr     = "";
+            private       String    labelDisplay = "";
+
+            private final android.animation.ValueAnimator.AnimatorUpdateListener focusUpdateListener =
+                    anim -> { if (isFocused() && isAttachedToWindow()) positionRing(DrawerCell.this); };
+
+            DrawerCell(Context ctx) {
+                super(ctx);
+                bannerW        = dp(BANNER_W_DP);
+                bannerH        = dp(BANNER_H_DP);
+                bannerCorner   = dp(BANNER_CORNER_DP);
+                phStroke       = dp(1);
+                labelOffsetY   = bannerH / 2f + dp(16);
+                labelMaxWInset = dp(6);
+                icyOffset      = bannerH / 2f;
+
+                phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
+                phRing.setStyle(Paint.Style.STROKE);
+                phRing.setColor(0x55FFFFFF);
+                phRing.setStrokeWidth(phStroke);
+
+                iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+
+                labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                labelPaint.setColor(Color.WHITE);
+                labelPaint.setTextSize(dp(11));
+                labelPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                labelPaint.setTextAlign(Paint.Align.CENTER);
+                labelPaint.setShadowLayer(dp(4), 0, dp(1), 0xCC000000);
+                labelPaint.setLetterSpacing(0.02f);
+                labelTp = new TextPaint(labelPaint);
+
+                setFocusable(true); setFocusableInTouchMode(true);
+                setClickable(true); setWillNotDraw(false);
+                setDefaultFocusHighlightEnabled(false);
+                setBackground(null); setForeground(null);
+                setStateListAnimator(null); setSoundEffectsEnabled(true);
+
+                setOnClickListener(v -> {
+                    if (boundApp == null) return;
+                    if (!reorderMode) launchApp(boundApp);
+                });
+                setOnLongClickListener(v -> {
+                    if (boundApp == null || reorderMode) return true;
+                    enterReorderMode(boundIndex);
+                    return true;
+                });
+
+                setOnFocusChangeListener((v, f) -> {
+                    if (!reorderMode || moveActive) {
+                        animate().cancel();
+                        if (fastNav) {
+                            setScaleX(f ? FOCUS_SCALE : 1f);
+                            setScaleY(f ? FOCUS_SCALE : 1f);
+                            if (f && isAttachedToWindow() && getWidth() > 0) positionRing(DrawerCell.this);
+                        } else if (f) {
+                            animate().scaleX(FOCUS_SCALE).scaleY(FOCUS_SCALE)
+                                     .setDuration(FOCUS_DUR_MS).setInterpolator(FOCUS_IN_BOUNCE)
+                                     .setUpdateListener(focusUpdateListener).start();
+                        } else {
+                            animate().scaleX(1f).scaleY(1f)
+                                     .setDuration(UNFOCUS_DUR_MS).setInterpolator(FOCUS_EASE)
+                                     .setUpdateListener(null).start();
+                        }
+                    }
+                    invalidate();
+                    if (f) {
+                        focusedIndex = boundIndex;
+                        if (!reorderMode) {
+                            if (isAttachedToWindow() && getWidth() > 0) positionRing(DrawerCell.this);
+                            if (!fastNav) ensureVisible(boundIndex, false);
+                        }
+                    }
+                });
+
+                setOnKeyListener((v, kc, ev) -> {
+                    if (reorderMode) {
+                        boolean isCenterKey = kc == KeyEvent.KEYCODE_DPAD_CENTER
+                                || kc == KeyEvent.KEYCODE_ENTER
+                                || kc == KeyEvent.KEYCODE_BUTTON_A;
+                        if (isCenterKey && ev.getAction() == KeyEvent.ACTION_UP) {
+                            suppressCenterUntilUp = false;
+                            return true;
+                        }
+                        if (isCenterKey && suppressCenterUntilUp) return true;
+                        if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+
+                        if (moveActive) {
+                            // Stage 2 — D-pad performs 2-D moves.
+                            switch (kc) {
+                                case KeyEvent.KEYCODE_DPAD_LEFT:
+                                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                                case KeyEvent.KEYCODE_DPAD_UP:
+                                case KeyEvent.KEYCODE_DPAD_DOWN:
+                                    moveDir(kc); return true;
+                                case KeyEvent.KEYCODE_DPAD_CENTER:
+                                case KeyEvent.KEYCODE_ENTER:
+                                case KeyEvent.KEYCODE_BUTTON_A:
+                                    exitReorderMode(true); return true;   // commit
+                                case KeyEvent.KEYCODE_BACK:
+                                    exitReorderMode(true); return true;
+                                default: return false;
+                            }
+                        }
+                        // Stage 1 — menu shown: UP/DOWN cycle, CENTER confirms.
+                        switch (kc) {
+                            case KeyEvent.KEYCODE_DPAD_UP:
+                                if      (menuSelection == RecyclingShelfView.MENU_MOVE)     { menuSelection = RecyclingShelfView.MENU_APP_INFO;  updateMenuHighlight(); }
+                                else if (menuSelection == RecyclingShelfView.MENU_APP_INFO) { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
+                                return true;
+                            case KeyEvent.KEYCODE_DPAD_DOWN:
+                                if      (menuSelection == RecyclingShelfView.MENU_UNINSTALL) { menuSelection = RecyclingShelfView.MENU_APP_INFO; updateMenuHighlight(); }
+                                else if (menuSelection == RecyclingShelfView.MENU_APP_INFO)  { menuSelection = RecyclingShelfView.MENU_MOVE;     updateMenuHighlight(); }
+                                return true;
+                            case KeyEvent.KEYCODE_DPAD_LEFT:
+                            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                                return true; // consume; movement is in stage 2
+                            case KeyEvent.KEYCODE_DPAD_CENTER:
+                            case KeyEvent.KEYCODE_ENTER:
+                            case KeyEvent.KEYCODE_BUTTON_A:
+                                if      (menuSelection == RecyclingShelfView.MENU_UNINSTALL) triggerUninstall();
+                                else if (menuSelection == RecyclingShelfView.MENU_APP_INFO)  triggerAppInfo();
+                                else                                                          enterActiveMove();
+                                return true;
+                            case KeyEvent.KEYCODE_BACK:
+                                exitReorderMode(false); return true;
+                            default: return false;
+                        }
+                    }
+
+                    boolean isCenterKey = kc == KeyEvent.KEYCODE_DPAD_CENTER
+                            || kc == KeyEvent.KEYCODE_ENTER
+                            || kc == KeyEvent.KEYCODE_BUTTON_A;
+                    if (isCenterKey) {
+                        if (ev.getAction() == KeyEvent.ACTION_DOWN) {
+                            if (ev.getRepeatCount() == 0) {
+                                centerKeyDownAt = System.currentTimeMillis();
+                                longPressArmed  = true; longPressFired = false;
+                            } else if (longPressArmed && !longPressFired) {
+                                long held = System.currentTimeMillis() - centerKeyDownAt;
+                                if (held >= 600 && boundApp != null && !reorderMode) {
+                                    longPressFired = true; longPressArmed = false; centerKeyDownAt = 0;
+                                    suppressCenterUntilUp = true;
+                                    enterReorderMode(boundIndex);
+                                }
+                            }
+                            return true;
+                        }
+                        if (ev.getAction() == KeyEvent.ACTION_UP) {
+                            boolean wasArmed = longPressArmed;
+                            longPressArmed = false; longPressFired = false; centerKeyDownAt = 0;
+                            if (wasArmed && !reorderMode) {
+                                playSoundEffect(SoundEffectConstants.CLICK);
+                                performClick();
+                            }
+                            return true;
+                        }
+                        return false;
+                    }
+
+                    if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+                    boolean held = ev.getRepeatCount() > 0;
+                    int size = displayed.size(), hc = hc();
+                    switch (kc) {
+                        case KeyEvent.KEYCODE_DPAD_LEFT:
+                            requestFocusOnIndex(HomeDrawerModel.navLeft(boundIndex, size, hc), held);
+                            return true;
+                        case KeyEvent.KEYCODE_DPAD_RIGHT:
+                            requestFocusOnIndex(HomeDrawerModel.navRight(boundIndex, size, hc), held);
+                            return true;
+                        case KeyEvent.KEYCODE_DPAD_DOWN:
+                            requestFocusOnIndex(HomeDrawerModel.navDown(boundIndex, size, hc), held);
+                            return true;
+                        case KeyEvent.KEYCODE_DPAD_UP:
+                            int up = HomeDrawerModel.navUp(boundIndex, size, hc);
+                            if (up == HomeDrawerModel.CLOSE_DRAWER) closeDrawer();
+                            else requestFocusOnIndex(up, held);
+                            return true;
+                        case KeyEvent.KEYCODE_BACK:
+                            closeDrawer(); return true;
+                        default: return false;
+                    }
+                });
+            }
+
+            @Override public void setIconBitmap(Bitmap bmp) { iconBitmap = bmp; invalidate(); }
+            @Override public String  iconTargetPackage() { return boundApp != null ? boundApp.packageName : null; }
+            @Override public boolean iconTargetVisible() { return getVisibility() == View.VISIBLE; }
+
+            @Override protected void onDraw(Canvas canvas) {
+                int w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) return;
+                float cx  = w / 2f;
+                float icy = icyOffset;
+                boolean isDragTarget = reorderMode && boundIndex == dragIndex;
+                if (reorderMode && !isDragTarget) {
+                    iconPaint.setAlpha(102);
+                    drawIcon(canvas, cx, icy);
+                    iconPaint.setAlpha(255);
+                } else {
+                    drawIcon(canvas, cx, icy);
+                }
+                boolean showLabel = (!labelDisplay.isEmpty())
+                        && ((isFocused() && !reorderMode) || isDragTarget);
+                if (showLabel) {
+                    float labelY = icy + labelOffsetY;
+                    if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);
+                }
+            }
+
+            private void drawIcon(Canvas canvas, float cx, float icy) {
+                if (iconBitmap != null && !iconBitmap.isRecycled()) {
+                    float hw = iconBitmap.getWidth() / 2f, hh = iconBitmap.getHeight() / 2f;
+                    canvas.drawBitmap(iconBitmap, cx - hw, icy - hh, iconPaint);
+                } else {
+                    // Rounded-rect banner-tile placeholder.
+                    float hw = bannerW / 2f, hh = bannerH / 2f;
+                    phRect.set(cx - hw, icy - hh, cx + hw, icy + hh);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, sPhFill);
+                    float in = phStroke / 2f;
+                    phRect.set(cx - hw + in, icy - hh + in, cx + hw - in, icy + hh - in);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, phRing);
+                }
+            }
+
+            void bind(AppInfo app, int index) {
+                boolean labelChanged = !app.label.equals(labelStr);
+                boundApp = app; boundIndex = index; labelStr = app.label;
+                setContentDescription(app.label);
+                if (labelChanged) {
+                    String disp = app.displayLabel;
+                    if (disp == null) {
+                        float maxW = dp(CELL_W_DP) - labelMaxWInset;
+                        disp = labelPaint.measureText(labelStr) > maxW
+                                ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
+                                : labelStr;
+                        app.displayLabel = disp;
+                    }
+                    labelDisplay = disp;
+                }
+                Bitmap cached = bannerCache.get(app.packageName);
+                if (cached != null) {
+                    if (cached != iconBitmap) { iconBitmap = cached; invalidate(); }
+                } else {
+                    if (iconBitmap != null) { iconBitmap = null; invalidate(); }
+                    loadBannerAsync(app, this);
+                }
+            }
+        }
+    }
+
     private void loadApps() {
         if (!appsLoading.compareAndSet(false, true)) return;
         // A5 fix: bail before any work if the activity was already torn
@@ -3755,44 +4942,28 @@ public class LauncherActivity extends Activity {
      *  containsKey checks. */
     private void applyShelfApps(RecyclingShelfView s) {
         if (s == null) return;
-        if (hiddenApps.isEmpty()) { s.setApps(appList); return; }
-        // Reuse the instance-level scratch list. setApps copies into its
-        // own {@code displayed} list, so we never leak references across
-        // UI events. Saves one ArrayList allocation per call — fires on
-        // every package broadcast and every hide-manager toggle commit
-        // when the user has any hidden apps configured.
-        ArrayList<AppInfo> visible = visibleScratch;
-        visible.clear();
-        // Pre-grow the backing array so the {@code add} loop below
-        // doesn't trigger intermediate Object[] growth on the first
-        // call (or after a large appList expansion across cold starts).
-        visible.ensureCapacity(appList.size());
-        for (int i = 0, n = appList.size(); i < n; i++) {
-            AppInfo a = appList.get(i);
-            if (!hiddenApps.contains(a.packageName)) {
-                visible.add(a);
-            }
-            // Hidden apps are intentionally NOT pre-warmed here — see
-            // method javadoc. The keymap overlay show path warms them.
-        }
-        s.setApps(visible);
+        // Single source of truth: appList (full order) minus hiddenApps, split
+        // at the home boundary. The home row shows the first homeCount apps;
+        // the drawer shows the whole visible list. Both setApps consumers
+        // snapshot into their own displayed list, so the shared visible list
+        // (possibly the reused visibleScratch) never leaks across UI events.
+        List<AppInfo> visible = buildVisibleList();
+        resolveHomeCount(visible.size());
+        int hc = effectiveHomeCount(visible.size());
+        pushHomeRow(s, visible, hc);
+        AppDrawer d = drawer;
+        if (d != null) d.setApps(visible, hc);
     }
 
-    /** Pre-warm icons for every hidden app. Called from
-     *  {@link #showKeymapOverlay()} so by the time the user drills
-     *  into the picker / hide-manager chip strips, every chip's icon
-     *  is in {@link #iconCache} (or queued on the icon executor) and
-     *  the chip ImageView resolves immediately on first paint.
-     *
-     *  <p>Cheap on warm caches: {@link #preWarmIcon} early-returns on
-     *  cache hit. On a cold install, queues at most ~hidden_count
-     *  loads on the icon executor — runs in background while the
-     *  user is reading the keymap card slot rows. */
-    private void preWarmHiddenAppIcons() {
-        if (hiddenApps.isEmpty()) return;
+    /** Pre-warm the small round chip icons for the keymap overlay. v1.5.0:
+     *  the home / drawer cells now load BANNER tiles (not the round icons),
+     *  so nothing warms {@link #iconCache} for the chips until the overlay
+     *  opens — warm every app here so the picker / hide-list / slot rows
+     *  resolve their icons. {@link #preWarmIcon} early-returns on a cache
+     *  hit, so repeat opens are O(N) cheap containsKey checks. */
+    private void preWarmChipIcons() {
         for (int i = 0, n = appList.size(); i < n; i++) {
-            AppInfo a = appList.get(i);
-            if (hiddenApps.contains(a.packageName)) preWarmIcon(a);
+            preWarmIcon(appList.get(i));
         }
     }
 
@@ -4558,6 +5729,7 @@ public class LauncherActivity extends Activity {
             // [2] app icon (visible only when assigned and cached)
             ImageView icon = new ImageView(this);
             icon.setVisibility(View.GONE);
+            clipCircular(icon);   // round small icon
             android.widget.LinearLayout.LayoutParams iconLp =
                     new android.widget.LinearLayout.LayoutParams(dp(18), dp(18));
             iconLp.setMarginEnd(dp(8));
@@ -4629,15 +5801,12 @@ public class LauncherActivity extends Activity {
         hsv.setClipToPadding(false);
         hsv.addView(strip, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
-        // ── Hide-manager view ───────────────────────────────────────
-        // Multi-select sibling of the picker: same horizontal chip strip,
-        // same selection language (bright frosted-white pill + dark text
-        // + 1.05x scale + auto-scroll). The only delta is that hidden
-        // chips render their label with a strike-through line so the
-        // hidden flag is legible in either selected or idle state — this
-        // way the launcher uses ONE chip-picker idiom across both
-        // single-select (button mapper) and multi-select (hide manager)
-        // flows, instead of the previous vertical-list special case.
+        // ── Hide-manager view (v1.5.0: vertical list) ───────────────
+        // Redesigned from the old horizontal chip strip to a vertical,
+        // OK-toggleable list that mirrors the button-shortcuts slot list:
+        // round app icon + label per row, ~6 rows visible and the rest
+        // scrollable, no dead space. The hidden flag is a strike-through on
+        // the label (kept from the previous design).
         android.widget.LinearLayout hideView = new android.widget.LinearLayout(this);
         hideView.setOrientation(android.widget.LinearLayout.VERTICAL);
         hideView.setVisibility(View.GONE);
@@ -4650,33 +5819,35 @@ public class LauncherActivity extends Activity {
         hideTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         hideTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         hideTitle.setLetterSpacing(0.04f);
+        hideTitle.setSingleLine(true);
+        hideTitle.setEllipsize(TextUtils.TruncateAt.END);
+        hideTitle.setMaxWidth(dp(248));
         hideTitle.setPadding(dp(4), dp(2), dp(4), dp(8));
         hideView.addView(hideTitle);
 
-        // Horizontal scroller, capped at the same width as the picker so
-        // both card sub-modes have a consistent footprint and the user's
-        // muscle memory carries between them.
-        android.widget.HorizontalScrollView hsv2 =
-                new android.widget.HorizontalScrollView(this);
-        hsv2.setHorizontalScrollBarEnabled(false);
-        hsv2.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        int hideW = Math.min(dp(540), Math.round(screenW * 0.52f));
-        if (hideW < dp(300)) hideW = dp(300);
-        android.widget.LinearLayout.LayoutParams hsv2Lp =
-                new android.widget.LinearLayout.LayoutParams(hideW, WRAP);
-        hideView.addView(hsv2, hsv2Lp);
+        // Vertical scroller capped at HIDE_VISIBLE_ROWS rows tall — content
+        // shorter than that wraps (no empty space); longer scrolls.
+        final int hideRowH = dp(HIDE_ROW_H_DP);
+        android.widget.ScrollView hideScroll = new android.widget.ScrollView(this) {
+            @Override protected void onMeasure(int wSpec, int hSpec) {
+                // Cap at HIDE_VISIBLE_ROWS rows (row height + 2dp bottom margin)
+                // so exactly that many show; shorter content wraps (no empty
+                // space), longer scrolls.
+                int cap = (hideRowH + dp(2)) * HIDE_VISIBLE_ROWS;
+                super.onMeasure(wSpec,
+                        View.MeasureSpec.makeMeasureSpec(cap, View.MeasureSpec.AT_MOST));
+            }
+        };
+        hideScroll.setVerticalScrollBarEnabled(false);
+        hideScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        android.widget.LinearLayout.LayoutParams hsLp =
+                new android.widget.LinearLayout.LayoutParams(dp(248), WRAP);
+        hideView.addView(hideScroll, hsLp);
 
         android.widget.LinearLayout hideStrip = new android.widget.LinearLayout(this);
-        hideStrip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        hideStrip.setPadding(dp(2), dp(4), dp(2), dp(4));
-        // Allow chip scale-up to draw outside the strip's logical bounds
-        // (matches the picker strip).
-        hideStrip.setClipChildren(false);
-        hideStrip.setClipToPadding(false);
-        hsv2.setClipChildren(false);
-        hsv2.setClipToPadding(false);
-        hsv2.addView(hideStrip,
-                new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
+        hideStrip.setOrientation(android.widget.LinearLayout.VERTICAL);
+        hideScroll.addView(hideStrip,
+                new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
 
         card.addView(col);
         card.addView(picker);
@@ -4699,7 +5870,7 @@ public class LauncherActivity extends Activity {
         keymapPickerStrip = strip;
         keymapHideView    = hideView;
         keymapHideTitle   = hideTitle;
-        keymapHideHsv     = hsv2;
+        keymapHideScroll  = hideScroll;
         keymapHideStrip   = hideStrip;
     }
 
@@ -4716,8 +5887,8 @@ public class LauncherActivity extends Activity {
         // happens to load it. Idempotent, cheap on warm caches; only
         // does real work on the rare path "package broadcast invalidated
         // a hidden app's icon since the last overlay open". See
-        // {@link #preWarmHiddenAppIcons} for the cost analysis.
-        preWarmHiddenAppIcons();
+        // {@link #preWarmChipIcons} for the cost analysis.
+        preWarmChipIcons();
         // Hide the focus ring — it belongs to the shelf, which is now
         // logically behind the overlay.
         RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
@@ -5275,13 +6446,14 @@ public class LauncherActivity extends Activity {
         // uses INVISIBLE (reserves layout space, doesn't draw) so a
         // later icon delivery via {@link #setChipIcon} flips visibility
         // VISIBLE without changing the chip's measured width. See the
-        // {@link #addHideChip} javadoc for the visual rationale — the
+        // {@link #addHideRow} javadoc for the visual rationale — the
         // GONE → VISIBLE alternative made chips visibly resize on
         // every async icon load and shifted neighbours along the strip.
         if (!isNone) {
             ImageView iv = new ImageView(this);
             if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
             else              { iv.setVisibility(View.INVISIBLE); }
+            clipCircular(iv);   // round small icon
             android.widget.LinearLayout.LayoutParams ivLp =
                     new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
             ivLp.setMarginEnd(dp(7));
@@ -5543,10 +6715,10 @@ public class LauncherActivity extends Activity {
         if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
         keymapHideView .setVisibility(View.VISIBLE);
         refreshHideStrip();
-        // Initial scroll happens after layout — post() so getLeft() of the
-        // selected chip is non-zero.
-        final android.widget.HorizontalScrollView hsv = keymapHideHsv;
-        if (hsv != null) hsv.post(this::scrollHideToSelection);
+        // Initial scroll happens after layout — post() so getTop() of the
+        // selected row is valid.
+        final android.widget.ScrollView sv = keymapHideScroll;
+        if (sv != null) sv.post(this::scrollHideToSelection);
     }
 
     /** Cancel the hide manager and return to slot mode. The shelf is
@@ -5598,7 +6770,7 @@ public class LauncherActivity extends Activity {
         for (int i = 0; i < appList.size(); i++) {
             AppInfo a = appList.get(i);
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
-            addHideChip(strip, a.label, b);
+            addHideRow(strip, a.label, b);
         }
     }
 
@@ -5632,55 +6804,49 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    /** Mirror of {@link #addPickerChip} for the hide-manager strip. The
-     *  geometry, paddings, idle colours and pill background match exactly
-     *  so the two strips are visually indistinguishable in idle state.
-     *  Hidden state is applied later by {@link #paintHideChip} as a
-     *  strike-through flag on the label paint. */
-    private void addHideChip(android.widget.LinearLayout strip,
-                             String label, Bitmap icon) {
-        android.widget.LinearLayout chip = new android.widget.LinearLayout(this);
-        chip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        chip.setGravity(Gravity.CENTER_VERTICAL);
-        chip.setPadding(dp(10), dp(7), dp(12), dp(7));
+    /** Build one hide-manager <em>row</em> (v1.5.0 vertical list): a round
+     *  app icon + label, full row width so the selection pill spans it. The
+     *  hidden flag is applied later by {@link #paintHideRow} as a
+     *  strike-through on the label. Mirrors the button-shortcut slot rows. */
+    private void addHideRow(android.widget.LinearLayout list,
+                            String label, Bitmap icon) {
+        android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(7), dp(12), dp(7));
         android.graphics.drawable.GradientDrawable bg =
                 new android.graphics.drawable.GradientDrawable();
         bg.setColor(Color.TRANSPARENT);
-        bg.setCornerRadius(dp(10));
-        chip.setBackground(bg);
+        bg.setCornerRadius(dp(9));
+        row.setBackground(bg);
 
-        // Icon slot — always present so chip widths stay constant
-        // regardless of icon-load timing. Cache miss at build time uses
-        // INVISIBLE (reserves space, doesn't draw) so a later icon
-        // delivery via {@link #setChipIcon} only changes drawing, never
-        // the chip's measured width. The earlier GONE design dropped
-        // the slot from layout entirely, so chips visibly "popped"
-        // wider as their icons landed asynchronously — every chip to
-        // the right of the just-loaded one shifted, producing a
-        // janky cascade for the first 50-200 ms after the overlay
-        // opened with un-warmed icons.
+        // Round app icon. The slot is always present (INVISIBLE on a cache
+        // miss) so the label never shifts when the bitmap lands.
         ImageView iv = new ImageView(this);
         if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
         else              { iv.setVisibility(View.INVISIBLE); }
+        clipCircular(iv);
         android.widget.LinearLayout.LayoutParams ivLp =
-                new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
-        ivLp.setMarginEnd(dp(7));
-        chip.addView(iv, ivLp);
+                new android.widget.LinearLayout.LayoutParams(dp(22), dp(22));
+        ivLp.setMarginEnd(dp(10));
+        row.addView(iv, ivLp);
 
         TextView tv = new TextView(this);
         tv.setText(label);
-        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         tv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         tv.setTextColor(0x99FFFFFF);
         tv.setSingleLine(true);
         tv.setEllipsize(TextUtils.TruncateAt.END);
-        tv.setMaxWidth(dp(150));
-        chip.addView(tv);
+        // Weight fills the remaining row width so the pill spans the row.
+        android.widget.LinearLayout.LayoutParams tvLp =
+                new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
+        row.addView(tv, tvLp);
 
-        android.widget.LinearLayout.LayoutParams clp =
-                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
-        clp.setMarginEnd(dp(7));
-        strip.addView(chip, clp);
+        android.widget.LinearLayout.LayoutParams rlp =
+                new android.widget.LinearLayout.LayoutParams(MATCH, dp(HIDE_ROW_H_DP));
+        rlp.bottomMargin = dp(2);
+        list.addView(row, rlp);
     }
 
     /** Repaint chip styles to reflect current selection AND hidden state.
@@ -5704,69 +6870,47 @@ public class LauncherActivity extends Activity {
             for (int i = 0; i < n; i++) {
                 boolean hidden = i < appList.size()
                         && hiddenApps.contains(appList.get(i).packageName);
-                paintHideChip(strip.getChildAt(i), i == curr, hidden, false);
+                paintHideRow(strip.getChildAt(i), i == curr, hidden, false);
             }
         } else if (prev != curr) {
             if (prev < n) {
                 boolean ph = prev < appList.size()
                         && hiddenApps.contains(appList.get(prev).packageName);
-                paintHideChip(strip.getChildAt(prev), false, ph, true);
+                paintHideRow(strip.getChildAt(prev), false, ph, true);
             }
             if (curr >= 0 && curr < n) {
                 boolean ch = curr < appList.size()
                         && hiddenApps.contains(appList.get(curr).packageName);
-                paintHideChip(strip.getChildAt(curr), true, ch, true);
+                paintHideRow(strip.getChildAt(curr), true, ch, true);
             }
         }
         keymapHideLastIdx = curr;
         scrollHideToSelection();
     }
 
-    /** Single source of truth for a hide-chip's visual state. Matches the
-     *  keymap-picker chip paint exactly for selection / scale / pill
-     *  background; adds strike-through on the label when hidden so the
-     *  flag is legible in both selected and idle pills. */
-    private void paintHideChip(View chip, boolean sel, boolean hidden, boolean animate) {
-        if (chip == null) return;
-        android.graphics.drawable.Drawable bgd = chip.getBackground();
+    /** Single source of truth for a hide-<em>row</em>'s visual state. Matches
+     *  the slot-row paint: selected → dark text on a bright pill; idle →
+     *  light text on transparent. Hidden adds a strike-through on the label
+     *  so the flag is legible in both states. (No scale — rows aren't chips.) */
+    private void paintHideRow(View row, boolean sel, boolean hidden, boolean animate) {
+        if (row == null) return;
+        android.graphics.drawable.Drawable bgd = row.getBackground();
         if (bgd instanceof android.graphics.drawable.GradientDrawable) {
             ((android.graphics.drawable.GradientDrawable) bgd)
                     .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
         }
-        if (chip instanceof android.widget.LinearLayout) {
-            android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+        if (row instanceof android.widget.LinearLayout) {
+            android.widget.LinearLayout cl = (android.widget.LinearLayout) row;
             View last = cl.getChildAt(cl.getChildCount() - 1);
             if (last instanceof TextView) {
                 TextView tv = (TextView) last;
-                // Selected → dark text on bright pill; idle → light text.
-                // Hidden idle is dimmer than visible idle (0x66FFFFFF vs
-                // 0x99FFFFFF) so the strike-through reads as "muted /
-                // hidden" at a glance. Selected hidden stays at full dark
-                // text — the strike-through still distinguishes it. Both
-                // sel branches resolve to the same colour; kept as a flat
-                // assignment instead of a self-referential ternary.
-                if (sel) {
-                    tv.setTextColor(0xFF111114);
-                } else {
-                    tv.setTextColor(hidden ? 0x66FFFFFF : 0x99FFFFFF);
-                }
+                if (sel) tv.setTextColor(0xFF111114);
+                else     tv.setTextColor(hidden ? 0x66FFFFFF : 0x99FFFFFF);
                 int flags = tv.getPaintFlags();
                 if (hidden) flags |=  Paint.STRIKE_THRU_TEXT_FLAG;
                 else        flags &= ~Paint.STRIKE_THRU_TEXT_FLAG;
                 tv.setPaintFlags(flags);
             }
-        }
-        chip.animate().cancel();
-        float targetScale = sel ? 1.05f : 1f;
-        if (animate) {
-            chip.animate()
-                    .scaleX(targetScale).scaleY(targetScale)
-                    .setDuration(140)
-                    .setInterpolator(FOCUS_EASE)
-                    .start();
-        } else {
-            chip.setScaleX(targetScale);
-            chip.setScaleY(targetScale);
         }
     }
 
@@ -5803,28 +6947,28 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    /** Auto-scroll the horizontal strip so the selected chip stays in
-     *  view with a small margin. Identical to scrollPickerToSelection. */
+    /** Auto-scroll the vertical list so the selected row stays in view with
+     *  a small margin (v1.5.0 — was a horizontal strip scroll). */
     private void scrollHideToSelection() {
-        android.widget.HorizontalScrollView hsv = keymapHideHsv;
+        android.widget.ScrollView sv = keymapHideScroll;
         android.widget.LinearLayout strip = keymapHideStrip;
-        if (hsv == null || strip == null) return;
+        if (sv == null || strip == null) return;
         if (keymapHideIdx < 0 || keymapHideIdx >= strip.getChildCount()) return;
-        View chip = strip.getChildAt(keymapHideIdx);
-        if (chip == null) return;
-        if (chip.getWidth() == 0) {
-            hsv.post(this::scrollHideToSelection);
+        View row = strip.getChildAt(keymapHideIdx);
+        if (row == null) return;
+        if (row.getHeight() == 0) {
+            sv.post(this::scrollHideToSelection);
             return;
         }
-        int chipLeft  = chip.getLeft();
-        int chipRight = chip.getRight();
-        int viewLeft  = hsv.getScrollX();
-        int viewRight = viewLeft + hsv.getWidth();
-        int margin    = dp(40);
-        if (chipLeft < viewLeft + margin) {
-            hsv.smoothScrollTo(Math.max(0, chipLeft - margin), 0);
-        } else if (chipRight > viewRight - margin) {
-            hsv.smoothScrollTo(chipRight - hsv.getWidth() + margin, 0);
+        int top    = row.getTop();
+        int bottom = row.getBottom();
+        int viewTop    = sv.getScrollY();
+        int viewBottom = viewTop + sv.getHeight();
+        int margin     = dp(6);
+        if (top < viewTop + margin) {
+            sv.smoothScrollTo(0, Math.max(0, top - margin));
+        } else if (bottom > viewBottom - margin) {
+            sv.smoothScrollTo(0, bottom - sv.getHeight() + margin);
         }
     }
 
@@ -5832,10 +6976,10 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout strip = keymapHideStrip;
         int n = strip == null ? 0 : strip.getChildCount();
         switch (kc) {
-            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_UP:
                 if (n > 0) keymapHideIdx = Math.max(0, keymapHideIdx - 1);
                 refreshHideStrip(); return true;
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
                 if (n > 0) keymapHideIdx = Math.min(n - 1, keymapHideIdx + 1);
                 refreshHideStrip(); return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
@@ -5856,7 +7000,7 @@ public class LauncherActivity extends Activity {
         // Register an empty waiter list — visible cells self-register via loadIconAsync/bind().
         // The redundant attached-cell scan was removed: it caused double setIconBitmap delivery
         // when a cell was already in the waiters list AND matched the attached scan.
-        List<RecyclingShelfView.CellView> waiters = new ArrayList<>(2);
+        List<IconTarget> waiters = new ArrayList<>(2);
         iconInflight.put(key, waiters);
         try {
             iconExecutor.execute(() -> {
@@ -5878,17 +7022,16 @@ public class LauncherActivity extends Activity {
                 final Bitmap fb = bmp;
                 runOnUiThread(() -> {
                     if (destroyed) return;
-                    List<RecyclingShelfView.CellView> pending = iconInflight.remove(key);
+                    List<IconTarget> pending = iconInflight.remove(key);
                     if (pending != null && fb != null) {
                         for (int i = 0, n = pending.size(); i < n; i++) {
-                            RecyclingShelfView.CellView cell = pending.get(i);
+                            IconTarget cell = pending.get(i);
                             // Guard: only deliver to a cell that is still attached
                             // and bound to this package. A cell that's been recycled
                             // back to the pool has visibility GONE and a null
                             // boundApp — delivering would invalidate a hidden view
                             // for nothing.
-                            if (cell.getVisibility() == View.VISIBLE
-                                    && key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
+                            if (cell.iconTargetVisible() && key.equals(cell.iconTargetPackage()))
                                 cell.setIconBitmap(fb);
                         }
                     }
@@ -5905,18 +7048,18 @@ public class LauncherActivity extends Activity {
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
     }
 
-    private void loadIconAsync(AppInfo app, RecyclingShelfView.CellView target) {
+    private void loadIconAsync(AppInfo app, IconTarget target) {
         String key = app.packageName;
         Bitmap cached = iconCache.get(key);
         if (cached != null) { target.setIconBitmap(cached); return; }
-        List<RecyclingShelfView.CellView> waiters = iconInflight.get(key);
+        List<IconTarget> waiters = iconInflight.get(key);
         if (waiters != null) {
             if (!waiters.contains(target)) waiters.add(target); // avoid duplicate registration
             return;
         }
         waiters = new ArrayList<>(2); waiters.add(target);
         iconInflight.put(key, waiters);
-        final List<RecyclingShelfView.CellView> fw = waiters;
+        final List<IconTarget> fw = waiters;
         try {
             iconExecutor.execute(() -> {
                 if (destroyed) return;
@@ -5939,11 +7082,10 @@ public class LauncherActivity extends Activity {
                     // the same package can retry; the placeholder ring stays
                     // until a future pkg broadcast / cache refresh succeeds.
                     if (fb == null) return;
-                    for (RecyclingShelfView.CellView cell : fw) {
+                    for (IconTarget cell : fw) {
                         // Same guard as preWarmIcon: only deliver if the cell
                         // is still on screen and still bound to this package.
-                        if (cell.getVisibility() == View.VISIBLE
-                                && key.equals(cell.boundApp != null ? cell.boundApp.packageName : null))
+                        if (cell.iconTargetVisible() && key.equals(cell.iconTargetPackage()))
                             cell.setIconBitmap(fb);
                     }
                     // Live-update any open chip strips / slot rows showing
@@ -6089,6 +7231,109 @@ public class LauncherActivity extends Activity {
         return null;
     }
 
+    // ── Banner-tile pipeline (v1.5.0) ────────────────────────────────────
+    // Mirrors the icon pipeline (preWarmIcon / loadIconAsync) but produces
+    // the Apple-TV style banner tiles the home / drawer cells display, into
+    // {@link #bannerCache} / {@link #bannerInflight}. Delivers to the same
+    // {@link IconTarget} cells (their display bitmap is the banner). Does NOT
+    // fire {@link #onIconLoaded} — that hook is for the round chip icons.
+
+    /** Resolve the app's TV banner ({@code android:banner}) drawable, or
+     *  {@code null} if it ships none (the common case for phone-style apps —
+     *  those fall back to a generated tile). */
+    private Drawable resolveBannerDrawable(AppInfo app) {
+        if (app == null) return null;
+        try {
+            if (app.ri != null && app.ri.activityInfo != null) {
+                Drawable b = app.ri.activityInfo.loadBanner(pm);
+                if (b != null) return b;
+            }
+        } catch (RuntimeException ignored) { /* fall through */ }
+        try {
+            Drawable b = pm.getApplicationBanner(app.packageName);
+            if (b != null) return b;
+        } catch (PackageManager.NameNotFoundException | RuntimeException ignored) { /* none */ }
+        return null;
+    }
+
+    /** Background-thread banner loader: real banner art (cover-fit) when the
+     *  app provides one, else a generated tile (icon on a tinted rounded
+     *  rect). Always returns a {@code BANNER_W × BANNER_H} bitmap (or null). */
+    private Bitmap loadBannerBlocking(AppInfo app) {
+        if (app == null) return null;
+        final int w = dp(BANNER_W_DP), h = dp(BANNER_H_DP), corner = dp(BANNER_CORNER_DP);
+        Drawable banner = resolveBannerDrawable(app);
+        if (banner != null) {
+            Bitmap b = IconRenderer.processBannerArt(banner, w, h, corner);
+            if (b != null) return b;
+        }
+        Drawable icon = resolveIconDrawable(app);
+        return IconRenderer.generateBannerTile(icon, w, h, corner);
+    }
+
+    private void preWarmBanner(AppInfo app) {
+        if (bannerCache == null) return;
+        String key = app.packageName;
+        if (bannerCache.get(key) != null || bannerInflight.containsKey(key)) return;
+        List<IconTarget> waiters = new ArrayList<>(2);
+        bannerInflight.put(key, waiters);
+        try {
+            iconExecutor.execute(() -> {
+                if (destroyed) return;
+                Bitmap bmp = null;
+                try { bmp = loadBannerBlocking(app); if (bmp != null) bannerCache.put(key, bmp); }
+                catch (OutOfMemoryError | RuntimeException ignored) {}
+                if (destroyed) return;
+                final Bitmap fb = bmp;
+                runOnUiThread(() -> {
+                    if (destroyed) return;
+                    List<IconTarget> pending = bannerInflight.remove(key);
+                    if (pending != null && fb != null) {
+                        for (int i = 0, n = pending.size(); i < n; i++) {
+                            IconTarget cell = pending.get(i);
+                            if (cell.iconTargetVisible() && key.equals(cell.iconTargetPackage()))
+                                cell.setIconBitmap(fb);
+                        }
+                    }
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) { bannerInflight.remove(key); }
+    }
+
+    private void loadBannerAsync(AppInfo app, IconTarget target) {
+        if (bannerCache == null) return;
+        String key = app.packageName;
+        Bitmap cached = bannerCache.get(key);
+        if (cached != null) { target.setIconBitmap(cached); return; }
+        List<IconTarget> waiters = bannerInflight.get(key);
+        if (waiters != null) {
+            if (!waiters.contains(target)) waiters.add(target);
+            return;
+        }
+        waiters = new ArrayList<>(2); waiters.add(target);
+        bannerInflight.put(key, waiters);
+        final List<IconTarget> fw = waiters;
+        try {
+            iconExecutor.execute(() -> {
+                if (destroyed) return;
+                Bitmap bmp = null;
+                try { bmp = loadBannerBlocking(app); if (bmp != null) bannerCache.put(key, bmp); }
+                catch (OutOfMemoryError | RuntimeException ignored) {}
+                if (destroyed) return;
+                final Bitmap fb = bmp;
+                runOnUiThread(() -> {
+                    if (destroyed) return;
+                    bannerInflight.remove(key);
+                    if (fb == null) return;
+                    for (IconTarget cell : fw) {
+                        if (cell.iconTargetVisible() && key.equals(cell.iconTargetPackage()))
+                            cell.setIconBitmap(fb);
+                    }
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) { bannerInflight.remove(key); }
+    }
+
     private void positionRing(View cell) {
         RingView rv = ringView; FrameLayout r = root;
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
@@ -6123,8 +7368,7 @@ public class LauncherActivity extends Activity {
         // icon by ~2.5dp, which read as misalignment.
         rv.setScaleX(sx);
         rv.setScaleY(sy);
-        float half = ringLayoutSize / 2f;
-        rv.setX(cx - half); rv.setY(cy - half);
+        rv.setX(cx - ringLayoutW / 2f); rv.setY(cy - ringLayoutH / 2f);
         if (rv.getVisibility() != View.VISIBLE) rv.setVisibility(View.VISIBLE);
         // No invalidate() — setX/setY/setScale already mark the view dirty.
     }
@@ -6357,6 +7601,12 @@ public class LauncherActivity extends Activity {
         iconCache = new LruCache<String, Bitmap>(cacheMb * 1024 * 1024) {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
+        // Banner-tile cache (v1.5.0). Tiles are larger than chip icons but
+        // far fewer are alive at once (only on-screen home/drawer cells), so
+        // a third of the icon budget is ample. In-memory only — no disk tier.
+        bannerCache = new LruCache<String, Bitmap>(Math.max(2, cacheMb / 3) * 1024 * 1024) {
+            @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
+        };
         int cores = Runtime.getRuntime().availableProcessors();
         // Icon executor: {@code cores} worker threads handle the cold-start
         // icon flood (typically 50 apps × ~20 ms decode each ≈ 1 s of work
@@ -6528,6 +7778,24 @@ public class LauncherActivity extends Activity {
     }
 
     private int dp(int v) { return Math.round(v * density); }
+
+    /** Clip a small list/chip {@link ImageView} to a circle so the shared
+     *  (rounded-square) cached icon bitmap renders ROUND in the keymap slot
+     *  rows, the app picker, and the hide-apps list — without touching the
+     *  shared {@link #iconCache} (a pure view-level clip, no extra bitmap).
+     *  Used so the chip icons stay the familiar small round app icons while
+     *  the home / drawer tiles use their own larger artwork. */
+    private static void clipCircular(View v) {
+        v.setOutlineProvider(new ViewOutlineProvider() {
+            @Override public void getOutline(View view, Outline outline) {
+                int w = view.getWidth(), h = view.getHeight();
+                int d = Math.min(w, h);
+                int l = (w - d) / 2, t = (h - d) / 2;
+                outline.setOval(l, t, l + d, t + d);
+            }
+        });
+        v.setClipToOutline(true);
+    }
 
     /** Per-row indicator view for the keymap card slot list. Renders one
      *  of three glyphs ({@link #GLYPH_DOT} colour disc, {@link

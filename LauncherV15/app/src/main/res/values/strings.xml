@@ -4,6 +4,7 @@
 
     <!-- Accessibility / TalkBack content descriptions for non-text UI -->
     <string name="cd_app_shelf">App shelf</string>
+    <string name="cd_app_drawer">App drawer</string>
     <string name="cd_clock">Current time</string>
     <string name="cd_network_settings">Network settings</string>
     <!-- Gear toolbar pill (v1.3.0). Short-press opens the unified
