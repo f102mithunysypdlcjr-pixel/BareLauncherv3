@@ -96,13 +96,12 @@ public class HomeDrawerModelTest {
 
     @Test public void nav_leftRight_stopsAtRowEdges() {
         int size = 20, hc = 5;
-        assertEquals(5, HomeDrawerModel.navLeft(5, size, hc));  // col0 of row1 → stay
-        assertEquals(5, HomeDrawerModel.navLeft(6, size, hc));  // → 5
-        assertEquals(13, HomeDrawerModel.navRight(12, size, hc)); // within row1
-        assertEquals(12, HomeDrawerModel.navRight(12 - 0, size, hc) == 13 ? 12 : 12); // sanity
-        // last cell of row1 is index 12 (5+7); index 12 RIGHT would cross to row2 → stay
+        assertEquals(5, HomeDrawerModel.navLeft(5, size, hc));   // col0 of row1 → stay
+        assertEquals(5, HomeDrawerModel.navLeft(6, size, hc));   // col1 → col0
+        assertEquals(7, HomeDrawerModel.navRight(6, size, hc));  // col1 → col2 within row1
+        // index 12 is the last cell of row1 (5+7); RIGHT must not cross to row2.
         assertEquals(12, HomeDrawerModel.navRight(12, size, hc));
-        // home row right edge (index 4) → stays
+        // home row right edge (index 4, hc=5) → stays
         assertEquals(4, HomeDrawerModel.navRight(4, size, hc));
         assertEquals(3, HomeDrawerModel.navLeft(4, size, hc));
     }
