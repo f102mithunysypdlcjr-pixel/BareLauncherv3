@@ -28,21 +28,16 @@ final class RingView extends View {
 
     private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
-    private final float iconHalf;
-    private final float iconCorner;
-    private float half, cornerR;
+    private final float tileW, tileH, tileCorner;
+    private float halfW, halfH, cornerR;
 
-    RingView(Context ctx, int strokePx, int iconPx) {
+    RingView(Context ctx, int strokePx, int tileWpx, int tileHpx, int cornerPx) {
         super(ctx);
-        // No hardware layer. The original setLayerType(LAYER_TYPE_HARDWARE)
-        // forced an offscreen FBO + texture upload every frame the ring
-        // moved or scaled (every focus animation, every shelf scroll). For
-        // a single anti-aliased stroked shape, that's pure overhead — the
-        // GPU draws the stroke into the display list just as fast as into
-        // a texture, and skipping the FBO removes a ~0.3 ms hop per frame
-        // on cheaper TV ROMs. Default LAYER_TYPE_NONE is correct here.
-        this.iconHalf   = iconPx / 2f;
-        this.iconCorner = IconRenderer.cornerRadiusPx(iconPx);
+        // No hardware layer (see git history) — a single stroked rounded rect
+        // draws into the display list as fast as into an FBO.
+        this.tileW      = tileWpx;
+        this.tileH      = tileHpx;
+        this.tileCorner = cornerPx;
 
         ring.setStyle(Paint.Style.STROKE);
         ring.setColor(Color.WHITE);
@@ -51,18 +46,20 @@ final class RingView extends View {
 
     @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
         super.onSizeChanged(w, h, ow, oh);
-        // Inner edge of the stroke = icon outer edge (zero gap). Stroke is
-        // centred on its path, so the half-extent = iconHalf + strokeWidth/2
-        // and the corner radius tracks the icon corner + strokeWidth/2 so the
-        // rounded corners stay concentric with the icon's.
-        half    = iconHalf + ring.getStrokeWidth() / 2f;
-        cornerR = iconCorner + ring.getStrokeWidth() / 2f;
+        // Inner edge of the stroke hugs the tile edge with zero gap. Stroke is
+        // centred on its path, so each half-extent = tileHalf + strokeWidth/2,
+        // and the corner radius tracks the tile corner + strokeWidth/2 so the
+        // rounded corners stay concentric with the tile's.
+        float hs = ring.getStrokeWidth() / 2f;
+        halfW   = tileW / 2f + hs;
+        halfH   = tileH / 2f + hs;
+        cornerR = tileCorner + hs;
     }
 
     @Override protected void onDraw(Canvas c) {
-        if (half <= 0) return;
+        if (halfW <= 0 || halfH <= 0) return;
         float cx = getWidth() / 2f, cy = getHeight() / 2f;
-        rect.set(cx - half, cy - half, cx + half, cy + half);
+        rect.set(cx - halfW, cy - halfH, cx + halfW, cy + halfH);
         c.drawRoundRect(rect, cornerR, cornerR, ring);
     }
 }

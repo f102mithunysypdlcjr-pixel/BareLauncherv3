@@ -69,9 +69,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LauncherActivity extends Activity {
 
-    private static final int    ICON_DP        = 80;
-    private static final int    CELL_W_DP      = 112;
-    private static final int    CELL_H_DP      = 120;
+    private static final int    ICON_DP        = 80;   // round chip/list icon cache size
+    // v1.5.0 Apple-TV style banner tile (5:3) for the home row + app drawer.
+    private static final int    BANNER_W_DP      = 130;
+    private static final int    BANNER_H_DP      = 78;  // 130 * 3/5 (5:3 like tvOS 400x240)
+    private static final int    BANNER_CORNER_DP = 12;  // subtly rounded, Apple-TV-ish
+    private static final int    CELL_W_DP      = BANNER_W_DP;
+    private static final int    CELL_H_DP      = 108;   // banner height + focused-label area
     private static final int    RING_STROKE_DP = 3;
     /** Hide-apps vertical list: per-row height and how many rows are visible
      *  before the list scrolls (v1.5.0 redesign). */
@@ -299,6 +303,12 @@ public class LauncherActivity extends Activity {
     // executors remain here; their hot paths live inside this activity.
     private volatile ExecutorService          appExecutor;
     private volatile LruCache<String, Bitmap> iconCache;
+    /** In-memory cache of Apple-TV style banner tiles for the home / drawer
+     *  cells. Separate from {@link #iconCache} (which holds the small round
+     *  chip icons): tiles are a different shape, size, and source. No disk
+     *  cache — tiles regenerate per process (cheap: only the visible cells
+     *  are warmed), keeping the icon disk cache untouched. */
+    private volatile LruCache<String, Bitmap> bannerCache;
     /** Disk-backed sibling of {@link #iconCache}. Wired through the
      *  {@link LruCache#create(Object)} extension point so a memory-cache
      *  miss transparently falls through to a disk read; freshly-decoded
@@ -312,6 +322,11 @@ public class LauncherActivity extends Activity {
     // so the one icon pipeline feeds both the home-row cells and the app
     // drawer cells. See {@link IconTarget}.
     private final ArrayMap<String, List<IconTarget>> iconInflight = new ArrayMap<>();
+    /** In-flight banner-tile loads keyed by package. The home / drawer cells
+     *  display Apple-TV style banner tiles (see {@link #bannerCache}); this is
+     *  the banner counterpart of {@link #iconInflight}. Delivers to the same
+     *  {@link IconTarget} cells (their display bitmap is the banner). */
+    private final ArrayMap<String, List<IconTarget>> bannerInflight = new ArrayMap<>();
     private final List<AppInfo> appList = new ArrayList<>();
     /** Companion to {@link #appList} keyed by package name for O(1)
      *  {@link #findAppByPackage} lookups. The previous linear scan was a
@@ -391,7 +406,8 @@ public class LauncherActivity extends Activity {
      *  is needed. */
     private final int[]    anchorMbLoc      = new int[2];
     private final int[]    anchorRootLoc    = new int[2];
-    private       int      ringLayoutSize   = 0;  // full RingView box size (large enough at 1.12x focus scale)
+    private       int      ringLayoutW      = 0;  // RingView box width (landscape banner + margin)
+    private       int      ringLayoutH      = 0;  // RingView box height
     private       float    cachedIcyOffset  = 0f;
     /** Runnable that performs the deferred package-broadcast reconcile.
      *
@@ -719,6 +735,10 @@ public class LauncherActivity extends Activity {
                     if (pkg != null) {
                         if (iconCache != null) iconCache.remove(pkg);
                         iconInflight.remove(pkg);
+                        // Mirror the invalidation to the banner tile so a
+                        // replaced app's tile re-renders too (v1.5.0).
+                        if (bannerCache != null) bannerCache.remove(pkg);
+                        bannerInflight.remove(pkg);
                         // Flag for icon re-decode on the next reconcile.
                         // The disk delete below is queued on the write
                         // executor; the reconcile's preWarmIcon runs later
@@ -1272,7 +1292,9 @@ public class LauncherActivity extends Activity {
         if (appExecutor  != null) try { appExecutor .shutdownNow(); } catch (Throwable ignored) { /* best-effort */ }
         if (iconDiskCache != null) iconDiskCache = null;
         if (iconCache != null) iconCache.evictAll();
+        if (bannerCache != null) bannerCache.evictAll();
         iconInflight.clear();
+        bannerInflight.clear();
         pendingIconInvalidations.clear();
         // Drop any deferred package-reload runnable that may still be
         // queued on the shelf's looper. The shelf field gets nulled below
@@ -1327,6 +1349,8 @@ public class LauncherActivity extends Activity {
         if (iconCache == null) return;
         if      (level >= TRIM_MEMORY_COMPLETE)   {
             iconCache.evictAll(); iconInflight.clear();
+            if (bannerCache != null) bannerCache.evictAll();
+            bannerInflight.clear();
             RecyclingShelfView sv = shelf;
             if (sv != null) {
                 sv.setApps(Collections.emptyList());
@@ -1356,8 +1380,10 @@ public class LauncherActivity extends Activity {
         // The natural completion path
         // ({@code iconInflight.remove(key)} inside the executor's UI body)
         // drains the map without any extra bookkeeping.
-        else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2); }
-        else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4); }
+        else if (level >= TRIM_MEMORY_MODERATE)   { iconCache.trimToSize(iconCache.maxSize() / 2);
+            if (bannerCache != null) bannerCache.trimToSize(bannerCache.maxSize() / 2); }
+        else if (level >= TRIM_MEMORY_BACKGROUND) { iconCache.trimToSize(iconCache.maxSize() * 3 / 4);
+            if (bannerCache != null) bannerCache.trimToSize(bannerCache.maxSize() * 3 / 4); }
     }
 
     @Override public void onWindowFocusChanged(boolean h) { super.onWindowFocusChanged(h); if (h) hideSystemUI(); }
@@ -1466,6 +1492,11 @@ public class LauncherActivity extends Activity {
         LruCache<String, Bitmap> ic = iconCache;
         if (ic != null) ic.evictAll();
         iconInflight.clear();
+        // Banners are sized in px too — drop them on a density change so the
+        // next bind re-renders at the new size.
+        LruCache<String, Bitmap> bc = bannerCache;
+        if (bc != null) bc.evictAll();
+        bannerInflight.clear();
         TextView cv = clockView;
         if (cv != null) {
             // Force-refresh: ClockFormatter's "last shown minute" sentinel
@@ -1701,15 +1732,16 @@ public class LauncherActivity extends Activity {
         drawer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         root.addView(drawer);
 
-        int iconPx = dp(ICON_DP), strokePx = dp(RING_STROKE_DP);
-        // Ring view diameter = icon + headroom for the focus scale-up.
-        // Ring sits with ZERO gap on the icon edge now, so headroom is just
-        // enough to fit the scaled-up ring (icon + stroke) at focus scale.
-        int ringSize = iconPx + dp(12);
-        ringLayoutSize  = ringSize;
-        cachedIcyOffset = iconPx / 2f;  // icon centred in cell, no extra offset
-        ringView = new RingView(this, strokePx, iconPx);
-        FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(ringSize, ringSize);
+        int strokePx = dp(RING_STROKE_DP);
+        // Selection ring wraps the Apple-TV banner tile (landscape rounded
+        // rect). Box = banner + headroom for the focus scale-up.
+        int bw = dp(BANNER_W_DP), bh = dp(BANNER_H_DP);
+        int ringBoxW = bw + dp(12), ringBoxH = bh + dp(12);
+        ringLayoutW    = ringBoxW;
+        ringLayoutH    = ringBoxH;
+        cachedIcyOffset = bh / 2f;  // banner centred at top of the cell
+        ringView = new RingView(this, strokePx, bw, bh, dp(BANNER_CORNER_DP));
+        FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(ringBoxW, ringBoxH);
         ringView.setLayoutParams(ringLp);
         ringView.setVisibility(View.INVISIBLE);
         ringView.setContentDescription(getString(R.string.cd_selection_ring));
@@ -1898,9 +1930,9 @@ public class LauncherActivity extends Activity {
         int mw = menuOverlay.getMeasuredWidth();
         int mh = menuOverlay.getMeasuredHeight();
 
-        int iconPx        = dp(ICON_DP);
-        int iconTopInRoot = cellRelY + (int)(cachedIcyOffset - iconPx / 2f);
-        int iconBotInRoot = iconTopInRoot + iconPx;
+        int bannerHpx     = dp(BANNER_H_DP);
+        int iconTopInRoot = cellRelY + (int)(cachedIcyOffset - bannerHpx / 2f);
+        int iconBotInRoot = iconTopInRoot + bannerHpx;
 
         // Prefer above the icon; fall back to below if it would clip the top
         int menuY = iconTopInRoot - dp(6) - mh;
@@ -2582,7 +2614,7 @@ public class LauncherActivity extends Activity {
                 CellView cv = attached.valueAt(i);
                 // Detach from any pending icon loads
                 if (cv.boundApp != null) {
-                    List<IconTarget> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                    List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
                     if (waiters != null) waiters.remove(cv);
                 }
                 cv.iconBitmap = null;
@@ -2600,7 +2632,7 @@ public class LauncherActivity extends Activity {
             else                     focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
             totalW = displayed.size() * stride; centerX = 0; needsRefill = true;
             requestLayout();
-            for (AppInfo app : displayed) preWarmIcon(app);
+            for (AppInfo app : displayed) preWarmBanner(app);
             final int targetIdx = focusedIndex;
             post(() -> requestFocusOnIndex(targetIdx));
         }
@@ -2769,7 +2801,7 @@ public class LauncherActivity extends Activity {
                     CellView cv = attached.valueAt(i);
                     // Detach from any pending icon load so stale bitmap isn't delivered
                     if (cv.boundApp != null) {
-                        List<IconTarget> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                        List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
                         if (waiters != null) waiters.remove(cv);
                     }
                     cv.iconBitmap = null;
@@ -3014,8 +3046,9 @@ public class LauncherActivity extends Activity {
             private final Paint   labelPaint;
             private final Paint   iconPaint;
             private final TextPaint labelTp;
-            private final int     iconPx;
-            private final float   phR;
+            private final int     bannerW;
+            private final int     bannerH;
+            private final float   bannerCorner;
             private final float   phStroke;
             private final float   labelOffsetY;
             private final float   labelMaxWInset;
@@ -3035,12 +3068,13 @@ public class LauncherActivity extends Activity {
 
             CellView(Context ctx) {
                 super(ctx);
-                iconPx         = dp(ICON_DP);
-                phR            = iconPx / 2f - dp(2);
+                bannerW        = dp(BANNER_W_DP);
+                bannerH        = dp(BANNER_H_DP);
+                bannerCorner   = dp(BANNER_CORNER_DP);
                 phStroke       = dp(1);
-                labelOffsetY   = iconPx / 2f + dp(17);
+                labelOffsetY   = bannerH / 2f + dp(16);  // label below the banner
                 labelMaxWInset = dp(6);
-                icyOffset      = iconPx / 2f;  // centred in cell — ring aligns to this
+                icyOffset      = bannerH / 2f;  // banner centred at the cell top — ring aligns to this
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
@@ -3357,16 +3391,16 @@ public class LauncherActivity extends Activity {
 
             private void drawIcon(Canvas canvas, float cx, float icy) {
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
-                    float half = iconBitmap.getWidth() / 2f;
-                    canvas.drawBitmap(iconBitmap, cx - half, icy - half, iconPaint);
+                    float hw = iconBitmap.getWidth() / 2f, hh = iconBitmap.getHeight() / 2f;
+                    canvas.drawBitmap(iconBitmap, cx - hw, icy - hh, iconPaint);
                 } else {
-                    // Rounded-square placeholder matching the icon mask.
-                    float rad = phR * 2f * IconRenderer.CORNER_FRAC;
-                    phRect.set(cx - phR, icy - phR, cx + phR, icy + phR);
-                    canvas.drawRoundRect(phRect, rad, rad, sPhFill);
+                    // Rounded-rect banner-tile placeholder.
+                    float hw = bannerW / 2f, hh = bannerH / 2f;
+                    phRect.set(cx - hw, icy - hh, cx + hw, icy + hh);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, sPhFill);
                     float in = phStroke / 2f;
-                    phRect.set(cx - phR + in, icy - phR + in, cx + phR - in, icy + phR - in);
-                    canvas.drawRoundRect(phRect, rad, rad, phRing);
+                    phRect.set(cx - hw + in, icy - hh + in, cx + hw - in, icy + hh - in);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, phRing);
                 }
             }
 
@@ -3405,13 +3439,13 @@ public class LauncherActivity extends Activity {
                     }
                     labelDisplay = disp;
                 }
-                Bitmap cached = iconCache.get(app.packageName);
+                Bitmap cached = bannerCache.get(app.packageName);
                 if (cached != null) {
                     if (cached != iconBitmap) { iconBitmap = cached; invalidate(); }
                 } else {
                     // Icon not yet loaded — clear any stale bitmap and request load
                     if (iconBitmap != null) { iconBitmap = null; invalidate(); }
-                    loadIconAsync(app, this);
+                    loadBannerAsync(app, this);
                 }
             }
         }
@@ -3527,7 +3561,7 @@ public class LauncherActivity extends Activity {
             for (int i = 0; i < attached.size(); i++) {
                 DrawerCell cv = attached.valueAt(i);
                 if (cv.boundApp != null) {
-                    List<IconTarget> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                    List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
                     if (waiters != null) waiters.remove(cv);
                 }
                 cv.iconBitmap = null;
@@ -3540,7 +3574,12 @@ public class LauncherActivity extends Activity {
             else focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
             recomputeContentHeight();
             requestLayout();
-            for (AppInfo app : displayed) preWarmIcon(app);
+            // No eager pre-warm of the whole list: banner tiles are heavier
+            // than chip icons, so cells load their banner lazily on bind
+            // (visible rows only) via loadBannerAsync — fillVisible warms more
+            // as the grid scrolls. Pre-warming all N here would decode every
+            // app's banner up front, which the user explicitly flagged as a
+            // perf concern.
             // Focus is normally driven by open(); but if a package-broadcast
             // reconcile rebuilds us while the drawer is already open, re-focus
             // the (clamped) current index after the relayout so focus is not
@@ -3661,7 +3700,7 @@ public class LauncherActivity extends Activity {
                 if (idx >= size || row < firstRow || row > lastRow) {
                     DrawerCell cv = attached.valueAt(i);
                     if (cv.boundApp != null) {
-                        List<IconTarget> waiters = LauncherActivity.this.iconInflight.get(cv.boundApp.packageName);
+                        List<IconTarget> waiters = LauncherActivity.this.bannerInflight.get(cv.boundApp.packageName);
                         if (waiters != null) waiters.remove(cv);
                     }
                     cv.iconBitmap = null;
@@ -3997,7 +4036,9 @@ public class LauncherActivity extends Activity {
             private final Paint     labelPaint;
             private final Paint     iconPaint;
             private final TextPaint labelTp;
-            private final float     phR;
+            private final int       bannerW;
+            private final int       bannerH;
+            private final float     bannerCorner;
             private final float     phStroke;
             private final float     labelOffsetY;
             private final float     labelMaxWInset;
@@ -4011,12 +4052,13 @@ public class LauncherActivity extends Activity {
 
             DrawerCell(Context ctx) {
                 super(ctx);
-                int iconPx     = dp(ICON_DP);
-                phR            = iconPx / 2f - dp(2);
+                bannerW        = dp(BANNER_W_DP);
+                bannerH        = dp(BANNER_H_DP);
+                bannerCorner   = dp(BANNER_CORNER_DP);
                 phStroke       = dp(1);
-                labelOffsetY   = iconPx / 2f + dp(17);
+                labelOffsetY   = bannerH / 2f + dp(16);
                 labelMaxWInset = dp(6);
-                icyOffset      = iconPx / 2f;
+                icyOffset      = bannerH / 2f;
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
@@ -4214,16 +4256,16 @@ public class LauncherActivity extends Activity {
 
             private void drawIcon(Canvas canvas, float cx, float icy) {
                 if (iconBitmap != null && !iconBitmap.isRecycled()) {
-                    float half = iconBitmap.getWidth() / 2f;
-                    canvas.drawBitmap(iconBitmap, cx - half, icy - half, iconPaint);
+                    float hw = iconBitmap.getWidth() / 2f, hh = iconBitmap.getHeight() / 2f;
+                    canvas.drawBitmap(iconBitmap, cx - hw, icy - hh, iconPaint);
                 } else {
-                    // Rounded-square placeholder matching the icon mask.
-                    float rad = phR * 2f * IconRenderer.CORNER_FRAC;
-                    phRect.set(cx - phR, icy - phR, cx + phR, icy + phR);
-                    canvas.drawRoundRect(phRect, rad, rad, sPhFill);
+                    // Rounded-rect banner-tile placeholder.
+                    float hw = bannerW / 2f, hh = bannerH / 2f;
+                    phRect.set(cx - hw, icy - hh, cx + hw, icy + hh);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, sPhFill);
                     float in = phStroke / 2f;
-                    phRect.set(cx - phR + in, icy - phR + in, cx + phR - in, icy + phR - in);
-                    canvas.drawRoundRect(phRect, rad, rad, phRing);
+                    phRect.set(cx - hw + in, icy - hh + in, cx + hw - in, icy + hh - in);
+                    canvas.drawRoundRect(phRect, bannerCorner, bannerCorner, phRing);
                 }
             }
 
@@ -4242,12 +4284,12 @@ public class LauncherActivity extends Activity {
                     }
                     labelDisplay = disp;
                 }
-                Bitmap cached = iconCache.get(app.packageName);
+                Bitmap cached = bannerCache.get(app.packageName);
                 if (cached != null) {
                     if (cached != iconBitmap) { iconBitmap = cached; invalidate(); }
                 } else {
                     if (iconBitmap != null) { iconBitmap = null; invalidate(); }
-                    loadIconAsync(app, this);
+                    loadBannerAsync(app, this);
                 }
             }
         }
@@ -4913,21 +4955,15 @@ public class LauncherActivity extends Activity {
         if (d != null) d.setApps(visible, hc);
     }
 
-    /** Pre-warm icons for every hidden app. Called from
-     *  {@link #showKeymapOverlay()} so by the time the user drills
-     *  into the picker / hide-manager chip strips, every chip's icon
-     *  is in {@link #iconCache} (or queued on the icon executor) and
-     *  the chip ImageView resolves immediately on first paint.
-     *
-     *  <p>Cheap on warm caches: {@link #preWarmIcon} early-returns on
-     *  cache hit. On a cold install, queues at most ~hidden_count
-     *  loads on the icon executor — runs in background while the
-     *  user is reading the keymap card slot rows. */
-    private void preWarmHiddenAppIcons() {
-        if (hiddenApps.isEmpty()) return;
+    /** Pre-warm the small round chip icons for the keymap overlay. v1.5.0:
+     *  the home / drawer cells now load BANNER tiles (not the round icons),
+     *  so nothing warms {@link #iconCache} for the chips until the overlay
+     *  opens — warm every app here so the picker / hide-list / slot rows
+     *  resolve their icons. {@link #preWarmIcon} early-returns on a cache
+     *  hit, so repeat opens are O(N) cheap containsKey checks. */
+    private void preWarmChipIcons() {
         for (int i = 0, n = appList.size(); i < n; i++) {
-            AppInfo a = appList.get(i);
-            if (hiddenApps.contains(a.packageName)) preWarmIcon(a);
+            preWarmIcon(appList.get(i));
         }
     }
 
@@ -5851,8 +5887,8 @@ public class LauncherActivity extends Activity {
         // happens to load it. Idempotent, cheap on warm caches; only
         // does real work on the rare path "package broadcast invalidated
         // a hidden app's icon since the last overlay open". See
-        // {@link #preWarmHiddenAppIcons} for the cost analysis.
-        preWarmHiddenAppIcons();
+        // {@link #preWarmChipIcons} for the cost analysis.
+        preWarmChipIcons();
         // Hide the focus ring — it belongs to the shelf, which is now
         // logically behind the overlay.
         RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
@@ -7195,6 +7231,109 @@ public class LauncherActivity extends Activity {
         return null;
     }
 
+    // ── Banner-tile pipeline (v1.5.0) ────────────────────────────────────
+    // Mirrors the icon pipeline (preWarmIcon / loadIconAsync) but produces
+    // the Apple-TV style banner tiles the home / drawer cells display, into
+    // {@link #bannerCache} / {@link #bannerInflight}. Delivers to the same
+    // {@link IconTarget} cells (their display bitmap is the banner). Does NOT
+    // fire {@link #onIconLoaded} — that hook is for the round chip icons.
+
+    /** Resolve the app's TV banner ({@code android:banner}) drawable, or
+     *  {@code null} if it ships none (the common case for phone-style apps —
+     *  those fall back to a generated tile). */
+    private Drawable resolveBannerDrawable(AppInfo app) {
+        if (app == null) return null;
+        try {
+            if (app.ri != null && app.ri.activityInfo != null) {
+                Drawable b = app.ri.activityInfo.loadBanner(pm);
+                if (b != null) return b;
+            }
+        } catch (RuntimeException ignored) { /* fall through */ }
+        try {
+            Drawable b = pm.getApplicationBanner(app.packageName);
+            if (b != null) return b;
+        } catch (PackageManager.NameNotFoundException | RuntimeException ignored) { /* none */ }
+        return null;
+    }
+
+    /** Background-thread banner loader: real banner art (cover-fit) when the
+     *  app provides one, else a generated tile (icon on a tinted rounded
+     *  rect). Always returns a {@code BANNER_W × BANNER_H} bitmap (or null). */
+    private Bitmap loadBannerBlocking(AppInfo app) {
+        if (app == null) return null;
+        final int w = dp(BANNER_W_DP), h = dp(BANNER_H_DP), corner = dp(BANNER_CORNER_DP);
+        Drawable banner = resolveBannerDrawable(app);
+        if (banner != null) {
+            Bitmap b = IconRenderer.processBannerArt(banner, w, h, corner);
+            if (b != null) return b;
+        }
+        Drawable icon = resolveIconDrawable(app);
+        return IconRenderer.generateBannerTile(icon, w, h, corner);
+    }
+
+    private void preWarmBanner(AppInfo app) {
+        if (bannerCache == null) return;
+        String key = app.packageName;
+        if (bannerCache.get(key) != null || bannerInflight.containsKey(key)) return;
+        List<IconTarget> waiters = new ArrayList<>(2);
+        bannerInflight.put(key, waiters);
+        try {
+            iconExecutor.execute(() -> {
+                if (destroyed) return;
+                Bitmap bmp = null;
+                try { bmp = loadBannerBlocking(app); if (bmp != null) bannerCache.put(key, bmp); }
+                catch (OutOfMemoryError | RuntimeException ignored) {}
+                if (destroyed) return;
+                final Bitmap fb = bmp;
+                runOnUiThread(() -> {
+                    if (destroyed) return;
+                    List<IconTarget> pending = bannerInflight.remove(key);
+                    if (pending != null && fb != null) {
+                        for (int i = 0, n = pending.size(); i < n; i++) {
+                            IconTarget cell = pending.get(i);
+                            if (cell.iconTargetVisible() && key.equals(cell.iconTargetPackage()))
+                                cell.setIconBitmap(fb);
+                        }
+                    }
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) { bannerInflight.remove(key); }
+    }
+
+    private void loadBannerAsync(AppInfo app, IconTarget target) {
+        if (bannerCache == null) return;
+        String key = app.packageName;
+        Bitmap cached = bannerCache.get(key);
+        if (cached != null) { target.setIconBitmap(cached); return; }
+        List<IconTarget> waiters = bannerInflight.get(key);
+        if (waiters != null) {
+            if (!waiters.contains(target)) waiters.add(target);
+            return;
+        }
+        waiters = new ArrayList<>(2); waiters.add(target);
+        bannerInflight.put(key, waiters);
+        final List<IconTarget> fw = waiters;
+        try {
+            iconExecutor.execute(() -> {
+                if (destroyed) return;
+                Bitmap bmp = null;
+                try { bmp = loadBannerBlocking(app); if (bmp != null) bannerCache.put(key, bmp); }
+                catch (OutOfMemoryError | RuntimeException ignored) {}
+                if (destroyed) return;
+                final Bitmap fb = bmp;
+                runOnUiThread(() -> {
+                    if (destroyed) return;
+                    bannerInflight.remove(key);
+                    if (fb == null) return;
+                    for (IconTarget cell : fw) {
+                        if (cell.iconTargetVisible() && key.equals(cell.iconTargetPackage()))
+                            cell.setIconBitmap(fb);
+                    }
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) { bannerInflight.remove(key); }
+    }
+
     private void positionRing(View cell) {
         RingView rv = ringView; FrameLayout r = root;
         if (rv == null || r == null || !cell.isAttachedToWindow()) return;
@@ -7229,8 +7368,7 @@ public class LauncherActivity extends Activity {
         // icon by ~2.5dp, which read as misalignment.
         rv.setScaleX(sx);
         rv.setScaleY(sy);
-        float half = ringLayoutSize / 2f;
-        rv.setX(cx - half); rv.setY(cy - half);
+        rv.setX(cx - ringLayoutW / 2f); rv.setY(cy - ringLayoutH / 2f);
         if (rv.getVisibility() != View.VISIBLE) rv.setVisibility(View.VISIBLE);
         // No invalidate() — setX/setY/setScale already mark the view dirty.
     }
@@ -7461,6 +7599,12 @@ public class LauncherActivity extends Activity {
         // (instant) and lets the disk reads run in parallel across the
         // pool's cores-1 workers.
         iconCache = new LruCache<String, Bitmap>(cacheMb * 1024 * 1024) {
+            @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
+        };
+        // Banner-tile cache (v1.5.0). Tiles are larger than chip icons but
+        // far fewer are alive at once (only on-screen home/drawer cells), so
+        // a third of the icon budget is ample. In-memory only — no disk tier.
+        bannerCache = new LruCache<String, Bitmap>(Math.max(2, cacheMb / 3) * 1024 * 1024) {
             @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
         };
         int cores = Runtime.getRuntime().availableProcessors();

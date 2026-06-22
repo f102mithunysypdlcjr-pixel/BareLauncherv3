@@ -126,12 +126,63 @@ final class IconRenderer {
      *  so scaled-icon rendering quality is unchanged. */
     private static final Paint sSrcAtopPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
 
+    /** Fill paint for the generated-banner tile background. */
+    private static final Paint sTilePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
     static {
         sMaskPaint.setColor(Color.WHITE);
         sSrcInPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
         sSrcAtopPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_ATOP));
         sWhiteFill.setStyle(Paint.Style.FILL);
         sWhiteFill.setColor(Color.WHITE);
+        sTilePaint.setStyle(Paint.Style.FILL);
+    }
+
+    // ── Banner tiles (v1.5.0 — Apple-TV style 5:3 rounded-rect tiles) ─────
+
+    /** Render a real app banner ({@code android:banner}) to a {@code w × h}
+     *  rounded-rectangle tile, scaled to COVER (center-crop) so the art fills
+     *  the tile with no letterboxing. {@code corner} is the corner radius in
+     *  px (kept small/subtle to match Apple-TV app tiles). */
+    static Bitmap processBannerArt(Drawable d, int w, int h, int corner) {
+        if (d == null || w <= 0 || h <= 0) return null;
+        int iw = d.getIntrinsicWidth(), ih = d.getIntrinsicHeight();
+        if (iw <= 0 || ih <= 0) { iw = w; ih = h; }
+        float scale = Math.max((float) w / iw, (float) h / ih);
+        int dw = Math.max(1, Math.round(iw * scale));
+        int dh = Math.max(1, Math.round(ih * scale));
+        Bitmap art = Bitmap.createBitmap(dw, dh, Bitmap.Config.ARGB_8888);
+        d.setBounds(0, 0, dw, dh);
+        d.draw(new Canvas(art));
+
+        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out);
+        int sc = c.saveLayer(0, 0, w, h, null);
+        RectF rr = sRectTL.get(); rr.set(0, 0, w, h);
+        c.drawRoundRect(rr, corner, corner, sMaskPaint);     // rounded mask
+        c.drawBitmap(art, (w - dw) / 2f, (h - dh) / 2f, sSrcInPaint); // center-crop into mask
+        c.restoreToCount(sc);
+        art.recycle();
+        return out;
+    }
+
+    /** Generate a uniform {@code w × h} rounded-rectangle tile for an app
+     *  that ships no banner: a neutral dark plate with the app's icon centred
+     *  (Fire-TV "generated banner" idiom). {@code corner} px corner radius. */
+    static Bitmap generateBannerTile(Drawable icon, int w, int h, int corner) {
+        if (w <= 0 || h <= 0) return null;
+        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out);
+        RectF rr = sRectTL.get(); rr.set(0, 0, w, h);
+        sTilePaint.setColor(0xFF2A2A30);                     // neutral dark tile
+        c.drawRoundRect(rr, corner, corner, sTilePaint);
+        if (icon != null) {
+            int isz = Math.round(h * 0.62f);                 // icon ~62% of tile height
+            int ix = (w - isz) / 2, iy = (h - isz) / 2;
+            icon.setBounds(ix, iy, ix + isz, iy + isz);
+            icon.draw(c);
+        }
+        return out;
     }
 
     /**
