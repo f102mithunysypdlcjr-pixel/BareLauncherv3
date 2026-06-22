@@ -44,6 +44,13 @@ final class RingView extends View {
         ring.setStrokeWidth(strokePx);
     }
 
+    /** Recolour the halo. The home shelf uses white over the wallpaper; the
+     *  app drawer switches it to a dark colour so it reads on the frosted
+     *  light surface. Cheap — repaints only when the colour actually changes. */
+    void setRingColor(int color) {
+        if (ring.getColor() != color) { ring.setColor(color); invalidate(); }
+    }
+
     @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
         super.onSizeChanged(w, h, ow, oh);
         // Inner edge of the stroke hugs the tile edge with zero gap. Stroke is

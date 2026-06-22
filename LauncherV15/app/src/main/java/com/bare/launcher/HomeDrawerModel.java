@@ -242,10 +242,11 @@ final class HomeDrawerModel {
      *   <li><b>First non-home row, home not full</b>: PROMOTE. The app is
      *       lifted out of its slot and appended to the end of the home segment;
      *       {@code homeCount++} (capped at {@link #COLS}).</li>
-     *   <li><b>First non-home row, home already full ({@code COLS})</b>: the
-     *       moved app takes the home slot directly above it (same column) and
-     *       the home app it replaces is bumped down to the front of the
-     *       drawer; {@code homeCount} stays at {@link #COLS}.</li>
+     *   <li><b>First non-home row, home already full ({@code COLS})</b>: a
+     *       straight vertical swap — the moved app takes the home slot directly
+     *       above it (same column) and the home app it replaces drops into the
+     *       slot the moved app just vacated. {@code homeCount} stays at
+     *       {@link #COLS}.</li>
      *   <li><b>Any lower row</b>: ordinary vertical swap with the cell one row
      *       up (8 positions earlier).</li>
      * </ul>
@@ -272,20 +273,11 @@ final class HomeDrawerModel {
             order.add(dest, app);
             return new MoveResult(homeCount + 1, dest);
         }
-        if (row == base && homeCount == COLS) {
-            // PROMOTE INTO A FULL HOME ROW (displacement): the moved app takes
-            // the home slot directly above it (same column); the home app that
-            // occupied that slot is bumped DOWN to the front of the drawer.
-            // Home size stays at COLS. This is the Apple/Fire-TV "drop it on a
-            // full shelf and the one it landed on slides into the drawer"
-            // behaviour the user asked for.
-            int c = colOf(index, homeCount);   // target home column (0..COLS-1)
-            T moved = order.remove(index);     // c < homeCount <= index, so c is unaffected
-            T displaced = order.remove(c);     // the home app being replaced
-            order.add(c, moved);               // moved app takes the home column
-            order.add(homeCount, displaced);   // displaced home app → first drawer slot
-            return new MoveResult(homeCount, c);
-        }
+        // Either the home row is full (row == base, homeCount == COLS) or this
+        // is a lower row: a straight vertical swap with the cell directly above
+        // (same column). For the full-home-row case this means the moved app
+        // takes the home slot above it and the replaced home app drops into the
+        // slot the moved app vacated.
         // Ordinary vertical swap with the cell directly above (same column).
         int col = colOf(index, homeCount);
         int aboveLen = rowLength(row - 1, size, homeCount);
