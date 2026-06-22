@@ -145,17 +145,17 @@ public class HomeDrawerModelTest {
         assertEquals("p6", order.get(7));
     }
 
-    @Test public void move_promote_fullRow_displacesReplacedAppToDrawer() {
+    @Test public void move_promote_fullRow_swapsWithCellAbove() {
         List<String> order = list(20);
         int hc = 6;                              // home full
-        // index 8 = row1 col2. UP → p8 takes home col2; the app it replaces
-        // (p2) is bumped to the FRONT of the drawer (index 6).
+        // index 8 = row1 col2. UP → straight vertical swap with the home cell
+        // directly above (index 2): the moved app takes the home slot, the
+        // replaced home app drops into the slot the moved app vacated.
         HomeDrawerModel.MoveResult r = HomeDrawerModel.moveUp(order, 8, hc);
         assertEquals(6, r.homeCount);            // home stays full
         assertEquals(2, r.index);                // moved app now at home col 2
         assertEquals("p8", order.get(2));        // moved app in the home slot
-        assertEquals("p2", order.get(6));        // displaced home app → first drawer slot
-        // home row is now p0,p1,p8,p3,p4,p5
+        assertEquals("p2", order.get(8));        // replaced home app → vacated slot
         assertEquals(Arrays.asList("p0", "p1", "p8", "p3", "p4", "p5"), order.subList(0, 6));
     }
 
