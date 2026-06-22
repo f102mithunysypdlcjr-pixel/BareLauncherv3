@@ -67,9 +67,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LauncherActivity extends Activity {
 
-    private static final int    ICON_DP        = 68;
-    private static final int    CELL_W_DP      = 90;
-    private static final int    CELL_H_DP      = 100;
+    private static final int    ICON_DP        = 80;
+    private static final int    CELL_W_DP      = 112;
+    private static final int    CELL_H_DP      = 120;
     private static final int    RING_STROKE_DP = 3;
     // Clock cadence lives in {@link ClockFormatter#nextMinuteDelay} now.
     // The launcher schedules ticks aligned to the minute boundary so a
@@ -929,6 +929,10 @@ public class LauncherActivity extends Activity {
         // maps 1:1 to a drawer index. Clamp defensively.
         int focus = Math.min(Math.max(0, s.focusedIndex), visible.size() - 1);
         d.open(focus);
+        // Hide the home shelf while the drawer covers the screen so we never
+        // draw both grids at once (the drawer's row 0 already mirrors the home
+        // row). INVISIBLE (not GONE) avoids a relayout on open/close.
+        s.setVisibility(View.INVISIBLE);
     }
 
     /** Close the drawer, re-derive the home row from the (possibly changed)
@@ -950,6 +954,7 @@ public class LauncherActivity extends Activity {
         d.close(() -> {
             RecyclingShelfView s2 = shelf;
             if (s2 == null || destroyed) return;
+            s2.setVisibility(View.VISIBLE);   // restore the home shelf hidden on open
             if (hc <= 0 || visibleSnapshot.isEmpty()) {
                 pushHomeRow(s2, visibleSnapshot, hc);   // clears the shelf
                 View nb = netBtn; if (nb != null) nb.requestFocus();
@@ -1183,6 +1188,7 @@ public class LauncherActivity extends Activity {
             d.forceHide();
             RecyclingShelfView sh = shelf;
             if (sh != null) {
+                sh.setVisibility(View.VISIBLE);   // undo the open-time hide
                 List<AppInfo> vis = buildVisibleList();
                 pushHomeRow(sh, vis, effectiveHomeCount(vis.size()));
             }
@@ -3008,6 +3014,7 @@ public class LauncherActivity extends Activity {
             private final float   labelOffsetY;
             private final float   labelMaxWInset;
             private final float   icyOffset;
+            private final RectF   phRect       = new RectF();
             private       String  labelStr     = "";
             private       String  labelDisplay = "";
 
@@ -3347,8 +3354,13 @@ public class LauncherActivity extends Activity {
                     float half = iconBitmap.getWidth() / 2f;
                     canvas.drawBitmap(iconBitmap, cx - half, icy - half, iconPaint);
                 } else {
-                    canvas.drawCircle(cx, icy, phR, sPhFill);
-                    canvas.drawCircle(cx, icy, phR - phStroke / 2f, phRing);
+                    // Rounded-square placeholder matching the icon mask.
+                    float rad = phR * 2f * IconRenderer.CORNER_FRAC;
+                    phRect.set(cx - phR, icy - phR, cx + phR, icy + phR);
+                    canvas.drawRoundRect(phRect, rad, rad, sPhFill);
+                    float in = phStroke / 2f;
+                    phRect.set(cx - phR + in, icy - phR + in, cx + phR - in, icy + phR - in);
+                    canvas.drawRoundRect(phRect, rad, rad, phRing);
                 }
             }
 
@@ -3446,6 +3458,7 @@ public class LauncherActivity extends Activity {
         private int gridLeft = 0;   // left edge of the centred grid block (rows 1+)
         private int scrollY  = 0;
         private int contentH = 0;
+        private final Paint dividerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         int     focusedIndex = 0;
         boolean reorderMode  = false;
@@ -3465,13 +3478,20 @@ public class LauncherActivity extends Activity {
             rowStride = cellH + rowGap;
             topPad    = dp(28);
             bottomPad = dp(28);
-            // Dark scrim so the wallpaper + home shelf read as "behind" the
-            // drawer. Clickable so touches don't fall through to the shelf.
-            setBackgroundColor(0xE6101012);
+            // Near-opaque dark scrim so the wallpaper / toolbar / clock behind
+            // the drawer don't ghost through (we also hide the home shelf on
+            // open). Clickable so touches don't fall through to the shelf.
+            setBackgroundColor(0xF5101012);
             setFocusable(false);
             setClickable(true);
             setClipChildren(false);
             setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE);
+            // We paint a thin divider between the home row and the grid in
+            // onDraw, so opt out of the ViewGroup WILL_NOT_DRAW shortcut.
+            setWillNotDraw(false);
+            dividerPaint.setStyle(Paint.Style.STROKE);
+            dividerPaint.setColor(0x26FFFFFF);     // ~15% white hairline
+            dividerPaint.setStrokeWidth(dp(1));
         }
 
         /** Clamped, effective home-row size for the current visible count. */
@@ -3527,7 +3547,27 @@ public class LauncherActivity extends Activity {
 
         private void recomputeContentHeight() {
             int rows = HomeDrawerModel.rowCount(displayed.size(), hc());
-            contentH = topPad + rows * rowStride + bottomPad;
+            contentH = topPad + blockHeight(rows) + bottomPad;
+        }
+
+        /** Pixel height of the {@code rows} themselves (no leading/trailing
+         *  padding): rows*cellH + gaps between them. */
+        private int blockHeight(int rows) {
+            if (rows <= 0) return 0;
+            return rows * cellH + (rows - 1) * rowGap;
+        }
+
+        /** Content-space Y of row 0. When the whole grid fits on screen (few
+         *  apps) the block is centred vertically for an Apple-TV look;
+         *  otherwise it starts at {@code topPad} and scrolls. */
+        private int firstRowTop() {
+            int rows = HomeDrawerModel.rowCount(displayed.size(), hc());
+            int bh = blockHeight(rows);
+            int vh = getHeight();
+            if (vh > 0 && topPad + bh + bottomPad <= vh) {
+                return Math.max(topPad, (vh - bh) / 2);
+            }
+            return topPad;
         }
 
         @Override protected void onMeasure(int wSpec, int hSpec) {
@@ -3556,6 +3596,23 @@ public class LauncherActivity extends Activity {
             if (velTracker != null) { velTracker.recycle(); velTracker = null; }
         }
 
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            // Thin modern divider between the home row (row 0) and the rest of
+            // the drawer grid. Only when there is a home row AND at least one
+            // app below it. Drawn in the row gap so it never overlaps an icon;
+            // scrolls with the content.
+            int hc = hc();
+            if (hc <= 0 || displayed.size() <= hc) return;
+            int base = firstRowTop();
+            float y = base + cellH + rowGap / 2f - scrollY;
+            int h = getHeight();
+            if (y < 0 || y > h) return;
+            int left  = gridLeft + sidePad;
+            int right = gridLeft + HomeDrawerModel.COLS * stride - sidePad;
+            canvas.drawLine(left, y, right, y, dividerPaint);
+        }
+
         private int rowLeftPad(int row, int len) {
             int hc = hc();
             if (hc > 0 && row == 0) {
@@ -3576,7 +3633,7 @@ public class LauncherActivity extends Activity {
         }
         private int cellTop(int index) {
             int row = HomeDrawerModel.rowOf(index, hc());
-            return topPad + row * rowStride - scrollY;
+            return firstRowTop() + row * rowStride - scrollY;
         }
 
         private int scrollYMax() { return Math.max(0, contentH - getHeight()); }
@@ -3588,8 +3645,9 @@ public class LauncherActivity extends Activity {
             int hc = hc();
             int size = displayed.size();
             int rows = HomeDrawerModel.rowCount(size, hc);
-            int firstRow = Math.max(0, (scrollY - topPad) / rowStride - BUFFER_ROWS);
-            int lastRow  = Math.min(rows - 1, (scrollY + h - topPad) / rowStride + BUFFER_ROWS);
+            int base = firstRowTop();
+            int firstRow = Math.max(0, (scrollY - base) / rowStride - BUFFER_ROWS);
+            int lastRow  = Math.min(rows - 1, (scrollY + h - base) / rowStride + BUFFER_ROWS);
             // Detach cells whose row scrolled out (or whose index is now stale).
             for (int i = attached.size() - 1; i >= 0; i--) {
                 int idx = attached.keyAt(i);
@@ -3700,7 +3758,7 @@ public class LauncherActivity extends Activity {
             int viewH = getHeight();
             if (viewH <= 0) return;   // not laid out yet — open()'s retry handles it
             int row = HomeDrawerModel.rowOf(index, hc());
-            int top    = topPad + row * rowStride;     // content-space (no scroll)
+            int top    = firstRowTop() + row * rowStride;   // content-space (no scroll)
             int bottom = top + cellH;
             int pad    = rowGap;
             int target = scrollY;
@@ -3938,6 +3996,7 @@ public class LauncherActivity extends Activity {
             private final float     labelOffsetY;
             private final float     labelMaxWInset;
             private final float     icyOffset;
+            private final RectF     phRect       = new RectF();
             private       String    labelStr     = "";
             private       String    labelDisplay = "";
 
@@ -4152,8 +4211,13 @@ public class LauncherActivity extends Activity {
                     float half = iconBitmap.getWidth() / 2f;
                     canvas.drawBitmap(iconBitmap, cx - half, icy - half, iconPaint);
                 } else {
-                    canvas.drawCircle(cx, icy, phR, sPhFill);
-                    canvas.drawCircle(cx, icy, phR - phStroke / 2f, phRing);
+                    // Rounded-square placeholder matching the icon mask.
+                    float rad = phR * 2f * IconRenderer.CORNER_FRAC;
+                    phRect.set(cx - phR, icy - phR, cx + phR, icy + phR);
+                    canvas.drawRoundRect(phRect, rad, rad, sPhFill);
+                    float in = phStroke / 2f;
+                    phRect.set(cx - phR + in, icy - phR + in, cx + phR - in, icy + phR - in);
+                    canvas.drawRoundRect(phRect, rad, rad, phRing);
                 }
             }
 

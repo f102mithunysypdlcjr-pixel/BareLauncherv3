@@ -7,6 +7,7 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
+import android.graphics.RectF;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
@@ -86,6 +87,23 @@ final class IconRenderer {
      *  {@link #needsFill}. See {@link #needsFill} for the layout. */
     private static final ThreadLocal<int[]>  sFillPts  = new ThreadLocal<>();
 
+    /** Reused {@link RectF} for the rounded-square clip / plate rects so the
+     *  per-icon hot path stays allocation-free (one per worker thread). */
+    private static final ThreadLocal<RectF> sRectTL = new ThreadLocal<RectF>() {
+        @Override protected RectF initialValue() { return new RectF(); }
+    };
+
+    /** Corner-radius fraction for the TV-friendly rounded-square icon mask.
+     *  ~0.22 of the side length approximates the continuous-corner
+     *  "squircle" look of Apple TV / Fire TV app tiles without the cost of a
+     *  real superellipse path. Exposed so {@link RingView} and the cell
+     *  placeholders can match the exact same corner so the focus ring hugs
+     *  the icon edge. */
+    static final float CORNER_FRAC = 0.22f;
+
+    /** Pixel corner radius for an icon of side {@code sz}. */
+    static int cornerRadiusPx(int sz) { return Math.round(sz * CORNER_FRAC); }
+
     // ── Pre-built Paints (read-only after class init) ─────────────────────
 
     private static final Paint sMaskPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -117,20 +135,21 @@ final class IconRenderer {
     }
 
     /**
-     * Convert any launcher {@link Drawable} into a circular {@code sz × sz}
-     * {@link Bitmap.Config#ARGB_8888} bitmap, ready for the shelf.
+     * Convert any launcher {@link Drawable} into a TV-friendly rounded-square
+     * {@code sz × sz} {@link Bitmap.Config#ARGB_8888} bitmap, ready for the
+     * shelf / drawer. (Corner radius = {@link #cornerRadiusPx(int)}.)
      *
      * <p>Behaviour:
      * <ul>
      *   <li>{@link AdaptiveIconDrawable} → composite background + foreground
-     *       at the standard 18 / 108 bleed, then either a direct circle
+     *       at the standard 18 / 108 bleed, then either a direct rounded-square
      *       clip (if the background covers the icon) or a white plate +
      *       clip (if the background is missing or transparent).</li>
      *   <li>Other drawables → rasterise via {@link #renderDrawable}, then
      *       check {@link #needsFill}: if the icon has a transparent
      *       background the result gets a white plate behind it; otherwise
      *       we skip the plate / saveLayer / extra bitmap allocation and
-     *       circle-clip the rasterised drawable directly.</li>
+     *       rounded-square-clip the rasterised drawable directly.</li>
      * </ul>
      *
      * @param d  drawable to convert; may be {@code null} (returns {@code null}).
@@ -178,7 +197,9 @@ final class IconRenderer {
                 // during the icon-decode flood.
                 Bitmap plated = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
                 Canvas pc = new Canvas(plated);
-                pc.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
+                RectF prr = sRectTL.get(); prr.set(0, 0, sz, sz);
+                float prad = cornerRadiusPx(sz);
+                pc.drawRoundRect(prr, prad, prad, sWhiteFill);
                 int inset = Math.round(sz * 0.14f);
                 Matrix mx = sMatrixTL.get();
                 float s = (float) (sz - inset * 2) / sz;
@@ -188,18 +209,14 @@ final class IconRenderer {
                 layers.recycle();
                 return plated;
             }
-            return clipToCircle(layers, sz);
+            return clipToRoundedSquare(layers, sz);
         }
         Bitmap raw = renderDrawable(d, sz);
         if (raw == null) return null;
         boolean fill = needsFill(raw, sz);
-        // Fast path when no white plate is needed: csz==sz and inset==0 means
-        // the matrix transform was an identity, the saveLayer/canvas was a
-        // pointless copy, and the intermediate `out` bitmap was a clone of
-        // `raw`. Just clip the rendered drawable to a circle and return —
-        // saves one ARGB_8888 allocation (~iconPx²·4 bytes ≈ 18 KB at 68 dp
-        // on hdpi, more on xxxhdpi) and one full-size canvas draw per icon.
-        if (!fill) return clipToCircle(raw, sz);
+        // Fast path when no plate is needed: clip the rendered drawable to a
+        // rounded square and return.
+        if (!fill) return clipToRoundedSquare(raw, sz);
         // Plate path: single-bitmap composite via SRC_ATOP. See the
         // matching block in the AdaptiveIcon branch above for the
         // pixel-level equivalence argument and the per-icon ~290 KB
@@ -209,7 +226,9 @@ final class IconRenderer {
         int inset = (sz - csz) / 2;
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
-        canvas.drawCircle(sz / 2f, sz / 2f, sz / 2f, sWhiteFill);
+        RectF lrr = sRectTL.get(); lrr.set(0, 0, sz, sz);
+        float lrad = cornerRadiusPx(sz);
+        canvas.drawRoundRect(lrr, lrad, lrad, sWhiteFill);
         Matrix mx = sMatrixTL.get();
         mx.setScale((float) csz / sz, (float) csz / sz);
         mx.postTranslate(inset, inset);
@@ -321,14 +340,16 @@ final class IconRenderer {
         return out;
     }
 
-    /** Mask a square bitmap to a circle of the same size. The input is
-     *  recycled before return so the caller does not have to track it. */
-    private static Bitmap clipToCircle(Bitmap src, int sz) {
+    /** Mask a square bitmap to a rounded square of the same size. The input
+     *  is recycled before return so the caller does not have to track it. */
+    private static Bitmap clipToRoundedSquare(Bitmap src, int sz) {
         if (src == null) return null;
         Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(out);
         int sc = c.saveLayer(0, 0, sz, sz, null);
-        c.drawCircle(sz / 2f, sz / 2f, sz / 2f, sMaskPaint);
+        RectF rr = sRectTL.get(); rr.set(0, 0, sz, sz);
+        float rad = cornerRadiusPx(sz);
+        c.drawRoundRect(rr, rad, rad, sMaskPaint);
         c.drawBitmap(src, 0, 0, sSrcInPaint);
         c.restoreToCount(sc);
         src.recycle();
