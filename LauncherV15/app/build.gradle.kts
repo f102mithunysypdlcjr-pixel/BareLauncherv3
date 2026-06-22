@@ -397,8 +397,8 @@ android {
         // on ACTION_PACKAGE_REPLACED to prevent stale icons from
         // persisting after app updates. Pure bug fix, no new features —
         // SemVer PATCH bump.
-        versionCode   = 24
-        versionName   = "1.4.6"
+        versionCode   = 25
+        versionName   = "1.4.7"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
