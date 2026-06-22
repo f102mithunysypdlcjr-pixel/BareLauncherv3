@@ -6,6 +6,8 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
@@ -390,6 +392,13 @@ final class WallpaperController {
             } catch (Exception | OutOfMemoryError ignored) {
                 argb = null;
             }
+            // High-quality downscale + center-crop to the exact panel size.
+            // The decode above (computeSampleSizeAtLeast) guarantees argb is
+            // at or above the screen on both axes, so this only ever shrinks
+            // — bilinear-filtered and baked, so the displayed wallpaper is
+            // pixel-exact to the panel (no ImageView upscale → no blur) and
+            // screen-sized (smallest snapshot + graphics-memory footprint).
+            if (argb != null) argb = scaleToScreenCrop(argb);
             // Snapshot write happens BEFORE HARDWARE conversion. Best-
             // effort: a write failure does not block the user's wallpaper
             // change — it just means the next cold start does a full
@@ -602,7 +611,73 @@ final class WallpaperController {
      *  is the right operator: keep halving while EITHER dimension still
      *  exceeds the screen. */
     private int calcSampleSize(int srcW, int srcH) {
-        return computeSampleSize(srcW, srcH, screenW, screenH);
+        return computeSampleSizeAtLeast(srcW, srcH, screenW, screenH);
+    }
+
+    /**
+     * Largest power-of-two sub-sample that keeps the decoded bitmap at or
+     * ABOVE the screen on BOTH axes, so the follow-up {@link #scaleToScreenCrop}
+     * downscales it (high-quality, bilinear-filtered) instead of the bitmap
+     * being UPSCALED by the {@code CENTER_CROP} ImageView.
+     *
+     * <p>This fixes the "wallpaper looks blurry when set, and a 4K source
+     * looks WORSE than a native-1080p one" report. The previous
+     * {@link #computeSampleSize} stopped halving the moment the bitmap fit
+     * UNDER the screen — so any source between 1x and 2x the screen (a
+     * 2560x1440 image on a 1080p panel, or any 4K-ish source whose pixels
+     * aren't an exact 2x multiple of the panel) decoded to a SUB-screen
+     * bitmap that the ImageView then stretched back up, visibly soft. By
+     * decoding at the smallest power-of-two that is still >= the screen we
+     * guarantee the source is never upscaled; {@link #scaleToScreenCrop}
+     * then bakes a pixel-exact, screen-sized result.
+     *
+     * <p>Package-private + static so it is exercised by JVM unit tests.
+     */
+    static int computeSampleSizeAtLeast(int srcW, int srcH, int screenW, int screenH) {
+        if (screenW <= 0 || screenH <= 0 || srcW <= 0 || srcH <= 0) return 1;
+        int ss = 1;
+        // Double only while the NEXT step would still leave BOTH axes >= the
+        // screen. The 0x8000 guard mirrors computeSampleSize's safety cap.
+        while (srcW / (ss * 2) >= screenW && srcH / (ss * 2) >= screenH && ss < 0x8000) ss *= 2;
+        return ss;
+    }
+
+    /**
+     * Scale + center-crop an ARGB bitmap to exactly {@code screenW x screenH}
+     * with bilinear filtering — the same geometry the {@code CENTER_CROP}
+     * ImageView would apply, but BAKED so the displayed bitmap is pixel-exact
+     * to the panel (no GPU upscale, hence no blur) and screen-sized (the
+     * smallest possible graphics-memory footprint, and the smallest snapshot
+     * on disk). The input is recycled on success.
+     *
+     * <p>Returns the input unchanged when it is already exactly screen-sized
+     * (no needless copy) or if the allocation fails — in the fallback the
+     * ImageView's own CENTER_CROP still displays it correctly, matching the
+     * pre-fix behaviour.
+     */
+    private Bitmap scaleToScreenCrop(Bitmap src) {
+        if (src == null) return null;
+        int sw = screenW, sh = screenH;
+        if (sw <= 0 || sh <= 0) return src;
+        int bw = src.getWidth(), bh = src.getHeight();
+        if (bw <= 0 || bh <= 0) return src;
+        if (bw == sw && bh == sh) return src;   // already exact — skip the copy
+        try {
+            Bitmap out = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(out);
+            float scale = Math.max((float) sw / bw, (float) sh / bh);
+            float dx = (sw - bw * scale) * 0.5f;
+            float dy = (sh - bh * scale) * 0.5f;
+            Matrix m = new Matrix();
+            m.setScale(scale, scale);
+            m.postTranslate(dx, dy);
+            Paint p = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
+            c.drawBitmap(src, m, p);
+            if (!src.isRecycled()) src.recycle();
+            return out;
+        } catch (OutOfMemoryError | RuntimeException e) {
+            return src;   // fall back to the un-cropped bitmap (ImageView CENTER_CROP)
+        }
     }
 
     /**
