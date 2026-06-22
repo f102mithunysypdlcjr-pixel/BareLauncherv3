@@ -16,6 +16,7 @@ import android.text.format.DateFormat;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -41,6 +42,7 @@ import android.view.SoundEffectConstants;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.animation.DecelerateInterpolator;
@@ -71,6 +73,10 @@ public class LauncherActivity extends Activity {
     private static final int    CELL_W_DP      = 112;
     private static final int    CELL_H_DP      = 120;
     private static final int    RING_STROKE_DP = 3;
+    /** Hide-apps vertical list: per-row height and how many rows are visible
+     *  before the list scrolls (v1.5.0 redesign). */
+    private static final int    HIDE_ROW_H_DP    = 40;
+    private static final int    HIDE_VISIBLE_ROWS = 6;
     // Clock cadence lives in {@link ClockFormatter#nextMinuteDelay} now.
     // The launcher schedules ticks aligned to the minute boundary so a
     // 1 Hz wakeup loop is avoided; the clock has no seconds, so anything
@@ -530,8 +536,8 @@ public class LauncherActivity extends Activity {
     // state without breaking the picker's visual vocabulary.
     private android.widget.LinearLayout keymapHideView    = null;
     private TextView                    keymapHideTitle   = null;
-    private android.widget.HorizontalScrollView keymapHideHsv = null;
-    private android.widget.LinearLayout keymapHideStrip   = null;  // horizontal chip strip
+    private android.widget.ScrollView   keymapHideScroll  = null;  // vertical list scroller (v1.5.0)
+    private android.widget.LinearLayout keymapHideStrip   = null;  // vertical row list
     private int                         keymapHideIdx     = 0;
     private int                         keymapHideLastIdx = -1;
     // Built-row count cached so we only rebuild the toggle rows when the
@@ -1292,7 +1298,7 @@ public class LauncherActivity extends Activity {
         keymapPickerView = null; keymapPickerTitle = null;
         keymapPickerHsv = null; keymapPickerStrip = null;
         keymapHideView = null; keymapHideTitle = null;
-        keymapHideHsv  = null; keymapHideStrip = null;
+        keymapHideScroll = null; keymapHideStrip = null;
         super.onDestroy();
     }
 
@@ -5687,6 +5693,7 @@ public class LauncherActivity extends Activity {
             // [2] app icon (visible only when assigned and cached)
             ImageView icon = new ImageView(this);
             icon.setVisibility(View.GONE);
+            clipCircular(icon);   // round small icon
             android.widget.LinearLayout.LayoutParams iconLp =
                     new android.widget.LinearLayout.LayoutParams(dp(18), dp(18));
             iconLp.setMarginEnd(dp(8));
@@ -5758,15 +5765,12 @@ public class LauncherActivity extends Activity {
         hsv.setClipToPadding(false);
         hsv.addView(strip, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
-        // ── Hide-manager view ───────────────────────────────────────
-        // Multi-select sibling of the picker: same horizontal chip strip,
-        // same selection language (bright frosted-white pill + dark text
-        // + 1.05x scale + auto-scroll). The only delta is that hidden
-        // chips render their label with a strike-through line so the
-        // hidden flag is legible in either selected or idle state — this
-        // way the launcher uses ONE chip-picker idiom across both
-        // single-select (button mapper) and multi-select (hide manager)
-        // flows, instead of the previous vertical-list special case.
+        // ── Hide-manager view (v1.5.0: vertical list) ───────────────
+        // Redesigned from the old horizontal chip strip to a vertical,
+        // OK-toggleable list that mirrors the button-shortcuts slot list:
+        // round app icon + label per row, ~6 rows visible and the rest
+        // scrollable, no dead space. The hidden flag is a strike-through on
+        // the label (kept from the previous design).
         android.widget.LinearLayout hideView = new android.widget.LinearLayout(this);
         hideView.setOrientation(android.widget.LinearLayout.VERTICAL);
         hideView.setVisibility(View.GONE);
@@ -5779,33 +5783,35 @@ public class LauncherActivity extends Activity {
         hideTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         hideTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         hideTitle.setLetterSpacing(0.04f);
+        hideTitle.setSingleLine(true);
+        hideTitle.setEllipsize(TextUtils.TruncateAt.END);
+        hideTitle.setMaxWidth(dp(248));
         hideTitle.setPadding(dp(4), dp(2), dp(4), dp(8));
         hideView.addView(hideTitle);
 
-        // Horizontal scroller, capped at the same width as the picker so
-        // both card sub-modes have a consistent footprint and the user's
-        // muscle memory carries between them.
-        android.widget.HorizontalScrollView hsv2 =
-                new android.widget.HorizontalScrollView(this);
-        hsv2.setHorizontalScrollBarEnabled(false);
-        hsv2.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        int hideW = Math.min(dp(540), Math.round(screenW * 0.52f));
-        if (hideW < dp(300)) hideW = dp(300);
-        android.widget.LinearLayout.LayoutParams hsv2Lp =
-                new android.widget.LinearLayout.LayoutParams(hideW, WRAP);
-        hideView.addView(hsv2, hsv2Lp);
+        // Vertical scroller capped at HIDE_VISIBLE_ROWS rows tall — content
+        // shorter than that wraps (no empty space); longer scrolls.
+        final int hideRowH = dp(HIDE_ROW_H_DP);
+        android.widget.ScrollView hideScroll = new android.widget.ScrollView(this) {
+            @Override protected void onMeasure(int wSpec, int hSpec) {
+                // Cap at HIDE_VISIBLE_ROWS rows (row height + 2dp bottom margin)
+                // so exactly that many show; shorter content wraps (no empty
+                // space), longer scrolls.
+                int cap = (hideRowH + dp(2)) * HIDE_VISIBLE_ROWS;
+                super.onMeasure(wSpec,
+                        View.MeasureSpec.makeMeasureSpec(cap, View.MeasureSpec.AT_MOST));
+            }
+        };
+        hideScroll.setVerticalScrollBarEnabled(false);
+        hideScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        android.widget.LinearLayout.LayoutParams hsLp =
+                new android.widget.LinearLayout.LayoutParams(dp(248), WRAP);
+        hideView.addView(hideScroll, hsLp);
 
         android.widget.LinearLayout hideStrip = new android.widget.LinearLayout(this);
-        hideStrip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        hideStrip.setPadding(dp(2), dp(4), dp(2), dp(4));
-        // Allow chip scale-up to draw outside the strip's logical bounds
-        // (matches the picker strip).
-        hideStrip.setClipChildren(false);
-        hideStrip.setClipToPadding(false);
-        hsv2.setClipChildren(false);
-        hsv2.setClipToPadding(false);
-        hsv2.addView(hideStrip,
-                new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
+        hideStrip.setOrientation(android.widget.LinearLayout.VERTICAL);
+        hideScroll.addView(hideStrip,
+                new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
 
         card.addView(col);
         card.addView(picker);
@@ -5828,7 +5834,7 @@ public class LauncherActivity extends Activity {
         keymapPickerStrip = strip;
         keymapHideView    = hideView;
         keymapHideTitle   = hideTitle;
-        keymapHideHsv     = hsv2;
+        keymapHideScroll  = hideScroll;
         keymapHideStrip   = hideStrip;
     }
 
@@ -6404,13 +6410,14 @@ public class LauncherActivity extends Activity {
         // uses INVISIBLE (reserves layout space, doesn't draw) so a
         // later icon delivery via {@link #setChipIcon} flips visibility
         // VISIBLE without changing the chip's measured width. See the
-        // {@link #addHideChip} javadoc for the visual rationale — the
+        // {@link #addHideRow} javadoc for the visual rationale — the
         // GONE → VISIBLE alternative made chips visibly resize on
         // every async icon load and shifted neighbours along the strip.
         if (!isNone) {
             ImageView iv = new ImageView(this);
             if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
             else              { iv.setVisibility(View.INVISIBLE); }
+            clipCircular(iv);   // round small icon
             android.widget.LinearLayout.LayoutParams ivLp =
                     new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
             ivLp.setMarginEnd(dp(7));
@@ -6672,10 +6679,10 @@ public class LauncherActivity extends Activity {
         if (keymapPickerView != null) keymapPickerView.setVisibility(View.GONE);
         keymapHideView .setVisibility(View.VISIBLE);
         refreshHideStrip();
-        // Initial scroll happens after layout — post() so getLeft() of the
-        // selected chip is non-zero.
-        final android.widget.HorizontalScrollView hsv = keymapHideHsv;
-        if (hsv != null) hsv.post(this::scrollHideToSelection);
+        // Initial scroll happens after layout — post() so getTop() of the
+        // selected row is valid.
+        final android.widget.ScrollView sv = keymapHideScroll;
+        if (sv != null) sv.post(this::scrollHideToSelection);
     }
 
     /** Cancel the hide manager and return to slot mode. The shelf is
@@ -6727,7 +6734,7 @@ public class LauncherActivity extends Activity {
         for (int i = 0; i < appList.size(); i++) {
             AppInfo a = appList.get(i);
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
-            addHideChip(strip, a.label, b);
+            addHideRow(strip, a.label, b);
         }
     }
 
@@ -6761,55 +6768,49 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    /** Mirror of {@link #addPickerChip} for the hide-manager strip. The
-     *  geometry, paddings, idle colours and pill background match exactly
-     *  so the two strips are visually indistinguishable in idle state.
-     *  Hidden state is applied later by {@link #paintHideChip} as a
-     *  strike-through flag on the label paint. */
-    private void addHideChip(android.widget.LinearLayout strip,
-                             String label, Bitmap icon) {
-        android.widget.LinearLayout chip = new android.widget.LinearLayout(this);
-        chip.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        chip.setGravity(Gravity.CENTER_VERTICAL);
-        chip.setPadding(dp(10), dp(7), dp(12), dp(7));
+    /** Build one hide-manager <em>row</em> (v1.5.0 vertical list): a round
+     *  app icon + label, full row width so the selection pill spans it. The
+     *  hidden flag is applied later by {@link #paintHideRow} as a
+     *  strike-through on the label. Mirrors the button-shortcut slot rows. */
+    private void addHideRow(android.widget.LinearLayout list,
+                            String label, Bitmap icon) {
+        android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(7), dp(12), dp(7));
         android.graphics.drawable.GradientDrawable bg =
                 new android.graphics.drawable.GradientDrawable();
         bg.setColor(Color.TRANSPARENT);
-        bg.setCornerRadius(dp(10));
-        chip.setBackground(bg);
+        bg.setCornerRadius(dp(9));
+        row.setBackground(bg);
 
-        // Icon slot — always present so chip widths stay constant
-        // regardless of icon-load timing. Cache miss at build time uses
-        // INVISIBLE (reserves space, doesn't draw) so a later icon
-        // delivery via {@link #setChipIcon} only changes drawing, never
-        // the chip's measured width. The earlier GONE design dropped
-        // the slot from layout entirely, so chips visibly "popped"
-        // wider as their icons landed asynchronously — every chip to
-        // the right of the just-loaded one shifted, producing a
-        // janky cascade for the first 50-200 ms after the overlay
-        // opened with un-warmed icons.
+        // Round app icon. The slot is always present (INVISIBLE on a cache
+        // miss) so the label never shifts when the bitmap lands.
         ImageView iv = new ImageView(this);
         if (icon != null) { iv.setImageBitmap(icon); iv.setVisibility(View.VISIBLE); }
         else              { iv.setVisibility(View.INVISIBLE); }
+        clipCircular(iv);
         android.widget.LinearLayout.LayoutParams ivLp =
-                new android.widget.LinearLayout.LayoutParams(dp(20), dp(20));
-        ivLp.setMarginEnd(dp(7));
-        chip.addView(iv, ivLp);
+                new android.widget.LinearLayout.LayoutParams(dp(22), dp(22));
+        ivLp.setMarginEnd(dp(10));
+        row.addView(iv, ivLp);
 
         TextView tv = new TextView(this);
         tv.setText(label);
-        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         tv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         tv.setTextColor(0x99FFFFFF);
         tv.setSingleLine(true);
         tv.setEllipsize(TextUtils.TruncateAt.END);
-        tv.setMaxWidth(dp(150));
-        chip.addView(tv);
+        // Weight fills the remaining row width so the pill spans the row.
+        android.widget.LinearLayout.LayoutParams tvLp =
+                new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
+        row.addView(tv, tvLp);
 
-        android.widget.LinearLayout.LayoutParams clp =
-                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
-        clp.setMarginEnd(dp(7));
-        strip.addView(chip, clp);
+        android.widget.LinearLayout.LayoutParams rlp =
+                new android.widget.LinearLayout.LayoutParams(MATCH, dp(HIDE_ROW_H_DP));
+        rlp.bottomMargin = dp(2);
+        list.addView(row, rlp);
     }
 
     /** Repaint chip styles to reflect current selection AND hidden state.
@@ -6833,69 +6834,47 @@ public class LauncherActivity extends Activity {
             for (int i = 0; i < n; i++) {
                 boolean hidden = i < appList.size()
                         && hiddenApps.contains(appList.get(i).packageName);
-                paintHideChip(strip.getChildAt(i), i == curr, hidden, false);
+                paintHideRow(strip.getChildAt(i), i == curr, hidden, false);
             }
         } else if (prev != curr) {
             if (prev < n) {
                 boolean ph = prev < appList.size()
                         && hiddenApps.contains(appList.get(prev).packageName);
-                paintHideChip(strip.getChildAt(prev), false, ph, true);
+                paintHideRow(strip.getChildAt(prev), false, ph, true);
             }
             if (curr >= 0 && curr < n) {
                 boolean ch = curr < appList.size()
                         && hiddenApps.contains(appList.get(curr).packageName);
-                paintHideChip(strip.getChildAt(curr), true, ch, true);
+                paintHideRow(strip.getChildAt(curr), true, ch, true);
             }
         }
         keymapHideLastIdx = curr;
         scrollHideToSelection();
     }
 
-    /** Single source of truth for a hide-chip's visual state. Matches the
-     *  keymap-picker chip paint exactly for selection / scale / pill
-     *  background; adds strike-through on the label when hidden so the
-     *  flag is legible in both selected and idle pills. */
-    private void paintHideChip(View chip, boolean sel, boolean hidden, boolean animate) {
-        if (chip == null) return;
-        android.graphics.drawable.Drawable bgd = chip.getBackground();
+    /** Single source of truth for a hide-<em>row</em>'s visual state. Matches
+     *  the slot-row paint: selected → dark text on a bright pill; idle →
+     *  light text on transparent. Hidden adds a strike-through on the label
+     *  so the flag is legible in both states. (No scale — rows aren't chips.) */
+    private void paintHideRow(View row, boolean sel, boolean hidden, boolean animate) {
+        if (row == null) return;
+        android.graphics.drawable.Drawable bgd = row.getBackground();
         if (bgd instanceof android.graphics.drawable.GradientDrawable) {
             ((android.graphics.drawable.GradientDrawable) bgd)
                     .setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
         }
-        if (chip instanceof android.widget.LinearLayout) {
-            android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
+        if (row instanceof android.widget.LinearLayout) {
+            android.widget.LinearLayout cl = (android.widget.LinearLayout) row;
             View last = cl.getChildAt(cl.getChildCount() - 1);
             if (last instanceof TextView) {
                 TextView tv = (TextView) last;
-                // Selected → dark text on bright pill; idle → light text.
-                // Hidden idle is dimmer than visible idle (0x66FFFFFF vs
-                // 0x99FFFFFF) so the strike-through reads as "muted /
-                // hidden" at a glance. Selected hidden stays at full dark
-                // text — the strike-through still distinguishes it. Both
-                // sel branches resolve to the same colour; kept as a flat
-                // assignment instead of a self-referential ternary.
-                if (sel) {
-                    tv.setTextColor(0xFF111114);
-                } else {
-                    tv.setTextColor(hidden ? 0x66FFFFFF : 0x99FFFFFF);
-                }
+                if (sel) tv.setTextColor(0xFF111114);
+                else     tv.setTextColor(hidden ? 0x66FFFFFF : 0x99FFFFFF);
                 int flags = tv.getPaintFlags();
                 if (hidden) flags |=  Paint.STRIKE_THRU_TEXT_FLAG;
                 else        flags &= ~Paint.STRIKE_THRU_TEXT_FLAG;
                 tv.setPaintFlags(flags);
             }
-        }
-        chip.animate().cancel();
-        float targetScale = sel ? 1.05f : 1f;
-        if (animate) {
-            chip.animate()
-                    .scaleX(targetScale).scaleY(targetScale)
-                    .setDuration(140)
-                    .setInterpolator(FOCUS_EASE)
-                    .start();
-        } else {
-            chip.setScaleX(targetScale);
-            chip.setScaleY(targetScale);
         }
     }
 
@@ -6932,28 +6911,28 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    /** Auto-scroll the horizontal strip so the selected chip stays in
-     *  view with a small margin. Identical to scrollPickerToSelection. */
+    /** Auto-scroll the vertical list so the selected row stays in view with
+     *  a small margin (v1.5.0 — was a horizontal strip scroll). */
     private void scrollHideToSelection() {
-        android.widget.HorizontalScrollView hsv = keymapHideHsv;
+        android.widget.ScrollView sv = keymapHideScroll;
         android.widget.LinearLayout strip = keymapHideStrip;
-        if (hsv == null || strip == null) return;
+        if (sv == null || strip == null) return;
         if (keymapHideIdx < 0 || keymapHideIdx >= strip.getChildCount()) return;
-        View chip = strip.getChildAt(keymapHideIdx);
-        if (chip == null) return;
-        if (chip.getWidth() == 0) {
-            hsv.post(this::scrollHideToSelection);
+        View row = strip.getChildAt(keymapHideIdx);
+        if (row == null) return;
+        if (row.getHeight() == 0) {
+            sv.post(this::scrollHideToSelection);
             return;
         }
-        int chipLeft  = chip.getLeft();
-        int chipRight = chip.getRight();
-        int viewLeft  = hsv.getScrollX();
-        int viewRight = viewLeft + hsv.getWidth();
-        int margin    = dp(40);
-        if (chipLeft < viewLeft + margin) {
-            hsv.smoothScrollTo(Math.max(0, chipLeft - margin), 0);
-        } else if (chipRight > viewRight - margin) {
-            hsv.smoothScrollTo(chipRight - hsv.getWidth() + margin, 0);
+        int top    = row.getTop();
+        int bottom = row.getBottom();
+        int viewTop    = sv.getScrollY();
+        int viewBottom = viewTop + sv.getHeight();
+        int margin     = dp(6);
+        if (top < viewTop + margin) {
+            sv.smoothScrollTo(0, Math.max(0, top - margin));
+        } else if (bottom > viewBottom - margin) {
+            sv.smoothScrollTo(0, bottom - sv.getHeight() + margin);
         }
     }
 
@@ -6961,10 +6940,10 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout strip = keymapHideStrip;
         int n = strip == null ? 0 : strip.getChildCount();
         switch (kc) {
-            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_UP:
                 if (n > 0) keymapHideIdx = Math.max(0, keymapHideIdx - 1);
                 refreshHideStrip(); return true;
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
                 if (n > 0) keymapHideIdx = Math.min(n - 1, keymapHideIdx + 1);
                 refreshHideStrip(); return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
@@ -7655,6 +7634,24 @@ public class LauncherActivity extends Activity {
     }
 
     private int dp(int v) { return Math.round(v * density); }
+
+    /** Clip a small list/chip {@link ImageView} to a circle so the shared
+     *  (rounded-square) cached icon bitmap renders ROUND in the keymap slot
+     *  rows, the app picker, and the hide-apps list — without touching the
+     *  shared {@link #iconCache} (a pure view-level clip, no extra bitmap).
+     *  Used so the chip icons stay the familiar small round app icons while
+     *  the home / drawer tiles use their own larger artwork. */
+    private static void clipCircular(View v) {
+        v.setOutlineProvider(new ViewOutlineProvider() {
+            @Override public void getOutline(View view, Outline outline) {
+                int w = view.getWidth(), h = view.getHeight();
+                int d = Math.min(w, h);
+                int l = (w - d) / 2, t = (h - d) / 2;
+                outline.setOval(l, t, l + d, t + d);
+            }
+        });
+        v.setClipToOutline(true);
+    }
 
     /** Per-row indicator view for the keymap card slot list. Renders one
      *  of three glyphs ({@link #GLYPH_DOT} colour disc, {@link
