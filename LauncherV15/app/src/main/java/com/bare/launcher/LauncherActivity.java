@@ -20,6 +20,8 @@ import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.RenderEffect;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
@@ -70,16 +72,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class LauncherActivity extends Activity {
 
     private static final int    ICON_DP        = 80;   // round chip/list icon cache size
-    // v1.5.0 Apple-TV style banner tile (5:3) for the home row + app drawer.
-    private static final int    BANNER_W_DP      = 130;
-    private static final int    BANNER_H_DP      = 78;  // 130 * 3/5 (5:3 like tvOS 400x240)
-    private static final int    BANNER_CORNER_DP = 12;  // subtly rounded, Apple-TV-ish
-    private static final int    CELL_W_DP      = BANNER_W_DP;
-    private static final int    CELL_H_DP      = 108;   // banner height + focused-label area
     private static final int    RING_STROKE_DP = 3;
+    // v1.5.0 Apple-TV style 5:3 banner tiles, sized dynamically from the
+    // screen width so exactly 6 fit per row on ANY TV (see computeTileDims()).
+    // Volatile: written on the UI thread (onCreate / config change), read on
+    // the icon executor inside loadBannerBlocking.
+    private volatile int        tileWpx      = 0;   // banner / cell width
+    private volatile int        bannerHpx    = 0;   // banner height (5:3)
+    private volatile int        tileCornerPx = 0;   // corner radius
+    private volatile int        cellHpx      = 0;   // cell height (banner + focused label)
     /** Hide-apps vertical list: per-row height and how many rows are visible
      *  before the list scrolls (v1.5.0 redesign). */
-    private static final int    HIDE_ROW_H_DP    = 40;
+    private static final int    HIDE_ROW_H_DP    = 36;
     private static final int    HIDE_VISIBLE_ROWS = 6;
     // Clock cadence lives in {@link ClockFormatter#nextMinuteDelay} now.
     // The launcher schedules ticks aligned to the minute boundary so a
@@ -959,6 +963,11 @@ public class LauncherActivity extends Activity {
         // draw both grids at once (the drawer's row 0 already mirrors the home
         // row). INVISIBLE (not GONE) avoids a relayout on open/close.
         s.setVisibility(View.INVISIBLE);
+        // Frosted backdrop: blur the wallpaper behind the translucent drawer.
+        // The shared selection ring stays WHITE in the drawer (it reads well
+        // over the frosted surface) — same colour as on the home shelf.
+        applyDrawerBlur(true);
+        setHomeChromeVisible(false);
     }
 
     /** Close the drawer, re-derive the home row from the (possibly changed)
@@ -971,6 +980,13 @@ public class LauncherActivity extends Activity {
         if (d == null || d.getVisibility() != View.VISIBLE) return;
         final int drawerFocus = d.focusedIndex;
         if (d.reorderMode) d.exitReorderMode(false);
+        // Clear the wallpaper blur NOW (not in the close end-callback). If we
+        // waited until the slide finished, the translucent veil would fade to
+        // zero while the GPU blur was still applied, briefly revealing the bare
+        // blurred wallpaper before it snapped sharp — the "second blur" flash.
+        // Clearing it up front means the veil fades over an already-sharp
+        // wallpaper, and it drops the blur a few frames earlier (cheaper).
+        applyDrawerBlur(false);
         // Snapshot the (possibly reordered) visible list now; the close
         // callback runs ~170 ms later, after which the reusable visibleScratch
         // could have been rewritten by another applyShelfApps.
@@ -980,6 +996,7 @@ public class LauncherActivity extends Activity {
         d.close(() -> {
             RecyclingShelfView s2 = shelf;
             if (s2 == null || destroyed) return;
+            setHomeChromeVisible(true);             // restore toolbar + clock
             s2.setVisibility(View.VISIBLE);   // restore the home shelf hidden on open
             if (hc <= 0 || visibleSnapshot.isEmpty()) {
                 pushHomeRow(s2, visibleSnapshot, hc);   // clears the shelf
@@ -991,8 +1008,36 @@ public class LauncherActivity extends Activity {
             // its focus request onto the right cell.
             int homeIdx = (drawerFocus >= 0 && drawerFocus < hc) ? drawerFocus : Math.max(0, hc - 1);
             s2.focusedIndex = homeIdx;
+            s2.snapNextFocus = true;   // calm, no focus-bounce on return
             pushHomeRow(s2, visibleSnapshot, hc);
         });
+    }
+
+    /** Frosted-glass backdrop for the drawer: GPU-blur the (static) wallpaper
+     *  on Android 12+ (RenderEffect) so the translucent white drawer reads as
+     *  frosted glass. The blur is computed once into the wallpaper view's
+     *  render node — no per-frame cost. No-op on older devices, where the
+     *  drawer falls back to a near-opaque light veil. */
+    private void applyDrawerBlur(boolean on) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return;
+        RenderEffect fx = null;
+        if (on) {
+            float r = dp(36);
+            fx = RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP);
+        }
+        if (wallpaperFront != null) wallpaperFront.setRenderEffect(fx);
+        if (wallpaperBack  != null) wallpaperBack .setRenderEffect(fx);
+    }
+
+    /** Hide / restore the home "chrome" (toolbar pills + clock) while the
+     *  drawer is open. The drawer surface is translucent, so leaving the
+     *  sharp toolbar/clock behind it would ghost through the frost. The home
+     *  shelf is hidden separately (it owns focus-restore logic). */
+    private void setHomeChromeVisible(boolean visible) {
+        View nb = netBtn;        if (nb != null) nb.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+        View mb = mapperBtnView; if (mb != null) mb.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+        TextView cv = clockView;
+        if (cv != null) cv.setVisibility(visible ? (showClock ? View.VISIBLE : View.GONE) : View.INVISIBLE);
     }
 
     /** Launch the system uninstall flow for {@code app}. Shared by the drawer
@@ -1046,6 +1091,7 @@ public class LauncherActivity extends Activity {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         DisplayMetrics dm = getResources().getDisplayMetrics();
         density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels;
+        computeTileDims();
         pm = getPackageManager();
         initShortcutLabels();
         initCaches();
@@ -1460,6 +1506,7 @@ public class LauncherActivity extends Activity {
         density = dm.density;
         screenW = dm.widthPixels;
         screenH = dm.heightPixels;
+        computeTileDims();   // re-fit 6 tiles per row for the new screen width
         // Forward the new screen size into the wallpaper controller so its
         // next decode caps to the new dimensions (e.g. HDMI swap on TV
         // changes both screenW and screenH).
@@ -1564,7 +1611,7 @@ public class LauncherActivity extends Activity {
         wallpaperCtl.loadSnapshotSync();
 
         shelf = new RecyclingShelfView(this);
-        FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, dp(CELL_H_DP));
+        FrameLayout.LayoutParams shelfLp = new FrameLayout.LayoutParams(MATCH, cellHpx);
         shelfLp.gravity = Gravity.BOTTOM;
         shelfLp.setMargins(0, 0, 0, dp(12));
         shelf.setLayoutParams(shelfLp);
@@ -1735,12 +1782,12 @@ public class LauncherActivity extends Activity {
         int strokePx = dp(RING_STROKE_DP);
         // Selection ring wraps the Apple-TV banner tile (landscape rounded
         // rect). Box = banner + headroom for the focus scale-up.
-        int bw = dp(BANNER_W_DP), bh = dp(BANNER_H_DP);
+        int bw = tileWpx, bh = bannerHpx;
         int ringBoxW = bw + dp(12), ringBoxH = bh + dp(12);
         ringLayoutW    = ringBoxW;
         ringLayoutH    = ringBoxH;
         cachedIcyOffset = bh / 2f;  // banner centred at top of the cell
-        ringView = new RingView(this, strokePx, bw, bh, dp(BANNER_CORNER_DP));
+        ringView = new RingView(this, strokePx, bw, bh, tileCornerPx);
         FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(ringBoxW, ringBoxH);
         ringView.setLayoutParams(ringLp);
         ringView.setVisibility(View.INVISIBLE);
@@ -1930,7 +1977,6 @@ public class LauncherActivity extends Activity {
         int mw = menuOverlay.getMeasuredWidth();
         int mh = menuOverlay.getMeasuredHeight();
 
-        int bannerHpx     = dp(BANNER_H_DP);
         int iconTopInRoot = cellRelY + (int)(cachedIcyOffset - bannerHpx / 2f);
         int iconBotInRoot = iconTopInRoot + bannerHpx;
 
@@ -2358,6 +2404,11 @@ public class LauncherActivity extends Activity {
 
         int focusedIndex = 0;
 
+        /** One-shot: when true, the next focus posted by {@link #setApps} uses
+         *  the snap (no-bounce) path. Set by {@code closeDrawer} so returning
+         *  to the home row is a calm, subtle transition rather than a spring. */
+        boolean snapNextFocus = false;
+
         boolean reorderMode   = false;
         int     dragIndex     = -1;
 
@@ -2394,8 +2445,8 @@ public class LauncherActivity extends Activity {
             // exactly the right split: programmatic d-pad scrolls feel
             // premium, touch-fling keeps native physics.
             scroller = new OverScroller(ctx, SCROLL_EASE);
-            cellW   = dp(CELL_W_DP);
-            cellH   = dp(CELL_H_DP);
+            cellW   = tileWpx;
+            cellH   = cellHpx;
             sidePad = dp(10);
             edgePad = dp(48);
             stride  = cellW + sidePad * 2;
@@ -2634,7 +2685,8 @@ public class LauncherActivity extends Activity {
             requestLayout();
             for (AppInfo app : displayed) preWarmBanner(app);
             final int targetIdx = focusedIndex;
-            post(() -> requestFocusOnIndex(targetIdx));
+            final boolean snap = snapNextFocus; snapNextFocus = false;
+            post(() -> requestFocusOnIndex(targetIdx, snap));
         }
 
         void requestFocusOnIndex(int idx) { requestFocusOnIndex(idx, false); }
@@ -3068,9 +3120,9 @@ public class LauncherActivity extends Activity {
 
             CellView(Context ctx) {
                 super(ctx);
-                bannerW        = dp(BANNER_W_DP);
-                bannerH        = dp(BANNER_H_DP);
-                bannerCorner   = dp(BANNER_CORNER_DP);
+                bannerW        = tileWpx;
+                bannerH        = bannerHpx;
+                bannerCorner   = tileCornerPx;
                 phStroke       = dp(1);
                 labelOffsetY   = bannerH / 2f + dp(16);  // label below the banner
                 labelMaxWInset = dp(6);
@@ -3431,7 +3483,7 @@ public class LauncherActivity extends Activity {
                     // font-scale change so the truncation stays correct.
                     String disp = app.displayLabel;
                     if (disp == null) {
-                        float maxW = dp(CELL_W_DP) - labelMaxWInset;
+                        float maxW = bannerW - labelMaxWInset;
                         disp = labelPaint.measureText(labelStr) > maxW
                                 ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
                                 : labelStr;
@@ -3510,18 +3562,21 @@ public class LauncherActivity extends Activity {
         AppDrawer(Context ctx) {
             super(ctx);
             scroller = new OverScroller(ctx, SCROLL_EASE);
-            cellW     = dp(CELL_W_DP);
-            cellH     = dp(CELL_H_DP);
+            cellW     = tileWpx;
+            cellH     = cellHpx;
             sidePad   = dp(10);
             stride    = cellW + sidePad * 2;
             rowGap    = dp(14);
             rowStride = cellH + rowGap;
             topPad    = dp(28);
             bottomPad = dp(28);
-            // Near-opaque dark scrim so the wallpaper / toolbar / clock behind
-            // the drawer don't ghost through (we also hide the home shelf on
-            // open). Clickable so touches don't fall through to the shelf.
-            setBackgroundColor(0xF5101012);
+            // Frosted-white drawer surface. On Android 12+ a translucent white
+            // veil sits over the GPU-blurred wallpaper (see applyDrawerBlur)
+            // for a real frosted-glass look; older devices get a near-opaque
+            // light veil. Clickable so touches don't fall through to the shelf.
+            setBackgroundColor(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                    ? 0x66FFFFFF      // ~40% white over the blurred wallpaper
+                    : 0xE6ECECF0);    // light, near-opaque (no blur fallback)
             setFocusable(false);
             setClickable(true);
             setClipChildren(false);
@@ -3530,7 +3585,7 @@ public class LauncherActivity extends Activity {
             // onDraw, so opt out of the ViewGroup WILL_NOT_DRAW shortcut.
             setWillNotDraw(false);
             dividerPaint.setStyle(Paint.Style.STROKE);
-            dividerPaint.setColor(0x26FFFFFF);     // ~15% white hairline
+            dividerPaint.setColor(0x26FFFFFF);     // subtle white hairline (matches the white drawer content)
             dividerPaint.setStrokeWidth(dp(1));
         }
 
@@ -3878,10 +3933,10 @@ public class LauncherActivity extends Activity {
             setVisibility(VISIBLE);
             setAlpha(0f);
             int h = getHeight() > 0 ? getHeight() : screenH;
-            setTranslationY(h * 0.10f);
+            setTranslationY(h * 0.06f);
             animate().cancel();
             animate().alpha(1f).translationY(0f)
-                    .setDuration(220).setInterpolator(SCROLL_EASE)
+                    .setDuration(180).setInterpolator(SCROLL_EASE)
                     // Keep the ring glued to the focused cell as the whole
                     // drawer slides up (the cells move with the parent
                     // translation, so a one-shot positionRing would be left
@@ -3901,8 +3956,8 @@ public class LauncherActivity extends Activity {
             // Hide the ring up front so it doesn't trail the downward slide.
             RingView rv0 = ringView; if (rv0 != null) rv0.setVisibility(View.INVISIBLE);
             int h = getHeight() > 0 ? getHeight() : screenH;
-            animate().alpha(0f).translationY(h * 0.10f)
-                    .setDuration(170).setInterpolator(SCROLL_EASE)
+            animate().alpha(0f).translationY(h * 0.06f)
+                    .setDuration(140).setInterpolator(SCROLL_EASE)
                     .withEndAction(() -> {
                         setVisibility(GONE);
                         setTranslationY(0f); setAlpha(1f);
@@ -3917,7 +3972,10 @@ public class LauncherActivity extends Activity {
             animate().cancel();
             setVisibility(GONE);
             setTranslationY(0f); setAlpha(1f);
-            RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+            LauncherActivity.this.applyDrawerBlur(false);
+            LauncherActivity.this.setHomeChromeVisible(true);
+            RingView rv = ringView;
+            if (rv != null) rv.setVisibility(View.INVISIBLE);
         }
 
         // ── reorder ──────────────────────────────────────────────────────
@@ -4052,9 +4110,9 @@ public class LauncherActivity extends Activity {
 
             DrawerCell(Context ctx) {
                 super(ctx);
-                bannerW        = dp(BANNER_W_DP);
-                bannerH        = dp(BANNER_H_DP);
-                bannerCorner   = dp(BANNER_CORNER_DP);
+                bannerW        = tileWpx;
+                bannerH        = bannerHpx;
+                bannerCorner   = tileCornerPx;
                 phStroke       = dp(1);
                 labelOffsetY   = bannerH / 2f + dp(16);
                 labelMaxWInset = dp(6);
@@ -4062,17 +4120,17 @@ public class LauncherActivity extends Activity {
 
                 phRing = new Paint(Paint.ANTI_ALIAS_FLAG);
                 phRing.setStyle(Paint.Style.STROKE);
-                phRing.setColor(0x55FFFFFF);
+                phRing.setColor(0x55FFFFFF);     // white placeholder ring (matches the home shelf)
                 phRing.setStrokeWidth(phStroke);
 
                 iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
                 labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-                labelPaint.setColor(Color.WHITE);
+                labelPaint.setColor(Color.WHITE);                       // white — visible over the frosted blur
                 labelPaint.setTextSize(dp(11));
-                labelPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                labelPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
                 labelPaint.setTextAlign(Paint.Align.CENTER);
-                labelPaint.setShadowLayer(dp(4), 0, dp(1), 0xCC000000);
+                labelPaint.setShadowLayer(dp(4), 0, dp(1), 0xCC000000);  // dark halo keeps white legible
                 labelPaint.setLetterSpacing(0.02f);
                 labelTp = new TextPaint(labelPaint);
 
@@ -4276,7 +4334,7 @@ public class LauncherActivity extends Activity {
                 if (labelChanged) {
                     String disp = app.displayLabel;
                     if (disp == null) {
-                        float maxW = dp(CELL_W_DP) - labelMaxWInset;
+                        float maxW = bannerW - labelMaxWInset;
                         disp = labelPaint.measureText(labelStr) > maxW
                                 ? TextUtils.ellipsize(labelStr, labelTp, maxW, TextUtils.TruncateAt.END).toString()
                                 : labelStr;
@@ -5813,16 +5871,20 @@ public class LauncherActivity extends Activity {
         hideView.setClipChildren(false);
         hideView.setClipToPadding(false);
 
+        // Header: the "Hide apps from shelf · OK toggles" title. It names the
+        // list and reminds the user that OK toggles the hidden flag — restored
+        // per user request and styled like the picker title (tight padding so
+        // there's no dead space above the list).
         TextView hideTitle = new TextView(this);
         hideTitle.setText(R.string.keymap_hide_title);
         hideTitle.setTextColor(0xFFEFEFEF);
         hideTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         hideTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        hideTitle.setLetterSpacing(0.04f);
+        hideTitle.setLetterSpacing(0.03f);
         hideTitle.setSingleLine(true);
         hideTitle.setEllipsize(TextUtils.TruncateAt.END);
-        hideTitle.setMaxWidth(dp(248));
-        hideTitle.setPadding(dp(4), dp(2), dp(4), dp(8));
+        hideTitle.setMaxWidth(dp(248));   // never wider than the list (no right-side dead space)
+        hideTitle.setPadding(dp(4), dp(2), dp(4), dp(6));
         hideView.addView(hideTitle);
 
         // Vertical scroller capped at HIDE_VISIBLE_ROWS rows tall — content
@@ -7048,54 +7110,6 @@ public class LauncherActivity extends Activity {
         } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
     }
 
-    private void loadIconAsync(AppInfo app, IconTarget target) {
-        String key = app.packageName;
-        Bitmap cached = iconCache.get(key);
-        if (cached != null) { target.setIconBitmap(cached); return; }
-        List<IconTarget> waiters = iconInflight.get(key);
-        if (waiters != null) {
-            if (!waiters.contains(target)) waiters.add(target); // avoid duplicate registration
-            return;
-        }
-        waiters = new ArrayList<>(2); waiters.add(target);
-        iconInflight.put(key, waiters);
-        final List<IconTarget> fw = waiters;
-        try {
-            iconExecutor.execute(() -> {
-                if (destroyed) return;
-                Bitmap bmp = null;
-                try {
-                    // Same disk-first → PM path as preWarmIcon (see
-                    // {@link #loadIconBlocking}). Cache miss in this
-                    // codepath comes from a cell.bind that found
-                    // nothing in iconCache (memory-only, fast).
-                    bmp = loadIconBlocking(app);
-                    if (bmp != null) iconCache.put(key, bmp);
-                } catch (OutOfMemoryError | RuntimeException ignored) {}
-                if (destroyed) return;
-                final Bitmap fb = bmp;
-                runOnUiThread(() -> {
-                    if (destroyed) return;
-                    iconInflight.remove(key);
-                    // Deliver only when we got a bitmap. A null result still has
-                    // to clear the inflight entry (above) so the next bind for
-                    // the same package can retry; the placeholder ring stays
-                    // until a future pkg broadcast / cache refresh succeeds.
-                    if (fb == null) return;
-                    for (IconTarget cell : fw) {
-                        // Same guard as preWarmIcon: only deliver if the cell
-                        // is still on screen and still bound to this package.
-                        if (cell.iconTargetVisible() && key.equals(cell.iconTargetPackage()))
-                            cell.setIconBitmap(fb);
-                    }
-                    // Live-update any open chip strips / slot rows showing
-                    // this package — see preWarmIcon for the same hook.
-                    onIconLoaded(key, fb);
-                });
-            });
-        } catch (java.util.concurrent.RejectedExecutionException e) { iconInflight.remove(key); }
-    }
-
     /**
      * Background-thread icon loader: try the on-disk cache first, then
      * fall through to the PackageManager + IconRenderer pipeline.
@@ -7261,7 +7275,7 @@ public class LauncherActivity extends Activity {
      *  rect). Always returns a {@code BANNER_W × BANNER_H} bitmap (or null). */
     private Bitmap loadBannerBlocking(AppInfo app) {
         if (app == null) return null;
-        final int w = dp(BANNER_W_DP), h = dp(BANNER_H_DP), corner = dp(BANNER_CORNER_DP);
+        final int w = tileWpx, h = bannerHpx, corner = tileCornerPx;
         Drawable banner = resolveBannerDrawable(app);
         if (banner != null) {
             Bitmap b = IconRenderer.processBannerArt(banner, w, h, corner);
@@ -7778,6 +7792,26 @@ public class LauncherActivity extends Activity {
     }
 
     private int dp(int v) { return Math.round(v * density); }
+
+    /** Compute the Apple-TV banner-tile pixel dimensions from the current
+     *  screen width so exactly 6 tiles fit per row on any TV. Called at
+     *  startup (before {@link #buildLayout}) and on configuration change.
+     *  The tile is 5:3 (like tvOS 400x240); the corner is ~20% of the height
+     *  (slightly more rounded per user request), capped so tiles don't get
+     *  huge on very wide panels. */
+    private void computeTileDims() {
+        int sidePad = dp(10);
+        int avail   = Math.max(0, screenW - dp(24) * 2);
+        int stride  = avail > 0 ? avail / 6 : dp(150);
+        int cw = stride - sidePad * 2;
+        int capW = dp(156), minW = dp(64);
+        if (cw > capW) cw = capW;
+        if (cw < minW) cw = minW;
+        tileWpx      = cw;
+        bannerHpx    = Math.round(cw * 3f / 5f);        // 5:3
+        tileCornerPx = Math.round(bannerHpx * 0.20f);   // slightly more rounded
+        cellHpx      = bannerHpx + dp(28);              // banner + focused-label area
+    }
 
     /** Clip a small list/chip {@link ImageView} to a circle so the shared
      *  (rounded-square) cached icon bitmap renders ROUND in the keymap slot
