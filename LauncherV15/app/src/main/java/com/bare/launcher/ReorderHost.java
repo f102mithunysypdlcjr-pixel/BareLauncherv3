@@ -17,9 +17,14 @@ package com.bare.launcher;
  */
 interface ReorderHost {
 
-    /** Current menu cursor — one of {@code MENU_UNINSTALL} / {@code MENU_APP_INFO}
-     *  / {@code MENU_MOVE}. Read by the highlight painter. */
+    /** Current menu cursor — one of {@code MENU_HIDE} / {@code MENU_UNINSTALL}
+     *  / {@code MENU_APP_INFO} / {@code MENU_MOVE}. Read by the highlight
+     *  painter. */
     int menuSelection();
+
+    /** The user activated the Hide row (hides the app from the shelf/drawer;
+     *  it stays installed and listed in the Manage-hidden-apps screen). */
+    void onMenuHide();
 
     /** The user activated the Uninstall row (touch click or D-pad confirm). */
     void onMenuUninstall();

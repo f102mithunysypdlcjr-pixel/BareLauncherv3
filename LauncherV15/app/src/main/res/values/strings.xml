@@ -18,6 +18,7 @@
     <string name="cd_uninstall_app">Uninstall app</string>
     <string name="cd_open_app_info">Open app info in system settings</string>
     <string name="cd_move_app_position">Move app position</string>
+    <string name="cd_hide_app">Hide app from shelf</string>
 
     <!-- Context menu items shown over a focused shelf icon. The leading
          glyph is a Unicode symbol (cross / info / left-right arrows) drawn
@@ -25,16 +26,20 @@
     <string name="menu_uninstall">\u2715  Uninstall</string>
     <string name="menu_app_info">\u24D8  App Info</string>
     <string name="menu_move">\u21D4  Move</string>
+    <string name="menu_hide">\u2298  Hide</string>
 
     <!-- Keymap overlay -->
     <string name="keymap_not_assigned">Not assigned</string>
     <!-- Picker title; %1$s is the human-readable label of the remote key
          being bound (Red, Green, Menu, etc.) -->
     <string name="keymap_pick_app_for">Pick app for %1$s</string>
-    <!-- Hide-manager strip title. Hint reminds the user that OK toggles
-         the hidden flag for the focused chip; strike-through encodes the
-         hidden state in either selected or idle pill. -->
-    <string name="keymap_hide_title">Hide apps from shelf · OK toggles</string>
+    <!-- Hidden-apps manager title. The manager now lists ONLY hidden apps;
+         pressing OK on a row unhides it. Hiding is done from the long-press
+         context menu's "Hide" row. Kept short so the card hugs its content
+         (no dead space) and matches the button-shortcuts list width. -->
+    <string name="keymap_hide_title">OK to unhide</string>
+    <!-- Shown in the hidden-apps manager when nothing is hidden. -->
+    <string name="keymap_hide_empty">No hidden apps</string>
 
     <!-- Settings panel rows (v1.3.0). The panel opens as a dropdown
          under the gear toolbar pill and replaces both the wallpaper pill

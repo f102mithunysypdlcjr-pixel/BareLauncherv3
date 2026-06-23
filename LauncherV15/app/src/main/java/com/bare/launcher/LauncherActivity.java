@@ -378,6 +378,16 @@ public class LauncherActivity extends Activity {
      *
      *  <p>UI-thread only — no synchronisation needed. */
     private boolean uiPaused = false;
+    /** v1.5.x: set in {@link #onPause} when the drawer was open at pause time,
+     *  consumed in {@link #onResume}. We DEFER the drawer teardown (restore
+     *  shelf + rebuild home row) to resume so that launching an app from the
+     *  drawer does not repaint the home screen into the frame the system
+     *  snapshots for the launch transition — that repaint was the "home
+     *  screen flashes for a few ms before the app opens" bug. Leaving the
+     *  drawer as the last-painted surface makes the launch animate from the
+     *  drawer (correct context), while a genuine return to the launcher still
+     *  lands on a freshly-built home screen. */
+    private boolean drawerWasOpenAtPause = false;
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
@@ -445,6 +455,7 @@ public class LauncherActivity extends Activity {
      *  entry to reorder mode by whichever of the home shelf / app drawer is
      *  reordering. See {@link ReorderHost}. */
     private ReorderHost        menuHost      = null;
+    private       TextView    menuHide      = null;
     private       TextView    menuUninstall = null;
     private       TextView    menuAppInfo   = null;
     private       TextView    menuMove      = null;
@@ -558,6 +569,12 @@ public class LauncherActivity extends Activity {
     private TextView                    keymapHideTitle   = null;
     private android.widget.ScrollView   keymapHideScroll  = null;  // vertical list scroller (v1.5.0)
     private android.widget.LinearLayout keymapHideStrip   = null;  // vertical row list
+    /** v1.5.x: the hidden-apps manager now lists ONLY hidden apps (OK unhides
+     *  each). This is the per-row backing list — row {@code i} maps to
+     *  {@code hideListApps.get(i)}. Rebuilt from {@link #hiddenApps} on every
+     *  open of the manager. Empty → a single non-selectable "No hidden apps"
+     *  placeholder row is shown and {@link #keymapHideIdx} is -1. */
+    private final java.util.List<AppInfo> hideListApps = new ArrayList<>();
     private int                         keymapHideIdx     = 0;
     private int                         keymapHideLastIdx = -1;
     // Built-row count cached so we only rebuild the toggle rows when the
@@ -978,6 +995,7 @@ public class LauncherActivity extends Activity {
     private void closeDrawer() {
         AppDrawer d = drawer; RecyclingShelfView s = shelf;
         if (d == null || d.getVisibility() != View.VISIBLE) return;
+        if (d.closing) return;   // a close is already animating — ignore re-triggers (held DPAD-UP)
         final int drawerFocus = d.focusedIndex;
         if (d.reorderMode) d.exitReorderMode(false);
         // Clear the wallpaper blur NOW (not in the close end-callback). If we
@@ -1066,6 +1084,43 @@ public class LauncherActivity extends Activity {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (tryStartActivityResolved(i)) return;
         showToast(getString(R.string.toast_no_app_info));
+    }
+
+    /** Hide {@code app} from the home shelf and drawer. The app stays
+     *  installed and remains available for remote-key shortcuts and in the
+     *  Manage-hidden-apps screen (where OK unhides it). Invoked from the
+     *  long-press context menu's "Hide" row on either surface.
+     *
+     *  <p>Re-filters both grids immediately (single {@link #applyShelfApps}
+     *  pass) and keeps D-pad focus on a valid cell: when hiding from the open
+     *  drawer the drawer stays open and refocuses near the removed slot; when
+     *  hiding from the home shelf focus lands on a remaining home cell (or the
+     *  toolbar if the home row is now empty).
+     *
+     *  @param fromDrawer true if invoked from the drawer (keep it open),
+     *                    false if from the home shelf.
+     *  @param focusHint  the index the hidden app occupied, used to choose a
+     *                    sensible neighbouring cell to refocus. */
+    private void hideApp(AppInfo app, boolean fromDrawer, int focusHint) {
+        if (app == null) return;
+        if (!hiddenApps.add(app.packageName)) return;   // already hidden — no-op
+        saveHiddenApps();
+        // The Manage-hidden-apps list is rebuilt lazily; this app must now
+        // appear there. (buildHideChips rebuilds from hiddenApps on open.)
+        keymapHideBuiltSize = -1;
+        keymapHideDirty     = true;
+        RecyclingShelfView s = shelf;
+        if (s == null) return;
+        applyShelfApps(s);   // rebuilds the home row AND drawer.setApps, both minus hidden
+        AppDrawer d = drawer;
+        if (fromDrawer && d != null && d.getVisibility() == View.VISIBLE) {
+            int n = countVisible(appList);
+            if (n > 0) d.requestFocusOnIndex(Math.max(0, Math.min(focusHint, n - 1)), true);
+        } else {
+            int last = s.lastIndex();
+            if (last < 0) { View nb = netBtn; if (nb != null) nb.requestFocus(); }
+            else          s.requestFocusOnIndex(Math.max(0, Math.min(focusHint, last)), true);
+        }
     }
 
     /** Start {@code intent} only if some activity resolves it. Returns whether
@@ -1191,6 +1246,22 @@ public class LauncherActivity extends Activity {
         startClock();
         registerTimeReceiver();
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
+        // v1.5.x: finish the drawer teardown deferred from onPause (see
+        // drawerWasOpenAtPause). Done here, not in onPause, so the app-launch
+        // transition animates from the drawer instead of a flashed home
+        // screen. forceHide also clears the wallpaper blur and restores the
+        // toolbar/clock chrome.
+        if (drawerWasOpenAtPause) {
+            drawerWasOpenAtPause = false;
+            AppDrawer d2 = drawer;
+            if (d2 != null) d2.forceHide();
+            RecyclingShelfView sh = shelf;
+            if (sh != null) {
+                sh.setVisibility(View.VISIBLE);
+                List<AppInfo> vis = buildVisibleList();
+                pushHomeRow(sh, vis, effectiveHomeCount(vis.size()));
+            }
+        }
         RecyclingShelfView s = shelf;
         if (s != null) {
             int saved = prefs.getInt(KEY_SCROLL_IDX, 0);
@@ -1250,20 +1321,19 @@ public class LauncherActivity extends Activity {
         uiPaused = true;
         stopClock();
         unregisterTimeReceiver();
-        // v1.5.0: if the drawer is open when we pause, persist any in-progress
-        // move, dismiss it without animation (the close tween can't run while
-        // pausing), and refresh the home row so a resume lands on an
-        // up-to-date home screen rather than a stale drawer.
+        // v1.5.x: if the drawer is open when we pause, persist any in-progress
+        // move, but DO NOT restore the home shelf here. Repainting the home
+        // screen now puts it into the frame the system snapshots for the
+        // app-launch transition, so launching an app from the drawer flashed
+        // the home screen for a few frames before the app appeared. Instead we
+        // record that the drawer was open and finish the teardown in onResume
+        // — the launch then animates from the drawer (correct context), and a
+        // real return to the launcher still rebuilds a fresh home screen.
         AppDrawer d = drawer;
         if (d != null && d.getVisibility() == View.VISIBLE) {
-            if (d.reorderMode) d.exitReorderMode(true);
-            d.forceHide();
-            RecyclingShelfView sh = shelf;
-            if (sh != null) {
-                sh.setVisibility(View.VISIBLE);   // undo the open-time hide
-                List<AppInfo> vis = buildVisibleList();
-                pushHomeRow(sh, vis, effectiveHomeCount(vis.size()));
-            }
+            if (d.reorderMode) d.exitReorderMode(true);   // persist the move
+            d.animate().cancel();                          // stop any in-flight open/close tween
+            drawerWasOpenAtPause = true;
         }
         FrameLayout r = root;
         if (r != null) {
@@ -1361,7 +1431,7 @@ public class LauncherActivity extends Activity {
         netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
         settingsOverlay = null; settingsCard = null; settingsColumn = null;
-        menuOverlay = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
+        menuOverlay = null; menuHide = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
         keymapOverlay = null; keymapColumn = null; keymapCard = null;
         keymapPickerView = null; keymapPickerTitle = null;
         keymapPickerHsv = null; keymapPickerStrip = null;
@@ -1867,6 +1937,26 @@ public class LauncherActivity extends Activity {
         // drawables; the rounded shape is fixed at construction time.
         final int itemRadius = dp(8);
 
+        menuHide = new TextView(this);
+        menuHide.setText(R.string.menu_hide);
+        menuHide.setTextColor(Color.WHITE);
+        menuHide.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        menuHide.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        menuHide.setGravity(Gravity.CENTER);
+        menuHide.setPadding(dp(20), dp(11), dp(20), dp(11));
+        menuHide.setClickable(true);
+        menuHide.setFocusable(false);
+        menuHide.setContentDescription(getString(R.string.cd_hide_app));
+        android.graphics.drawable.GradientDrawable hBg =
+                new android.graphics.drawable.GradientDrawable();
+        hBg.setCornerRadius(itemRadius);
+        hBg.setColor(Color.TRANSPARENT);
+        menuHide.setBackground(hBg);
+        menuHide.setOnClickListener(v -> {
+            ReorderHost h = menuHost;
+            if (h != null) h.onMenuHide();
+        });
+
         menuUninstall = new TextView(this);
         menuUninstall.setText(R.string.menu_uninstall);
         menuUninstall.setTextColor(0xFFFF6B6B);
@@ -1933,6 +2023,10 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout.LayoutParams itemLp =
                 new android.widget.LinearLayout.LayoutParams(dp(140), WRAP);
         itemLp.bottomMargin = dp(2);
+        android.widget.LinearLayout.LayoutParams itemLp0 =
+                new android.widget.LinearLayout.LayoutParams(dp(140), WRAP);
+        itemLp0.bottomMargin = dp(2);
+        menuCol.addView(menuHide, itemLp0);
         menuCol.addView(menuUninstall, itemLp);
         android.widget.LinearLayout.LayoutParams itemLp2 =
                 new android.widget.LinearLayout.LayoutParams(dp(140), WRAP);
@@ -1945,7 +2039,7 @@ public class LauncherActivity extends Activity {
     }
 
     void showContextMenu(View cell) {
-        if (menuOverlay == null || menuUninstall == null || menuAppInfo == null || menuMove == null) return;
+        if (menuOverlay == null || menuHide == null || menuUninstall == null || menuAppInfo == null || menuMove == null) return;
         cell.getLocationOnScreen(menuCellLoc);
         FrameLayout r = root; if (r == null) return;
         r.getLocationOnScreen(menuRootLoc);
@@ -2021,6 +2115,7 @@ public class LauncherActivity extends Activity {
                     .scaleX(1f).scaleY(1f)
                     .setDuration(130)
                     .setInterpolator(MENU_IN)
+                    .withLayer()
                     .start();
         } else {
             // Already visible (e.g. re-anchored after a reorder swap) — just
@@ -2042,6 +2137,7 @@ public class LauncherActivity extends Activity {
                 .scaleX(0.9f).scaleY(0.9f)
                 .setDuration(90)
                 .setInterpolator(MENU_OUT)
+                .withLayer()
                 .withEndAction(() -> {
                     if (fm != menuOverlay) return;
                     // Guard against the cancellation race: showContextMenu
@@ -2060,7 +2156,7 @@ public class LauncherActivity extends Activity {
 
     void updateMenuHighlight() {
         ReorderHost h = menuHost; if (h == null) return;
-        if (menuUninstall == null || menuAppInfo == null || menuMove == null) return;
+        if (menuHide == null || menuUninstall == null || menuAppInfo == null || menuMove == null) return;
         int sel = h.menuSelection();
         // Bright frosted-white pill for the selected item, mirroring the
         // toolbar buttons & keymap rows. The selected item's text inverts
@@ -2070,9 +2166,11 @@ public class LauncherActivity extends Activity {
         // Each item's background was constructed as a GradientDrawable with
         // a fixed corner radius (see buildLayout) — we mutate the colour on
         // those existing drawables so the rounded shape never changes.
+        setMenuItemBg(menuHide,      sel == RecyclingShelfView.MENU_HIDE      ? hlWhite : Color.TRANSPARENT);
         setMenuItemBg(menuUninstall, sel == RecyclingShelfView.MENU_UNINSTALL ? hlWhite : Color.TRANSPARENT);
         setMenuItemBg(menuAppInfo,   sel == RecyclingShelfView.MENU_APP_INFO  ? hlWhite : Color.TRANSPARENT);
         setMenuItemBg(menuMove,      sel == RecyclingShelfView.MENU_MOVE      ? hlWhite : Color.TRANSPARENT);
+        menuHide     .setTextColor(sel == RecyclingShelfView.MENU_HIDE      ? 0xFF111114 : 0xCCFFFFFF);
         menuUninstall.setTextColor(sel == RecyclingShelfView.MENU_UNINSTALL ? 0xFFC0202A : 0xCCFF6B6B);
         menuAppInfo  .setTextColor(sel == RecyclingShelfView.MENU_APP_INFO  ? 0xFF111114 : 0xCCFFFFFF);
         menuMove     .setTextColor(sel == RecyclingShelfView.MENU_MOVE      ? 0xFF111114 : 0xCCFFFFFF);
@@ -2431,10 +2529,17 @@ public class LauncherActivity extends Activity {
         // tags the focus callback that fires inside requestFocus().
         boolean fastNav = false;
 
-        // MENU_UNINSTALL=0 (top), MENU_APP_INFO=1 (middle), MENU_MOVE=2 (bottom)
+        // MENU_HIDE=3 (top), MENU_UNINSTALL=0, MENU_APP_INFO=1, MENU_MOVE=2 (bottom).
+        // Values are identifiers only — the menu's visual order (Hide, Uninstall,
+        // App Info, Move) is set by the order rows are added in ensureMenuOverlay
+        // and by the explicit UP/DOWN navigation chains, not by these ints.
         private static final int MENU_UNINSTALL = 0;
         private static final int MENU_APP_INFO  = 1;
         private static final int MENU_MOVE      = 2;
+        // MENU_HIDE sits at the TOP of the context menu (above Uninstall). It
+        // hides the app from the shelf/drawer (it stays installed and remains
+        // available for remote-key shortcuts + the Manage-hidden-apps list).
+        private static final int MENU_HIDE      = 3;
         int menuSelection = MENU_MOVE;
 
         RecyclingShelfView(Context ctx) {
@@ -2457,6 +2562,14 @@ public class LauncherActivity extends Activity {
 
         // ── ReorderHost (shared context menu) ────────────────────────────
         @Override public int menuSelection() { return menuSelection; }
+        @Override public void onMenuHide() {
+            if (!reorderMode) return;
+            menuSelection = MENU_HIDE;
+            int idx = dragIndex;
+            AppInfo app = (idx >= 0 && idx < displayed.size()) ? displayed.get(idx) : null;
+            exitReorderMode(false);
+            LauncherActivity.this.hideApp(app, false, idx);
+        }
         @Override public void onMenuUninstall() {
             if (!reorderMode) return;
             menuSelection = MENU_UNINSTALL;
@@ -3269,12 +3382,14 @@ public class LauncherActivity extends Activity {
                                 // the user is signalling they want to look at it again.
                                 if      (menuSelection == MENU_MOVE)     { reshowMenuIfHidden(); menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
                                 else if (menuSelection == MENU_APP_INFO) { reshowMenuIfHidden(); menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_UNINSTALL){ reshowMenuIfHidden(); menuSelection = MENU_HIDE;     updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
                                 // Cycle UNINSTALL → APP_INFO → MOVE; DOWN at MOVE confirms.
                                 // No reshow on the confirm branch — it's about to exit and
                                 // hide anyway, so showing first would just flash the menu.
-                                if      (menuSelection == MENU_UNINSTALL) { reshowMenuIfHidden(); menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
+                                if      (menuSelection == MENU_HIDE)      { reshowMenuIfHidden(); menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_UNINSTALL) { reshowMenuIfHidden(); menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
                                 else if (menuSelection == MENU_APP_INFO)  { reshowMenuIfHidden(); menuSelection = MENU_MOVE;     updateMenuHighlight(); }
                                 else exitReorderMode(true);
                                 return true;
@@ -3282,6 +3397,7 @@ public class LauncherActivity extends Activity {
                             case KeyEvent.KEYCODE_BUTTON_A:
                                 if      (menuSelection == MENU_UNINSTALL) triggerUninstall();
                                 else if (menuSelection == MENU_APP_INFO)  triggerAppInfo();
+                                else if (menuSelection == MENU_HIDE)      RecyclingShelfView.this.onMenuHide();
                                 else exitReorderMode(true);
                                 return true;
                             case KeyEvent.KEYCODE_BACK:
@@ -3555,6 +3671,14 @@ public class LauncherActivity extends Activity {
         int     focusedIndex = 0;
         boolean reorderMode  = false;
         boolean moveActive   = false;   // stage 2: D-pad performs 2-D moves
+        /** True from the start of {@link #close} until its end-action runs (or
+         *  {@link #forceHide}/{@link #open}). Guards against the close being
+         *  re-triggered by held DPAD-UP key-repeat at the top row: without it,
+         *  each repeat re-entered closeDrawer -> close(), cancelling and
+         *  restarting the fade so it never completed while the key was held —
+         *  leaving the drawer faded to ~0 over bare wallpaper with the shelf
+         *  still hidden (the "stuck on wallpaper, no apps" bug). */
+        boolean closing      = false;
         int     dragIndex    = -1;
         int     menuSelection = RecyclingShelfView.MENU_MOVE;
         boolean fastNav      = false;
@@ -3594,6 +3718,11 @@ public class LauncherActivity extends Activity {
 
         // ── ReorderHost (shared context menu) ────────────────────────────
         @Override public int menuSelection() { return menuSelection; }
+        @Override public void onMenuHide() {
+            if (!reorderMode) return;
+            menuSelection = RecyclingShelfView.MENU_HIDE;
+            triggerHide();
+        }
         @Override public void onMenuUninstall() {
             if (!reorderMode) return;
             menuSelection = RecyclingShelfView.MENU_UNINSTALL;
@@ -3698,10 +3827,17 @@ public class LauncherActivity extends Activity {
 
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
+            // Divider moved to dispatchDraw (drawn AFTER the cells) so a cell
+            // sliding through the row gap during a fast scroll can no longer
+            // paint over the thin line.
+        }
+
+        @Override protected void dispatchDraw(Canvas canvas) {
+            super.dispatchDraw(canvas);
             // Thin modern divider between the home row (row 0) and the rest of
             // the drawer grid. Only when there is a home row AND at least one
-            // app below it. Drawn in the row gap so it never overlaps an icon;
-            // scrolls with the content.
+            // app below it. Drawn in the row gap, on TOP of the cells, so fast
+            // scrolling never lets an icon override it. Scrolls with content.
             int hc = hc();
             if (hc <= 0 || displayed.size() <= hc) return;
             int base = firstRowTop();
@@ -3930,6 +4066,7 @@ public class LauncherActivity extends Activity {
 
         // ── open / close ─────────────────────────────────────────────────
         void open(int focusIdx) {
+            closing = false;
             setVisibility(VISIBLE);
             setAlpha(0f);
             int h = getHeight() > 0 ? getHeight() : screenH;
@@ -3937,6 +4074,13 @@ public class LauncherActivity extends Activity {
             animate().cancel();
             animate().alpha(1f).translationY(0f)
                     .setDuration(180).setInterpolator(SCROLL_EASE)
+                    // Hardware layer for the duration of the fade: the drawer
+                    // is a ViewGroup full of banner+label cells, so animating
+                    // its alpha would otherwise re-blend every child every
+                    // frame. withLayer() flattens it to a single GPU texture
+                    // for the tween then drops the layer — smoother on weak TV
+                    // GPUs, zero steady-state cost.
+                    .withLayer()
                     // Keep the ring glued to the focused cell as the whole
                     // drawer slides up (the cells move with the parent
                     // translation, so a one-shot positionRing would be left
@@ -3952,15 +4096,18 @@ public class LauncherActivity extends Activity {
         }
 
         void close(Runnable after) {
+            closing = true;
             animate().cancel();
             // Hide the ring up front so it doesn't trail the downward slide.
             RingView rv0 = ringView; if (rv0 != null) rv0.setVisibility(View.INVISIBLE);
             int h = getHeight() > 0 ? getHeight() : screenH;
             animate().alpha(0f).translationY(h * 0.06f)
                     .setDuration(140).setInterpolator(SCROLL_EASE)
+                    .withLayer()
                     .withEndAction(() -> {
                         setVisibility(GONE);
                         setTranslationY(0f); setAlpha(1f);
+                        closing = false;
                         if (after != null) after.run();
                     }).start();
         }
@@ -3968,6 +4115,7 @@ public class LauncherActivity extends Activity {
         /** Dismiss instantly with no animation (used from onPause where the
          *  close tween can't run). */
         void forceHide() {
+            closing = false;
             if (reorderMode) exitReorderMode(false);
             animate().cancel();
             setVisibility(GONE);
@@ -4026,6 +4174,24 @@ public class LauncherActivity extends Activity {
          *  homeCount, mirror the new visible order into the master appList,
          *  then rebind + reposition cells and re-focus the dragged app. */
         private void applyMove(HomeDrawerModel.MoveResult r) {
+            // FLIP animation: capture each currently-attached cell's VISUAL
+            // position keyed by the app it shows, BEFORE rebinding to the new
+            // order, so we can glide each app from its old slot to its new one.
+            // Visual position (layout + current translation) so rapid held-key
+            // moves chain smoothly off any in-flight slide. Allocated only on
+            // this discrete key event — never per frame.
+            final int oldScrollY = scrollY;
+            java.util.IdentityHashMap<AppInfo, int[]> oldPos =
+                    new java.util.IdentityHashMap<>(attached.size() * 2);
+            for (int i = 0; i < attached.size(); i++) {
+                DrawerCell c = attached.valueAt(i);
+                if (c.boundApp != null) {
+                    oldPos.put(c.boundApp, new int[]{
+                            c.getLeft() + Math.round(c.getTranslationX()),
+                            c.getTop()  + Math.round(c.getTranslationY()) });
+                }
+            }
+
             int size = displayed.size();
             int newHc = HomeDrawerModel.clampHomeCount(r.homeCount, size);
             if (size >= 1 && newHc < 1) newHc = 1;   // keep at least one home app
@@ -4046,6 +4212,48 @@ public class LauncherActivity extends Activity {
             rebindAttached();
             repositionAttached();
             fillVisible();
+
+            // Animate ONLY clean horizontal swaps within a row (the direct
+            // analog of the home-row swap): cells that moved purely sideways,
+            // with no scroll. Vertical moves, promote/demote across the home
+            // boundary, and any move that scrolls the grid SNAP instantly —
+            // animating those reflows every cell and read as broken/chaotic on
+            // the grid (and could leave residual offsets). Robust + lite.
+            boolean scrolled = (scrollY != oldScrollY);
+            for (int i = 0; i < attached.size(); i++) {
+                DrawerCell c = attached.valueAt(i);
+                if (c.boundApp == null) continue;
+                int[] from = oldPos.get(c.boundApp);
+                int dx = (from == null) ? 0 : from[0] - c.getLeft();
+                int dy = (from == null) ? 0 : from[1] - c.getTop();
+                if (scrolled || from == null || dy != 0 || dx == 0) {
+                    // No glide for this cell — clear any residual offset so a
+                    // recycled/relaid cell never sticks at a stale translation.
+                    c.animate().cancel();
+                    c.setTranslationX(0f); c.setTranslationY(0f);
+                    continue;
+                }
+                final boolean isDragged = (attached.keyAt(i) == dragIndex);
+                final DrawerCell dc = c;
+                c.animate().cancel();
+                c.setTranslationX(dx);
+                c.setTranslationY(dy);
+                if (isDragged) {
+                    c.animate().translationX(0f).translationY(0f)
+                            .setDuration(140).setInterpolator(REORDER_EASE)
+                            // Dragged cell carries the ring — track it per frame.
+                            .setUpdateListener(an -> {
+                                if (dc.isAttachedToWindow()) LauncherActivity.this.positionRing(dc);
+                            })
+                            .start();
+                } else {
+                    c.animate().translationX(0f).translationY(0f)
+                            .setDuration(140).setInterpolator(REORDER_EASE)
+                            .setUpdateListener(null)
+                            .start();
+                }
+            }
+
             DrawerCell cv = attached.get(dragIndex);
             if (cv != null) {
                 cv.requestFocus(); cv.invalidate();
@@ -4071,6 +4279,14 @@ public class LauncherActivity extends Activity {
             exitReorderMode(false);
             LauncherActivity.this.closeDrawer();   // return to home before the system dialog
             if (app != null) LauncherActivity.this.doUninstall(app);
+        }
+        void triggerHide() {
+            int idx = dragIndex;
+            AppInfo app = (idx >= 0 && idx < displayed.size()) ? displayed.get(idx) : null;
+            exitReorderMode(false);
+            // Hide in place — the drawer stays open and re-filters itself so
+            // the user can keep hiding apps without re-opening the drawer.
+            LauncherActivity.this.hideApp(app, true, idx);
         }
         void triggerAppInfo() {
             AppInfo app = (dragIndex >= 0 && dragIndex < displayed.size()) ? displayed.get(dragIndex) : null;
@@ -4211,9 +4427,11 @@ public class LauncherActivity extends Activity {
                             case KeyEvent.KEYCODE_DPAD_UP:
                                 if      (menuSelection == RecyclingShelfView.MENU_MOVE)     { menuSelection = RecyclingShelfView.MENU_APP_INFO;  updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_APP_INFO) { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
+                                else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL){ menuSelection = RecyclingShelfView.MENU_HIDE;     updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                if      (menuSelection == RecyclingShelfView.MENU_UNINSTALL) { menuSelection = RecyclingShelfView.MENU_APP_INFO; updateMenuHighlight(); }
+                                if      (menuSelection == RecyclingShelfView.MENU_HIDE)      { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
+                                else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL) { menuSelection = RecyclingShelfView.MENU_APP_INFO; updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_APP_INFO)  { menuSelection = RecyclingShelfView.MENU_MOVE;     updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -4224,6 +4442,7 @@ public class LauncherActivity extends Activity {
                             case KeyEvent.KEYCODE_BUTTON_A:
                                 if      (menuSelection == RecyclingShelfView.MENU_UNINSTALL) triggerUninstall();
                                 else if (menuSelection == RecyclingShelfView.MENU_APP_INFO)  triggerAppInfo();
+                                else if (menuSelection == RecyclingShelfView.MENU_HIDE)      triggerHide();
                                 else                                                          enterActiveMove();
                                 return true;
                             case KeyEvent.KEYCODE_BACK:
@@ -4263,6 +4482,7 @@ public class LauncherActivity extends Activity {
                     }
 
                     if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+                    if (closing) return true;   // close animating — ignore held-key repeats
                     boolean held = ev.getRepeatCount() > 0;
                     int size = displayed.size(), hc = hc();
                     switch (kc) {
@@ -4686,14 +4906,9 @@ public class LauncherActivity extends Activity {
             refreshKeymapPicker();
         } else if (keymapMode == KEYMAP_MODE_HIDE) {
             buildHideChips();
-            keymapHideBuiltSize = appList.size();
             keymapHideLastIdx   = -1;
-            android.widget.LinearLayout hs = keymapHideStrip;
-            if (hs != null) {
-                int max = Math.max(0, hs.getChildCount() - 1);
-                if (keymapHideIdx > max) keymapHideIdx = max;
-                if (keymapHideIdx < 0)   keymapHideIdx = 0;
-            }
+            int n = hideListApps.size();
+            keymapHideIdx = n > 0 ? Math.min(Math.max(0, keymapHideIdx), n - 1) : -1;
             refreshHideStrip();
         }
         // SLOTS mode: the keymap card already calls refreshKeymapRows
@@ -5461,6 +5676,7 @@ public class LauncherActivity extends Activity {
                     .translationY(0f)
                     .setDuration(160)
                     .setInterpolator(MENU_IN)
+                    .withLayer()
                     .start();
         });
     }
@@ -5478,6 +5694,7 @@ public class LauncherActivity extends Activity {
                     .translationY(-dp(4))
                     .setDuration(110)
                     .setInterpolator(MENU_OUT)
+                    .withLayer()
                     .withEndAction(() -> {
                         if (ov != settingsOverlay) return;
                         ov.setVisibility(View.GONE);
@@ -5868,8 +6085,11 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout hideView = new android.widget.LinearLayout(this);
         hideView.setOrientation(android.widget.LinearLayout.VERTICAL);
         hideView.setVisibility(View.GONE);
-        hideView.setClipChildren(false);
-        hideView.setClipToPadding(false);
+        // CLIP this view (unlike the picker, whose chips scale outside their
+        // bounds): hide rows never scale, and clipping stops scrolled list
+        // rows from bleeding up over the "OK to unhide" title.
+        hideView.setClipChildren(true);
+        hideView.setClipToPadding(true);
 
         // Header: the "Hide apps from shelf · OK toggles" title. It names the
         // list and reminds the user that OK toggles the hidden flag — restored
@@ -5883,7 +6103,7 @@ public class LauncherActivity extends Activity {
         hideTitle.setLetterSpacing(0.03f);
         hideTitle.setSingleLine(true);
         hideTitle.setEllipsize(TextUtils.TruncateAt.END);
-        hideTitle.setMaxWidth(dp(248));   // never wider than the list (no right-side dead space)
+        hideTitle.setMaxWidth(dp(210));   // matches the fixed list width
         hideTitle.setPadding(dp(4), dp(2), dp(4), dp(6));
         hideView.addView(hideTitle);
 
@@ -5902,8 +6122,10 @@ public class LauncherActivity extends Activity {
         };
         hideScroll.setVerticalScrollBarEnabled(false);
         hideScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        // Fixed width → constant, stable menu size (matches the compact
+        // button-shortcuts feel); long names ellipsize rather than widen it.
         android.widget.LinearLayout.LayoutParams hsLp =
-                new android.widget.LinearLayout.LayoutParams(dp(248), WRAP);
+                new android.widget.LinearLayout.LayoutParams(dp(210), WRAP);
         hideView.addView(hideScroll, hsLp);
 
         android.widget.LinearLayout hideStrip = new android.widget.LinearLayout(this);
@@ -5995,6 +6217,7 @@ public class LauncherActivity extends Activity {
                     .translationY(0f)
                     .setDuration(160)
                     .setInterpolator(MENU_IN)
+                    .withLayer()
                     .start();
         });
     }
@@ -6111,6 +6334,7 @@ public class LauncherActivity extends Activity {
                     .translationY(-dp(4))
                     .setDuration(110)
                     .setInterpolator(MENU_OUT)
+                    .withLayer()
                     .withEndAction(() -> {
                         if (ko != keymapOverlay) return;
                         // Cancellation race guard — see hideContextMenu.
@@ -6757,19 +6981,11 @@ public class LauncherActivity extends Activity {
      *  identical between the two card sub-modes. */
     private void enterHideManager() {
         if (keymapColumn == null || keymapHideView == null) return;
-        if (keymapHideBuiltSize != appList.size()) {
-            buildHideChips();
-            keymapHideBuiltSize = appList.size();
-        } else {
-            // Strip cached from a previous open — top up any chips whose
-            // bitmap was missing from iconCache at build time but has
-            // since been loaded (typical path: app was hidden across
-            // launcher restarts, applyShelfApps' hidden-app preWarm only
-            // just landed). Without this the chip's ImageView stays GONE
-            // and the row reads as "label only".
-            refreshHideChipIcons();
-        }
-        int n = appList.size();
+        // The hidden-apps list depends on the hiddenApps SET (not appList
+        // size), and it's small, so just rebuild it on every open — cheap and
+        // always correct after a hide/unhide or package change.
+        buildHideChips();
+        int n = hideListApps.size();
         keymapHideIdx     = n > 0 ? 0 : -1;
         keymapHideLastIdx = -1;       // force a full repaint on first refresh
         keymapMode        = KEYMAP_MODE_HIDE;
@@ -6829,11 +7045,36 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout strip = keymapHideStrip;
         if (strip == null) return;
         strip.removeAllViews();
+        hideListApps.clear();
+        // Only hidden apps appear here; row i ↔ hideListApps.get(i).
         for (int i = 0; i < appList.size(); i++) {
             AppInfo a = appList.get(i);
+            if (!hiddenApps.contains(a.packageName)) continue;
+            hideListApps.add(a);
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
             addHideRow(strip, a.label, b);
         }
+        if (hideListApps.isEmpty()) {
+            // Non-selectable placeholder so the card never collapses to a
+            // bare header. keymapHideIdx stays -1 (set by the caller) so the
+            // nav/toggle handlers treat the list as empty.
+            addHidePlaceholderRow(strip, getString(R.string.keymap_hide_empty));
+        }
+        keymapHideBuiltSize = appList.size();
+    }
+
+    /** A single non-interactive row used as the hidden-apps empty state. */
+    private void addHidePlaceholderRow(android.widget.LinearLayout list, String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        tv.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        tv.setTextColor(0x80FFFFFF);
+        tv.setSingleLine(true);
+        tv.setPadding(dp(10), dp(7), dp(12), dp(7));
+        android.widget.LinearLayout.LayoutParams lp =
+                new android.widget.LinearLayout.LayoutParams(WRAP, dp(HIDE_ROW_H_DP));
+        list.addView(tv, lp);
     }
 
     /** Walk the existing hide-manager chip strip and update any chip whose
@@ -6848,7 +7089,7 @@ public class LauncherActivity extends Activity {
     private void refreshHideChipIcons() {
         android.widget.LinearLayout strip = keymapHideStrip;
         if (strip == null || iconCache == null) return;
-        int n = Math.min(strip.getChildCount(), appList.size());
+        int n = Math.min(strip.getChildCount(), hideListApps.size());
         for (int i = 0; i < n; i++) {
             View chip = strip.getChildAt(i);
             if (!(chip instanceof android.widget.LinearLayout)) continue;
@@ -6858,7 +7099,7 @@ public class LauncherActivity extends Activity {
             if (!(v instanceof ImageView)) continue;
             ImageView iv = (ImageView) v;
             if (iv.getVisibility() == View.VISIBLE && iv.getDrawable() != null) continue;
-            Bitmap b = iconCache.get(appList.get(i).packageName);
+            Bitmap b = iconCache.get(hideListApps.get(i).packageName);
             if (b != null) {
                 iv.setImageBitmap(b);
                 iv.setVisibility(View.VISIBLE);
@@ -6900,7 +7141,9 @@ public class LauncherActivity extends Activity {
         tv.setTextColor(0x99FFFFFF);
         tv.setSingleLine(true);
         tv.setEllipsize(TextUtils.TruncateAt.END);
-        // Weight fills the remaining row width so the pill spans the row.
+        // Weight fills the fixed-width row and ellipsizes long names so the
+        // menu width is constant regardless of app-name length (stable size,
+        // no name can blow the card out or add variable dead space).
         android.widget.LinearLayout.LayoutParams tvLp =
                 new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
         row.addView(tv, tvLp);
@@ -6925,26 +7168,17 @@ public class LauncherActivity extends Activity {
         if (n == 0) return;
         int prev = keymapHideLastIdx;
         int curr = keymapHideIdx;
+        // Every row in this list is a hidden app, so there is no per-row
+        // "hidden" distinction to encode — pass hidden=false (no strike).
         if (prev < 0) {
-            // Full sweep — paint every chip's idle state, then highlight
-            // the current one. We have to walk every chip here because the
-            // strike-through paint flag may have stuck from a prior open.
+            // Full sweep — paint every row's idle state, then highlight the
+            // current one.
             for (int i = 0; i < n; i++) {
-                boolean hidden = i < appList.size()
-                        && hiddenApps.contains(appList.get(i).packageName);
-                paintHideRow(strip.getChildAt(i), i == curr, hidden, false);
+                paintHideRow(strip.getChildAt(i), i == curr, false, false);
             }
         } else if (prev != curr) {
-            if (prev < n) {
-                boolean ph = prev < appList.size()
-                        && hiddenApps.contains(appList.get(prev).packageName);
-                paintHideRow(strip.getChildAt(prev), false, ph, true);
-            }
-            if (curr >= 0 && curr < n) {
-                boolean ch = curr < appList.size()
-                        && hiddenApps.contains(appList.get(curr).packageName);
-                paintHideRow(strip.getChildAt(curr), true, ch, true);
-            }
+            if (prev >= 0 && prev < n) paintHideRow(strip.getChildAt(prev), false, false, true);
+            if (curr >= 0 && curr < n) paintHideRow(strip.getChildAt(curr), true,  false, true);
         }
         keymapHideLastIdx = curr;
         scrollHideToSelection();
@@ -6976,37 +7210,25 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    /** Toggle the hidden flag for the currently-selected chip. Saves the
-     *  pref synchronously, repaints just that chip's strike-through (no
-     *  full sweep), and marks the shelf as dirty so it gets re-filtered
-     *  when the overlay closes. */
+    /** OK on a row in the hidden-apps manager UNHIDES that app (every row in
+     *  this list is a hidden app). Persists the change, re-filters the shelf
+     *  on overlay close (keymapHideDirty), and rebuilds the list so the now-
+     *  visible app drops out — keeping the manager strictly "hidden apps only".
+     *  Hiding is done from the long-press context menu, not here. */
     private void toggleSelectedHide() {
-        android.widget.LinearLayout strip = keymapHideStrip;
-        if (strip == null) return;
         int idx = keymapHideIdx;
-        if (idx < 0 || idx >= appList.size()) return;
-        String pkg = appList.get(idx).packageName;
-        boolean nowHidden;
-        if (hiddenApps.contains(pkg)) { hiddenApps.remove(pkg); nowHidden = false; }
-        else                          { hiddenApps.add(pkg);    nowHidden = true;  }
+        if (idx < 0 || idx >= hideListApps.size()) return;
+        String pkg = hideListApps.get(idx).packageName;
+        hiddenApps.remove(pkg);
         saveHiddenApps();
         keymapHideDirty = true;
-        // Cheap repaint: the selected chip retains its bright pill, only
-        // the strike-through paint flag changes.
-        if (idx < strip.getChildCount()) {
-            View chip = strip.getChildAt(idx);
-            if (chip instanceof android.widget.LinearLayout) {
-                android.widget.LinearLayout cl = (android.widget.LinearLayout) chip;
-                View last = cl.getChildAt(cl.getChildCount() - 1);
-                if (last instanceof TextView) {
-                    TextView tv = (TextView) last;
-                    int flags = tv.getPaintFlags();
-                    if (nowHidden) flags |=  Paint.STRIKE_THRU_TEXT_FLAG;
-                    else           flags &= ~Paint.STRIKE_THRU_TEXT_FLAG;
-                    tv.setPaintFlags(flags);
-                }
-            }
-        }
+        // Rebuild the "hidden only" list (the unhidden app is now gone) and
+        // clamp the cursor to the new, shorter list.
+        buildHideChips();
+        int n = hideListApps.size();
+        keymapHideIdx     = n > 0 ? Math.min(idx, n - 1) : -1;
+        keymapHideLastIdx = -1;   // force a full repaint
+        refreshHideStrip();
     }
 
     /** Auto-scroll the vertical list so the selected row stays in view with
@@ -7035,8 +7257,7 @@ public class LauncherActivity extends Activity {
     }
 
     private boolean handleKeymapHideKey(int kc) {
-        android.widget.LinearLayout strip = keymapHideStrip;
-        int n = strip == null ? 0 : strip.getChildCount();
+        int n = hideListApps.size();
         switch (kc) {
             case KeyEvent.KEYCODE_DPAD_UP:
                 if (n > 0) keymapHideIdx = Math.max(0, keymapHideIdx - 1);
@@ -7806,6 +8027,10 @@ public class LauncherActivity extends Activity {
         int cw = stride - sidePad * 2;
         int capW = dp(156), minW = dp(64);
         if (cw > capW) cw = capW;
+        // v1.5.x: shrink the banner tiles slightly (~8%) for a tighter grid
+        // with more breathing room between tiles, per user request. Pure
+        // layout math evaluated once per config change — zero per-frame cost.
+        cw = Math.round(cw * 0.92f);
         if (cw < minW) cw = minW;
         tileWpx      = cw;
         bannerHpx    = Math.round(cw * 3f / 5f);        // 5:3
