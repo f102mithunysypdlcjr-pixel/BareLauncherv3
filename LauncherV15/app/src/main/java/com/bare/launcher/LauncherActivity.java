@@ -995,6 +995,7 @@ public class LauncherActivity extends Activity {
     private void closeDrawer() {
         AppDrawer d = drawer; RecyclingShelfView s = shelf;
         if (d == null || d.getVisibility() != View.VISIBLE) return;
+        if (d.closing) return;   // a close is already animating — ignore re-triggers (held DPAD-UP)
         final int drawerFocus = d.focusedIndex;
         if (d.reorderMode) d.exitReorderMode(false);
         // Clear the wallpaper blur NOW (not in the close end-callback). If we
@@ -3670,6 +3671,14 @@ public class LauncherActivity extends Activity {
         int     focusedIndex = 0;
         boolean reorderMode  = false;
         boolean moveActive   = false;   // stage 2: D-pad performs 2-D moves
+        /** True from the start of {@link #close} until its end-action runs (or
+         *  {@link #forceHide}/{@link #open}). Guards against the close being
+         *  re-triggered by held DPAD-UP key-repeat at the top row: without it,
+         *  each repeat re-entered closeDrawer -> close(), cancelling and
+         *  restarting the fade so it never completed while the key was held —
+         *  leaving the drawer faded to ~0 over bare wallpaper with the shelf
+         *  still hidden (the "stuck on wallpaper, no apps" bug). */
+        boolean closing      = false;
         int     dragIndex    = -1;
         int     menuSelection = RecyclingShelfView.MENU_MOVE;
         boolean fastNav      = false;
@@ -3818,10 +3827,17 @@ public class LauncherActivity extends Activity {
 
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
+            // Divider moved to dispatchDraw (drawn AFTER the cells) so a cell
+            // sliding through the row gap during a fast scroll can no longer
+            // paint over the thin line.
+        }
+
+        @Override protected void dispatchDraw(Canvas canvas) {
+            super.dispatchDraw(canvas);
             // Thin modern divider between the home row (row 0) and the rest of
             // the drawer grid. Only when there is a home row AND at least one
-            // app below it. Drawn in the row gap so it never overlaps an icon;
-            // scrolls with the content.
+            // app below it. Drawn in the row gap, on TOP of the cells, so fast
+            // scrolling never lets an icon override it. Scrolls with content.
             int hc = hc();
             if (hc <= 0 || displayed.size() <= hc) return;
             int base = firstRowTop();
@@ -4050,6 +4066,7 @@ public class LauncherActivity extends Activity {
 
         // ── open / close ─────────────────────────────────────────────────
         void open(int focusIdx) {
+            closing = false;
             setVisibility(VISIBLE);
             setAlpha(0f);
             int h = getHeight() > 0 ? getHeight() : screenH;
@@ -4079,6 +4096,7 @@ public class LauncherActivity extends Activity {
         }
 
         void close(Runnable after) {
+            closing = true;
             animate().cancel();
             // Hide the ring up front so it doesn't trail the downward slide.
             RingView rv0 = ringView; if (rv0 != null) rv0.setVisibility(View.INVISIBLE);
@@ -4089,6 +4107,7 @@ public class LauncherActivity extends Activity {
                     .withEndAction(() -> {
                         setVisibility(GONE);
                         setTranslationY(0f); setAlpha(1f);
+                        closing = false;
                         if (after != null) after.run();
                     }).start();
         }
@@ -4096,6 +4115,7 @@ public class LauncherActivity extends Activity {
         /** Dismiss instantly with no animation (used from onPause where the
          *  close tween can't run). */
         void forceHide() {
+            closing = false;
             if (reorderMode) exitReorderMode(false);
             animate().cancel();
             setVisibility(GONE);
@@ -4193,9 +4213,12 @@ public class LauncherActivity extends Activity {
             repositionAttached();
             fillVisible();
 
-            // Run the FLIP unless the move scrolled the grid — animating every
-            // visible cell by the scroll delta would be heavy on weak TV GPUs
-            // and reads as the whole grid sliding, so a scrolling move snaps.
+            // Animate ONLY clean horizontal swaps within a row (the direct
+            // analog of the home-row swap): cells that moved purely sideways,
+            // with no scroll. Vertical moves, promote/demote across the home
+            // boundary, and any move that scrolls the grid SNAP instantly —
+            // animating those reflows every cell and read as broken/chaotic on
+            // the grid (and could leave residual offsets). Robust + lite.
             boolean scrolled = (scrollY != oldScrollY);
             for (int i = 0; i < attached.size(); i++) {
                 DrawerCell c = attached.valueAt(i);
@@ -4203,8 +4226,9 @@ public class LauncherActivity extends Activity {
                 int[] from = oldPos.get(c.boundApp);
                 int dx = (from == null) ? 0 : from[0] - c.getLeft();
                 int dy = (from == null) ? 0 : from[1] - c.getTop();
-                if (scrolled || from == null || (dx == 0 && dy == 0)) {
-                    // No glide for this cell — clear any residual offset.
+                if (scrolled || from == null || dy != 0 || dx == 0) {
+                    // No glide for this cell — clear any residual offset so a
+                    // recycled/relaid cell never sticks at a stale translation.
                     c.animate().cancel();
                     c.setTranslationX(0f); c.setTranslationY(0f);
                     continue;
@@ -4458,6 +4482,7 @@ public class LauncherActivity extends Activity {
                     }
 
                     if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+                    if (closing) return true;   // close animating — ignore held-key repeats
                     boolean held = ev.getRepeatCount() > 0;
                     int size = displayed.size(), hc = hc();
                     switch (kc) {
@@ -6060,8 +6085,11 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout hideView = new android.widget.LinearLayout(this);
         hideView.setOrientation(android.widget.LinearLayout.VERTICAL);
         hideView.setVisibility(View.GONE);
-        hideView.setClipChildren(false);
-        hideView.setClipToPadding(false);
+        // CLIP this view (unlike the picker, whose chips scale outside their
+        // bounds): hide rows never scale, and clipping stops scrolled list
+        // rows from bleeding up over the "OK to unhide" title.
+        hideView.setClipChildren(true);
+        hideView.setClipToPadding(true);
 
         // Header: the "Hide apps from shelf · OK toggles" title. It names the
         // list and reminds the user that OK toggles the hidden flag — restored
@@ -6075,7 +6103,7 @@ public class LauncherActivity extends Activity {
         hideTitle.setLetterSpacing(0.03f);
         hideTitle.setSingleLine(true);
         hideTitle.setEllipsize(TextUtils.TruncateAt.END);
-        hideTitle.setMaxWidth(dp(248));   // never wider than the list (no right-side dead space)
+        hideTitle.setMaxWidth(dp(210));   // matches the fixed list width
         hideTitle.setPadding(dp(4), dp(2), dp(4), dp(6));
         hideView.addView(hideTitle);
 
@@ -6094,16 +6122,16 @@ public class LauncherActivity extends Activity {
         };
         hideScroll.setVerticalScrollBarEnabled(false);
         hideScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        // WRAP width so the card hugs the equalized rows (same compact width
-        // as the button-shortcuts list — no right-side dead space).
+        // Fixed width → constant, stable menu size (matches the compact
+        // button-shortcuts feel); long names ellipsize rather than widen it.
         android.widget.LinearLayout.LayoutParams hsLp =
-                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+                new android.widget.LinearLayout.LayoutParams(dp(210), WRAP);
         hideView.addView(hideScroll, hsLp);
 
         android.widget.LinearLayout hideStrip = new android.widget.LinearLayout(this);
         hideStrip.setOrientation(android.widget.LinearLayout.VERTICAL);
         hideScroll.addView(hideStrip,
-                new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
+                new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
 
         card.addView(col);
         card.addView(picker);
@@ -7032,10 +7060,6 @@ public class LauncherActivity extends Activity {
             // nav/toggle handlers treat the list as empty.
             addHidePlaceholderRow(strip, getString(R.string.keymap_hide_empty));
         }
-        // Size every row to the widest (same algorithm the button-shortcuts
-        // list uses) so the card hugs its content with no right-side dead
-        // space and reads at the same width as the shortcuts menu.
-        equalizeKeymapRowWidths(strip, strip.getChildCount());
         keymapHideBuiltSize = appList.size();
     }
 
@@ -7117,16 +7141,15 @@ public class LauncherActivity extends Activity {
         tv.setTextColor(0x99FFFFFF);
         tv.setSingleLine(true);
         tv.setEllipsize(TextUtils.TruncateAt.END);
-        tv.setMaxWidth(dp(160));   // cap long names so the card stays compact
-        // WRAP (no flex weight): the row hugs icon+label so equalizeKeymapRowWidths
-        // can snap every row to the widest one — same compact sizing as the
-        // button-shortcuts list, no right-side dead space.
+        // Weight fills the fixed-width row and ellipsizes long names so the
+        // menu width is constant regardless of app-name length (stable size,
+        // no name can blow the card out or add variable dead space).
         android.widget.LinearLayout.LayoutParams tvLp =
-                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+                new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
         row.addView(tv, tvLp);
 
         android.widget.LinearLayout.LayoutParams rlp =
-                new android.widget.LinearLayout.LayoutParams(WRAP, dp(HIDE_ROW_H_DP));
+                new android.widget.LinearLayout.LayoutParams(MATCH, dp(HIDE_ROW_H_DP));
         rlp.bottomMargin = dp(2);
         list.addView(row, rlp);
     }
