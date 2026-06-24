@@ -1783,11 +1783,11 @@ public class LauncherActivity extends Activity {
         // edge. The day/date line sits directly beneath the time.
         clockView.setPadding(dp(2), 0, dp(2), 0);
         clockView.setIncludeFontPadding(false);
-        // Left-align both lines and give a small, positive inter-line gap so
-        // the day/date line sits cleanly *below* the time (a negative/<1.0
-        // multiplier made the second line ride up into the time's descenders,
-        // which read as "misaligned").
-        clockView.setGravity(Gravity.START);
+        // Centre both lines so the day/date line sits centred directly under
+        // the time (left-alignment read as "off to the side"). Small positive
+        // inter-line gap so the second line sits cleanly below the time rather
+        // than riding up into its descenders.
+        clockView.setGravity(Gravity.CENTER_HORIZONTAL);
         clockView.setLineSpacing(dp(2), 1.0f);
         clockView.setContentDescription(getString(R.string.cd_clock));
         clockView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
@@ -2317,6 +2317,28 @@ public class LauncherActivity extends Activity {
                 slice.arcTo(oval, 270f - half, half * 2f);
                 slice.close();
 
+                float strokeW = Math.max(dp(1), ic * 0.11f);
+                // Idle (no plate): draw a soft dark shadow first so the white
+                // mark stays visible on light / white wallpapers.
+                if (!focused) {
+                    float sh = Math.max(1f, density) * 1.5f;
+                    c.save();
+                    c.translate(0f, sh);
+                    if (wifiConnected) {
+                        fill.setColor(0x59000000);
+                        fill.setStyle(Paint.Style.FILL);
+                        c.drawPath(slice, fill);
+                    } else {
+                        stroke.setColor(0x59000000);
+                        stroke.setStyle(Paint.Style.STROKE);
+                        stroke.setStrokeWidth(strokeW);
+                        stroke.setStrokeJoin(Paint.Join.ROUND);
+                        stroke.setStrokeCap(Paint.Cap.ROUND);
+                        c.drawPath(slice, stroke);
+                    }
+                    c.restore();
+                }
+
                 if (wifiConnected) {
                     fill.setColor(symbolColor);
                     fill.setStyle(Paint.Style.FILL);
@@ -2324,7 +2346,7 @@ public class LauncherActivity extends Activity {
                 } else {
                     stroke.setColor(symbolColor);
                     stroke.setStyle(Paint.Style.STROKE);
-                    stroke.setStrokeWidth(Math.max(dp(1), ic * 0.11f));
+                    stroke.setStrokeWidth(strokeW);
                     stroke.setStrokeJoin(Paint.Join.ROUND);
                     stroke.setStrokeCap(Paint.Cap.ROUND);
                     c.drawPath(slice, stroke);
@@ -2333,10 +2355,10 @@ public class LauncherActivity extends Activity {
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
-        // Short-press → WiFi settings; long-press → Bluetooth settings.
+        // Short-press → WiFi settings; long-press → Bluetooth / Remote & accessories.
         v.setOnLongClickListener(view -> {
             view.playSoundEffect(SoundEffectConstants.CLICK);
-            openBluetoothSettings();
+            openRemoteAccessories();
             return true;
         });
         v.setAlpha(0.6f);   // dimmed when idle; brightens to full on focus
@@ -2422,8 +2444,12 @@ public class LauncherActivity extends Activity {
                     AppleStyle.drawGearGlyph(c, cx, cy, r,
                             AppleStyle.SYMBOL_FOCUSED, bgFocus.getColor(), fill);
                 } else {
-                    // Idle: solid white cog with a transparent centre (no plate
-                    // colour to punch the hole against). View alpha dims it.
+                    // Idle: a soft dark shadow first so the white cog stays
+                    // visible on light / white wallpapers, then the white cog
+                    // with a real punched-through centre (CLEAR).
+                    float sh = Math.max(1f, density) * 1.5f;
+                    AppleStyle.drawGearGlyph(c, cx, cy + sh, r,
+                            0x59000000, 0x59000000, fill);
                     AppleStyle.drawGearGlyph(c, cx, cy, r,
                             AppleStyle.SYMBOL_IDLE, 0x00000000, fill);
                 }
@@ -2543,15 +2569,33 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    /** Open Bluetooth settings (WiFi pill long-press). Falls back to the
-     *  general Settings screen, then a toast, on stripped ROMs. */
-    private void openBluetoothSettings() {
-        String[] actions = { Settings.ACTION_BLUETOOTH_SETTINGS, Settings.ACTION_SETTINGS };
-        for (String a : actions) {
-            try { startActivity(new Intent(a).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return; }
-            catch (Exception ignored) { /* try next */ }
+    /** Open the device's Bluetooth / "Remote & accessories" screen (WiFi pill
+     *  long-press). On Android TV the pairing screen is a dedicated settings
+     *  activity, so we try its known component first, then the standard
+     *  Bluetooth-settings action, then fall back to general Settings, picking
+     *  the first that actually resolves. */
+    private void openRemoteAccessories() {
+        // 1) Android TV "Remote & accessories" / accessory-pairing activities.
+        String[][] components = {
+                { "com.android.tv.settings", "com.android.tv.settings.accessories.AccessoriesActivity" },
+                { "com.android.tv.settings", "com.android.tv.settings.accessories.AccessorySettingsActivity" },
+                { "com.android.tv.settings", "com.android.tv.settings.connectivity.BluetoothPreferenceActivity" },
+        };
+        for (String[] cn : components) {
+            Intent i = new Intent().setClassName(cn[0], cn[1])
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (tryStartActivityResolved(i)) return;
         }
-        showToast(getString(R.string.toast_no_settings));
+        // 2) Standard Bluetooth settings action (phones / most TV ROMs).
+        Intent bt = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (tryStartActivityResolved(bt)) return;
+        // 3) Last resort: general Settings.
+        try {
+            startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception ignored) {
+            showToast(getString(R.string.toast_no_settings));
+        }
     }
 
     /** Register a default-network callback so the WiFi pill glyph tracks
@@ -3820,6 +3864,10 @@ public class LauncherActivity extends Activity {
         boolean closing      = false;
         int     dragIndex    = -1;
         int     menuSelection = RecyclingShelfView.MENU_MOVE;
+        /** Mirrors the home shelf: once the user starts moving (first L/R),
+         *  the menu hides so it can't sit over the sliding cell; UP/DOWN
+         *  reshow + navigate it again. */
+        boolean menuDismissedForMove = false;
         boolean fastNav      = false;
 
         AppDrawer(Context ctx) {
@@ -3837,9 +3885,15 @@ public class LauncherActivity extends Activity {
             // veil sits over the GPU-blurred wallpaper (see applyDrawerBlur)
             // for a real frosted-glass look; older devices get a near-opaque
             // light veil. Clickable so touches don't fall through to the shelf.
+            // v1.4.9: transparent grey tint (was a white veil, which washed
+            // out over light wallpapers). On Android 12+ a translucent grey
+            // sits over the GPU-blurred wallpaper for a frosted-glass look;
+            // older devices get a slightly more opaque grey. Clickable so
+            // touches don't fall through to the shelf. Zero per-frame cost —
+            // it's a flat colour over the (statically) blurred wallpaper.
             setBackgroundColor(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                    ? 0x59FFFFFF      // ~35% white over the blurred wallpaper (toned down a notch)
-                    : 0xE6E2E2E8);    // light, near-opaque, slightly dimmer (no blur fallback)
+                    ? 0x7326262B      // ~45% dark grey over the blurred wallpaper
+                    : 0xE61E1E22);    // near-opaque grey (no blur fallback)
             setFocusable(false);
             setClickable(true);
             setClipChildren(false);
@@ -3980,7 +4034,13 @@ public class LauncherActivity extends Activity {
             int hc = hc();
             if (hc <= 0 || displayed.size() <= hc) return;
             int base = firstRowTop();
-            float y = base + cellH + rowGap / 2f - scrollY;
+            // Centre the line in the visible gap between the home-row banner
+            // and the first drawer-row banner. Cells reserve label space below
+            // the banner, so the geometric row gap centre sits much closer to
+            // the lower row; centring between the two BANNERS (row0 banner
+            // bottom = base+bannerHpx, row1 banner top = base+cellH+rowGap)
+            // reads as properly centred between the apps.
+            float y = base + (bannerHpx + cellH + rowGap) / 2f - scrollY;
             int h = getHeight();
             if (y < 0 || y > h) return;
             int left  = gridLeft + sidePad;
@@ -4278,6 +4338,7 @@ public class LauncherActivity extends Activity {
             if (reorderMode || idx < 0 || idx >= displayed.size()) return;
             reorderMode = true;
             moveActive  = false;
+            menuDismissedForMove = false;
             dragIndex   = idx;
             focusedIndex = idx;
             menuSelection = RecyclingShelfView.MENU_MOVE;
@@ -4296,6 +4357,15 @@ public class LauncherActivity extends Activity {
             hideContextMenu();
             DrawerCell cv = attached.get(dragIndex);
             if (cv != null) LauncherActivity.this.positionRing(cv);
+        }
+
+        /** Re-show the context menu over the dragged cell if a prior L/R move
+         *  hid it (mirrors the home shelf's reshow-on-UP/DOWN behaviour). */
+        private void reshowMenuIfHidden() {
+            if (!menuDismissedForMove) return;
+            menuDismissedForMove = false;
+            DrawerCell cv = attached.get(dragIndex);
+            if (cv != null) LauncherActivity.this.showContextMenu(cv);
         }
 
         void exitReorderMode(boolean persist) {
@@ -4529,21 +4599,38 @@ public class LauncherActivity extends Activity {
                                 default: return false;
                             }
                         }
-                        // Stage 1 — menu shown: UP/DOWN cycle, CENTER confirms.
+                        // Stage 1 — menu shown. LEFT/RIGHT move immediately
+                        // (like the home shelf, no OK needed); UP/DOWN cycle
+                        // the menu (and reshow it if a move hid it); OK on Move
+                        // enters full 2-D move (for vertical promote/demote).
                         switch (kc) {
                             case KeyEvent.KEYCODE_DPAD_UP:
+                                reshowMenuIfHidden();
                                 if      (menuSelection == RecyclingShelfView.MENU_MOVE)     { menuSelection = RecyclingShelfView.MENU_APP_INFO;  updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_APP_INFO) { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL){ menuSelection = RecyclingShelfView.MENU_HIDE;     updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
+                                reshowMenuIfHidden();
                                 if      (menuSelection == RecyclingShelfView.MENU_HIDE)      { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL) { menuSelection = RecyclingShelfView.MENU_APP_INFO; updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_APP_INFO)  { menuSelection = RecyclingShelfView.MENU_MOVE;     updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_LEFT:
                             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                                return true; // consume; movement is in stage 2
+                                // Move right away when Move is selected. The
+                                // menu hides on the first move so it doesn't
+                                // sit over the sliding cell (UP/DOWN brings it
+                                // back). When another menu item is selected,
+                                // L/R are swallowed (no horizontal action).
+                                if (menuSelection == RecyclingShelfView.MENU_MOVE) {
+                                    if (!menuDismissedForMove) {
+                                        menuDismissedForMove = true;
+                                        hideContextMenu();
+                                    }
+                                    moveDir(kc);
+                                }
+                                return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER:
                             case KeyEvent.KEYCODE_ENTER:
                             case KeyEvent.KEYCODE_BUTTON_A:
