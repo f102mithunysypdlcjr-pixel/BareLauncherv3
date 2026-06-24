@@ -397,8 +397,12 @@ android {
         // on ACTION_PACKAGE_REPLACED to prevent stale icons from
         // persisting after app updates. Pure bug fix, no new features —
         // SemVer PATCH bump.
-        versionCode   = 25
-        versionName   = "1.4.7"
+        // 1.4.8: app-drawer UX pass — hidden-apps icon/label fix, drawer
+        // hide-refocus fix, instant grid moves, divider + label + background
+        // polish, drawer-close cross-fade, and a compact hidden-apps panel.
+        // No new features, no API changes — SemVer PATCH bump.
+        versionCode   = 26
+        versionName   = "1.4.8"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

@@ -5,6 +5,54 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.8] — 2026-06-24
+
+App-drawer UX pass. Nine reported issues fixed, all on the existing
+zero-dependency render path — no new dependencies, no new allocations on
+any hot path.
+
+### Fixed
+
+- **Hidden-apps manager showed the wrong icon next to an app name.** The
+  live icon-delivery hook (`onIconLoaded`) indexed the hidden-apps row
+  list with an `appList` index, but those rows are keyed by the filtered
+  `hideListApps` subset — so a late-arriving icon landed on a different
+  row. Icons are now matched to rows by package name.
+- **Selector jumped to the last app after hiding one from the drawer.**
+  `drawer.setApps()` posts its own focus request; the explicit
+  hide-refocus raced it and lost. The hide-refocus is now posted so it
+  runs last and lands on the slot the hidden app vacated.
+- **Divider between the home row and the grid froze during a fast
+  scroll.** The divider is painted by the drawer in `dispatchDraw`, but
+  `doScrollTo` only offset the cells without invalidating the parent, so
+  the line stopped tracking the content during a drag/fling. The drawer
+  now invalidates on every scroll step.
+
+### Changed
+
+- **Drawer app moves now snap instantly in every direction.** The
+  left/right glide on the 2-D grid had to contend with scroll reflow and
+  promote/demote cases and read as broken. Moves are now crisp and
+  allocation-free (the per-move FLIP capture is gone); the clean 1-D
+  slide remains on the single-row home shelf.
+- **Drawer close cross-fades home back in.** The shelf, clock, and
+  toolbar are restored concurrently with the drawer's fade instead of
+  popping in at the end, removing the blink. Focus and the selection
+  ring land on the destination home cell immediately, so the ring no
+  longer lingers at the old drawer slot.
+- **Drawer grid keeps a row of context when navigating.** Focus now
+  scrolls the grid at the second-last visible row instead of sitting
+  flush against the edge.
+- **Drawer divider is slightly thicker and more visible**, centred in
+  the row gap.
+- **App-name labels are slightly heavier** (fake-bold) on both the
+  drawer and the home shelf — free at draw time.
+- **Drawer background veil toned down a notch** so it is less dominant
+  over the wallpaper.
+- **Hidden-apps panel hugs its content** with a max label width, so it
+  is compact for short names and ellipsises long ones instead of leaving
+  dead space.
+
 ## [1.4.5] — 2026-06-01
 
 Focused polish pass from a deep post-1.4.4 audit. One correctness fix,

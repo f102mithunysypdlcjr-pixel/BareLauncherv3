@@ -85,6 +85,11 @@ public class LauncherActivity extends Activity {
      *  before the list scrolls (v1.5.0 redesign). */
     private static final int    HIDE_ROW_H_DP    = 36;
     private static final int    HIDE_VISIBLE_ROWS = 6;
+    /** Max width of a hidden-app row label. The panel hugs its content (so
+     *  short names give a compact menu, no dead space) but long names
+     *  ellipsize at this cap instead of widening the card — the "max
+     *  character limit" that keeps the panel size bounded. */
+    private static final int    HIDE_LABEL_MAX_W_DP = 150;
     // Clock cadence lives in {@link ClockFormatter#nextMinuteDelay} now.
     // The launcher schedules ticks aligned to the minute boundary so a
     // 1 Hz wakeup loop is avoided; the clock has no seconds, so anything
@@ -993,7 +998,7 @@ public class LauncherActivity extends Activity {
      *  otherwise the nearest home app; when the home row is empty it falls
      *  back to the toolbar so focus is never lost. */
     private void closeDrawer() {
-        AppDrawer d = drawer; RecyclingShelfView s = shelf;
+        AppDrawer d = drawer;
         if (d == null || d.getVisibility() != View.VISIBLE) return;
         if (d.closing) return;   // a close is already animating — ignore re-triggers (held DPAD-UP)
         final int drawerFocus = d.focusedIndex;
@@ -1005,30 +1010,38 @@ public class LauncherActivity extends Activity {
         // Clearing it up front means the veil fades over an already-sharp
         // wallpaper, and it drops the blur a few frames earlier (cheaper).
         applyDrawerBlur(false);
-        // Snapshot the (possibly reordered) visible list now; the close
-        // callback runs ~170 ms later, after which the reusable visibleScratch
-        // could have been rewritten by another applyShelfApps.
+
+        // Start the drawer's downward fade. close() hides the ring up front so
+        // it can't trail the slide.
+        d.close(null);
+
+        // Restore the home surface IMMEDIATELY, concurrently with the fade —
+        // not in the fade's end-action. The shelf + clock + toolbar cross-fade
+        // in behind the still-translucent, fading drawer, which eliminates the
+        // hard "pop"/blink the old end-of-fade restore produced. Focus + the
+        // selection ring land on the destination home cell right away, so the
+        // ring no longer lingers at the old drawer slot for a beat before
+        // dropping to the home row.
+        RecyclingShelfView s2 = shelf;
+        if (s2 == null || destroyed) return;
         final List<AppInfo> visibleSnapshot = new ArrayList<>(buildVisibleList());
         resolveHomeCount(visibleSnapshot.size());
         final int hc = effectiveHomeCount(visibleSnapshot.size());
-        d.close(() -> {
-            RecyclingShelfView s2 = shelf;
-            if (s2 == null || destroyed) return;
-            setHomeChromeVisible(true);             // restore toolbar + clock
-            s2.setVisibility(View.VISIBLE);   // restore the home shelf hidden on open
-            if (hc <= 0 || visibleSnapshot.isEmpty()) {
-                pushHomeRow(s2, visibleSnapshot, hc);   // clears the shelf
-                View nb = netBtn; if (nb != null) nb.requestFocus();
-                return;
-            }
-            // Land focus on the drawer's app when it is a home app, else the
-            // nearest home app. Seed focusedIndex so the shelf's setApps posts
-            // its focus request onto the right cell.
-            int homeIdx = (drawerFocus >= 0 && drawerFocus < hc) ? drawerFocus : Math.max(0, hc - 1);
-            s2.focusedIndex = homeIdx;
-            s2.snapNextFocus = true;   // calm, no focus-bounce on return
-            pushHomeRow(s2, visibleSnapshot, hc);
-        });
+        setHomeChromeVisible(true);             // restore toolbar + clock
+        s2.setVisibility(View.VISIBLE);         // restore the home shelf hidden on open
+        if (hc <= 0 || visibleSnapshot.isEmpty()) {
+            pushHomeRow(s2, visibleSnapshot, hc);   // clears the shelf
+            RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+            View nb = netBtn; if (nb != null) nb.requestFocus();
+            return;
+        }
+        // Land focus on the drawer's app when it is a home app, else the
+        // nearest home app. Seed focusedIndex so the shelf's setApps posts
+        // its focus request onto the right cell.
+        int homeIdx = (drawerFocus >= 0 && drawerFocus < hc) ? drawerFocus : Math.max(0, hc - 1);
+        s2.focusedIndex = homeIdx;
+        s2.snapNextFocus = true;   // calm, no focus-bounce on return
+        pushHomeRow(s2, visibleSnapshot, hc);
     }
 
     /** Frosted-glass backdrop for the drawer: GPU-blur the (static) wallpaper
@@ -1114,8 +1127,18 @@ public class LauncherActivity extends Activity {
         applyShelfApps(s);   // rebuilds the home row AND drawer.setApps, both minus hidden
         AppDrawer d = drawer;
         if (fromDrawer && d != null && d.getVisibility() == View.VISIBLE) {
-            int n = countVisible(appList);
-            if (n > 0) d.requestFocusOnIndex(Math.max(0, Math.min(focusHint, n - 1)), true);
+            // applyShelfApps -> drawer.setApps() already posts its own focus
+            // request to the drawer's clamped index. Post ours AFTER it (same
+            // view queue, enqueued later → runs later → wins) so the selector
+            // lands on the slot the hidden app vacated instead of being pulled
+            // to the last cell by setApps' stale post.
+            final AppDrawer fd = d;
+            final int hint = focusHint;
+            fd.post(() -> {
+                if (fd.getVisibility() != View.VISIBLE) return;
+                int n = countVisible(appList);
+                if (n > 0) fd.requestFocusOnIndex(Math.max(0, Math.min(hint, n - 1)), true);
+            });
         } else {
             int last = s.lastIndex();
             if (last < 0) { View nb = netBtn; if (nb != null) nb.requestFocus(); }
@@ -3255,6 +3278,7 @@ public class LauncherActivity extends Activity {
                 labelPaint.setTextAlign(Paint.Align.CENTER);
                 labelPaint.setShadowLayer(dp(4), 0, dp(1), 0xCC000000);
                 labelPaint.setLetterSpacing(0.02f);
+                labelPaint.setFakeBoldText(true);                       // match the drawer: slightly heavier app name
 
                 labelTp = new TextPaint(labelPaint);
 
@@ -3699,8 +3723,8 @@ public class LauncherActivity extends Activity {
             // for a real frosted-glass look; older devices get a near-opaque
             // light veil. Clickable so touches don't fall through to the shelf.
             setBackgroundColor(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                    ? 0x66FFFFFF      // ~40% white over the blurred wallpaper
-                    : 0xE6ECECF0);    // light, near-opaque (no blur fallback)
+                    ? 0x59FFFFFF      // ~35% white over the blurred wallpaper (toned down a notch)
+                    : 0xE6E2E2E8);    // light, near-opaque, slightly dimmer (no blur fallback)
             setFocusable(false);
             setClickable(true);
             setClipChildren(false);
@@ -3709,8 +3733,8 @@ public class LauncherActivity extends Activity {
             // onDraw, so opt out of the ViewGroup WILL_NOT_DRAW shortcut.
             setWillNotDraw(false);
             dividerPaint.setStyle(Paint.Style.STROKE);
-            dividerPaint.setColor(0x26FFFFFF);     // subtle white hairline (matches the white drawer content)
-            dividerPaint.setStrokeWidth(dp(1));
+            dividerPaint.setColor(0x40FFFFFF);     // a touch more opaque so the hairline is actually visible
+            dividerPaint.setStrokeWidth(Math.max(1f, density * 1.5f));
         }
 
         /** Clamped, effective home-row size for the current visible count. */
@@ -3964,6 +3988,11 @@ public class LauncherActivity extends Activity {
             if (newY == scrollY) return;
             scrollY = newY;
             repositionAttached(); fillVisible();
+            // The home/grid divider is painted by THIS view in dispatchDraw, so
+            // it only repaints on a parent invalidate. offsetTopAndBottom on the
+            // cells alone left the line frozen during a touch-drag / fast fling
+            // (the cells slid, the line didn't). Invalidate so it tracks scroll.
+            invalidate();
             if (!reorderMode) {
                 DrawerCell fc = attached.get(focusedIndex);
                 if (fc != null && fc.isFocused()) LauncherActivity.this.positionRing(fc);
@@ -3996,7 +4025,10 @@ public class LauncherActivity extends Activity {
             int row = HomeDrawerModel.rowOf(index, hc());
             int top    = firstRowTop() + row * rowStride;   // content-space (no scroll)
             int bottom = top + cellH;
-            int pad    = rowGap;
+            // Keep one whole row of context beyond the focused row, so focus
+            // scrolls the grid once it reaches the 2nd-last visible row (in
+            // either direction) instead of sitting flush against the edge.
+            int pad    = rowStride;
             int target = scrollY;
             if      (top - pad < scrollY)             target = top - pad;
             else if (bottom + pad > scrollY + viewH)  target = bottom + pad - viewH;
@@ -4172,26 +4204,16 @@ public class LauncherActivity extends Activity {
 
         /** Apply a {@link HomeDrawerModel} move result: adopt the new
          *  homeCount, mirror the new visible order into the master appList,
-         *  then rebind + reposition cells and re-focus the dragged app. */
+         *  then rebind + reposition cells and re-focus the dragged app.
+         *
+         *  <p>Moves SNAP instantly in every direction (no glide). The drawer
+         *  is a 2-D grid where a slide animation has to contend with scroll
+         *  reflow and cross-row / promote-demote cases, which read as broken
+         *  on a TV grid. The clean 1-D slide lives only on the single-row home
+         *  shelf ({@code swapWithNeighbour}); here we keep moves crisp and
+         *  allocation-free for the ultralite path. Any residual per-cell
+         *  translation from a prior animation is cleared so nothing sticks. */
         private void applyMove(HomeDrawerModel.MoveResult r) {
-            // FLIP animation: capture each currently-attached cell's VISUAL
-            // position keyed by the app it shows, BEFORE rebinding to the new
-            // order, so we can glide each app from its old slot to its new one.
-            // Visual position (layout + current translation) so rapid held-key
-            // moves chain smoothly off any in-flight slide. Allocated only on
-            // this discrete key event — never per frame.
-            final int oldScrollY = scrollY;
-            java.util.IdentityHashMap<AppInfo, int[]> oldPos =
-                    new java.util.IdentityHashMap<>(attached.size() * 2);
-            for (int i = 0; i < attached.size(); i++) {
-                DrawerCell c = attached.valueAt(i);
-                if (c.boundApp != null) {
-                    oldPos.put(c.boundApp, new int[]{
-                            c.getLeft() + Math.round(c.getTranslationX()),
-                            c.getTop()  + Math.round(c.getTranslationY()) });
-                }
-            }
-
             int size = displayed.size();
             int newHc = HomeDrawerModel.clampHomeCount(r.homeCount, size);
             if (size >= 1 && newHc < 1) newHc = 1;   // keep at least one home app
@@ -4213,44 +4235,13 @@ public class LauncherActivity extends Activity {
             repositionAttached();
             fillVisible();
 
-            // Animate ONLY clean horizontal swaps within a row (the direct
-            // analog of the home-row swap): cells that moved purely sideways,
-            // with no scroll. Vertical moves, promote/demote across the home
-            // boundary, and any move that scrolls the grid SNAP instantly —
-            // animating those reflows every cell and read as broken/chaotic on
-            // the grid (and could leave residual offsets). Robust + lite.
-            boolean scrolled = (scrollY != oldScrollY);
+            // Clear any leftover translation from a previous (now-removed)
+            // glide so a recycled/relaid cell never sticks at a stale offset.
             for (int i = 0; i < attached.size(); i++) {
                 DrawerCell c = attached.valueAt(i);
-                if (c.boundApp == null) continue;
-                int[] from = oldPos.get(c.boundApp);
-                int dx = (from == null) ? 0 : from[0] - c.getLeft();
-                int dy = (from == null) ? 0 : from[1] - c.getTop();
-                if (scrolled || from == null || dy != 0 || dx == 0) {
-                    // No glide for this cell — clear any residual offset so a
-                    // recycled/relaid cell never sticks at a stale translation.
+                if (c.getTranslationX() != 0f || c.getTranslationY() != 0f) {
                     c.animate().cancel();
                     c.setTranslationX(0f); c.setTranslationY(0f);
-                    continue;
-                }
-                final boolean isDragged = (attached.keyAt(i) == dragIndex);
-                final DrawerCell dc = c;
-                c.animate().cancel();
-                c.setTranslationX(dx);
-                c.setTranslationY(dy);
-                if (isDragged) {
-                    c.animate().translationX(0f).translationY(0f)
-                            .setDuration(140).setInterpolator(REORDER_EASE)
-                            // Dragged cell carries the ring — track it per frame.
-                            .setUpdateListener(an -> {
-                                if (dc.isAttachedToWindow()) LauncherActivity.this.positionRing(dc);
-                            })
-                            .start();
-                } else {
-                    c.animate().translationX(0f).translationY(0f)
-                            .setDuration(140).setInterpolator(REORDER_EASE)
-                            .setUpdateListener(null)
-                            .start();
                 }
             }
 
@@ -4348,6 +4339,7 @@ public class LauncherActivity extends Activity {
                 labelPaint.setTextAlign(Paint.Align.CENTER);
                 labelPaint.setShadowLayer(dp(4), 0, dp(1), 0xCC000000);  // dark halo keeps white legible
                 labelPaint.setLetterSpacing(0.02f);
+                labelPaint.setFakeBoldText(true);                        // slightly heavier stroke (free at draw time)
                 labelTp = new TextPaint(labelPaint);
 
                 setFocusable(true); setFocusableInTouchMode(true);
@@ -6103,7 +6095,7 @@ public class LauncherActivity extends Activity {
         hideTitle.setLetterSpacing(0.03f);
         hideTitle.setSingleLine(true);
         hideTitle.setEllipsize(TextUtils.TruncateAt.END);
-        hideTitle.setMaxWidth(dp(210));   // matches the fixed list width
+        hideTitle.setMaxWidth(dp(HIDE_LABEL_MAX_W_DP) + dp(42));   // label cap + icon/padding allowance
         hideTitle.setPadding(dp(4), dp(2), dp(4), dp(6));
         hideView.addView(hideTitle);
 
@@ -6122,16 +6114,17 @@ public class LauncherActivity extends Activity {
         };
         hideScroll.setVerticalScrollBarEnabled(false);
         hideScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        // Fixed width → constant, stable menu size (matches the compact
-        // button-shortcuts feel); long names ellipsize rather than widen it.
+        // Width hugs the widest visible row (capped by the label max-width in
+        // addHideRow) → a compact, variable-width menu with no dead space for
+        // short names; long names ellipsize rather than widen the card.
         android.widget.LinearLayout.LayoutParams hsLp =
-                new android.widget.LinearLayout.LayoutParams(dp(210), WRAP);
+                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
         hideView.addView(hideScroll, hsLp);
 
         android.widget.LinearLayout hideStrip = new android.widget.LinearLayout(this);
         hideStrip.setOrientation(android.widget.LinearLayout.VERTICAL);
         hideScroll.addView(hideStrip,
-                new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
+                new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
 
         card.addView(col);
         card.addView(picker);
@@ -6658,11 +6651,20 @@ public class LauncherActivity extends Activity {
         FrameLayout ko = keymapOverlay;
         if (ko == null || ko.getVisibility() != View.VISIBLE) return;
         int idx = indexInAppList(pkg);
-        // Hide-manager strip: chip i ↔ appList[i].
+        // Hide-manager strip: rows are indexed by hideListApps (the filtered
+        // subset of hidden apps), NOT by appList. Indexing the strip with the
+        // appList index painted the icon onto the wrong hidden row (icon/name
+        // mismatch). Match by package against hideListApps instead.
         if (keymapMode == KEYMAP_MODE_HIDE) {
             android.widget.LinearLayout hStrip = keymapHideStrip;
-            if (hStrip != null && idx >= 0 && idx < hStrip.getChildCount()) {
-                setChipIcon(hStrip.getChildAt(idx), 0, bmp);
+            if (hStrip != null) {
+                int rows = Math.min(hStrip.getChildCount(), hideListApps.size());
+                for (int i = 0; i < rows; i++) {
+                    if (pkg.equals(hideListApps.get(i).packageName)) {
+                        setChipIcon(hStrip.getChildAt(i), 0, bmp);
+                        break;
+                    }
+                }
             }
         }
         // Picker strip: leading sentinel offsets app indices by 1.
@@ -7141,15 +7143,16 @@ public class LauncherActivity extends Activity {
         tv.setTextColor(0x99FFFFFF);
         tv.setSingleLine(true);
         tv.setEllipsize(TextUtils.TruncateAt.END);
-        // Weight fills the fixed-width row and ellipsizes long names so the
-        // menu width is constant regardless of app-name length (stable size,
-        // no name can blow the card out or add variable dead space).
+        // WRAP + maxWidth: short names keep the row (and the whole panel)
+        // compact; long names ellipsize at the cap so no name can blow the
+        // card out or add variable dead space.
+        tv.setMaxWidth(dp(HIDE_LABEL_MAX_W_DP));
         android.widget.LinearLayout.LayoutParams tvLp =
-                new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
+                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
         row.addView(tv, tvLp);
 
         android.widget.LinearLayout.LayoutParams rlp =
-                new android.widget.LinearLayout.LayoutParams(MATCH, dp(HIDE_ROW_H_DP));
+                new android.widget.LinearLayout.LayoutParams(WRAP, dp(HIDE_ROW_H_DP));
         rlp.bottomMargin = dp(2);
         list.addView(row, rlp);
     }
