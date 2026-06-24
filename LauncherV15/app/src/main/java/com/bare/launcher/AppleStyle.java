@@ -6,6 +6,8 @@ import android.graphics.ColorFilter;
 import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
@@ -204,11 +206,11 @@ final class AppleStyle {
      */
     static void drawGearGlyph(Canvas c, float cx, float cy, float r,
                               int symbolColor, int plateColor, Paint paint) {
-        final float rBody    = r * 0.40f;
-        final float rHole    = r * 0.16f;
-        final float toothLen = r * 0.20f;
-        final float toothW   = r * 0.32f;
-        final float cornerR  = toothW * 0.45f;
+        final float rBody    = r * 0.42f;
+        final float rHole    = r * 0.19f;
+        final float toothLen = r * 0.18f;
+        final float toothW   = r * 0.28f;
+        final float cornerR  = toothW * 0.5f;
 
         paint.setAntiAlias(true);
         paint.setStyle(Paint.Style.FILL);
@@ -233,10 +235,21 @@ final class AppleStyle {
             c.restore();
         }
 
-        // Hole — drawn in the plate colour so the cut-out reads as
-        // continuous with the surrounding pill backdrop.
-        paint.setColor(plateColor);
-        c.drawCircle(cx, cy, rHole, paint);
+        // Centre hole. A fully-transparent plateColor means "no plate behind
+        // me" (idle, floating over the wallpaper): punch a real hole with a
+        // CLEAR xfermode so the cog reads as a settings gear with a visible
+        // round centre instead of a solid star. Otherwise (focused, on a
+        // plate) draw the hole in the plate colour so it reads continuous.
+        if (Color.alpha(plateColor) == 0) {
+            Paint.Style prevStyle = paint.getStyle();
+            paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.CLEAR));
+            c.drawCircle(cx, cy, rHole, paint);
+            paint.setXfermode(null);
+            paint.setStyle(prevStyle);
+        } else {
+            paint.setColor(plateColor);
+            c.drawCircle(cx, cy, rHole, paint);
+        }
     }
 
     /**

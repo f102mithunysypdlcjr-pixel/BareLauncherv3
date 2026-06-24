@@ -33,12 +33,19 @@ encoder (no library, no network).
 - **Clock restyle**: the rounded pill plate is gone — the time floats
   bigger over the wallpaper in a lighter, more modern face with a soft
   shadow for legibility, and a small, dim "day, date month" line sits
-  left-aligned directly beneath it.
+  centred directly beneath it.
 - **Wi-Fi pill now shows connection state**: a filled slice when Wi-Fi is
   connected, an outline slice when it is not (live, via a default-network
-  callback). Long-pressing the Wi-Fi pill opens Bluetooth settings.
-- **Minimal gear icon**: no plate when idle (the glyph floats and is
-  dimmed); the plate returns on focus as the selection indicator.
+  callback). Long-pressing it opens Bluetooth / "Remote & accessories".
+- **Idle Wi-Fi and gear icons stay visible on white wallpapers** (a soft
+  drop shadow), float with no plate, and the gear now reads as a proper
+  cog with a punched-through centre instead of a solid star.
+- **Drawer background** is now a transparent grey tint (was a white veil
+  that washed out over light wallpapers); the divider between the home
+  row and the grid is centred between the two app rows.
+- **Drawer app move matches the home shelf**: long-press goes straight to
+  Move (left/right reorder immediately, no extra OK); up/down still reach
+  Hide / Uninstall / App info, and OK on Move enables full 2-D moves.
 - **Slightly more spacing between app tiles.**
 
 ## [1.4.8] — 2026-06-24
