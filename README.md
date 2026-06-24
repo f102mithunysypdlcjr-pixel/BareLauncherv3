@@ -48,7 +48,7 @@ Most TV launchers are heavy, online, and crowded with promotions. BareLauncher i
     <td align="center">
       <a href="https://github.com/user-attachments/assets/5a8b4e3a-493c-47e4-9495-c8320fe9d32f" target="_blank" rel="noopener">
         <img src="https://github.com/user-attachments/assets/5a8b4e3a-493c-47e4-9495-c8320fe9d32f" alt="BareLauncher button remapper" width="460" loading="lazy" />
-      </a><br/><sub><b>Button remapper</b></sub>
+      </a><br/><sub><b>Button shortcuts</b></sub>
     </td>
   </tr>
 </table>
@@ -62,11 +62,11 @@ Most TV launchers are heavy, online, and crowded with promotions. BareLauncher i
 |---|---|
 | ⚡ **Instant navigation** | Zero-lag scrolling on a TV remote, via a custom recycling shelf — no `RecyclerView`. |
 | 🗂️ **Home row + app drawer** | Favourites on the home screen, a pull-down drawer for the rest. Reorder freely with the D-pad. |
-| 🎛️ **Button remapper** | Map remote colour/menu keys to any app, right on the home screen — no Accessibility Service. |
-| 🙈 **Hide apps** | Tuck away apps you never use; they stay installed and remappable. |
+| 🎛️ **Button shortcuts** | Assign remote colour/menu keys to any app, right from the home screen — no Accessibility Service. |
+| 🗃️ **Manage apps** | Long-press any app to move, hide, open App info, or uninstall. Hidden apps stay installed, just off your home screen. |
 | 🖼️ **Wallpaper support** | Any wallpaper, rendered with hardware bitmaps that save 8–32 MB of RAM. |
 | 🕒 **3-state clock** | Full (time + day/date), time-only, or off. Locale-aware, 12/24-hour, instant timezone updates. |
-| 📶 **Wi-Fi & settings pills** | Live Wi-Fi indicator (long-press → Bluetooth & remotes) and a gear for everything else. |
+| 📶 **Wi-Fi & settings pills** | Live Wi-Fi indicator, plus a gear pill — long-press it to open system settings instantly. |
 | ℹ️ **About screen** | Version, links and a Ko-fi QR generated **on-device** — no library, no network. |
 | 🚫 **Zero telemetry** | No analytics, no crash reporting, no background calls. Your usage stays on your device. |
 | 🚀 **Cold-start cache** | Wallpaper, shelf, and icons paint in the very first frame after the first launch. |
@@ -97,7 +97,7 @@ Most TV launchers are heavy, online, and crowded with promotions. BareLauncher i
 
 ## Install
 
-### Fastest on Fire TV — Downloader
+### Downloader
 
 Open the **Downloader** app (by AFTVnews) and enter the code below. It always installs the **latest release** — no computer, no USB stick.
 
@@ -112,7 +112,7 @@ Open the **Downloader** app (by AFTVnews) and enter the code below. It always in
 ### Or sideload the APK manually
 
 1. Download **[`BareLauncher.apk`](../../releases/latest/download/BareLauncher.apk)** from the latest release.
-2. Move it to your TV — USB stick, network share, or a tool like *Send Files To TV* / *Downloader*.
+2. Move it to your TV — USB stick, network share, or an app like *LocalSend*.
 3. Allow installs from unknown sources when prompted.
 4. Open the APK and install.
 

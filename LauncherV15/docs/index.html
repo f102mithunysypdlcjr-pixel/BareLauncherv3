@@ -10,7 +10,7 @@
   <meta name="keywords" content="BareLauncher, Android TV launcher, Fire TV launcher, Google TV launcher, minimal launcher, lightweight launcher, no ads launcher, no telemetry, custom launcher Android TV, Fire TV Stick launcher, replace stock launcher, app drawer, button remapper, hide apps, free TV launcher APK" />
   <meta name="author" content="Mithun" />
   <meta name="robots" content="index, follow" />
-  <meta name="theme-color" content="#09090b" />
+  <meta name="theme-color" content="#0e1116" />
   <link rel="canonical" href="https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/" />
 
   <!-- Icons -->
@@ -60,12 +60,13 @@
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     :root{
-      --bg:#09090b; --bg2:#101116; --bg3:#181a22;
-      --border:rgba(255,255,255,.07); --border-hi:rgba(255,255,255,.13);
-      --text:#f5f5f7; --dim:#9a9ca6; --muted:#5a5c66;
-      --accent:#4ade80; --accent-dim:rgba(74,222,128,.10); --accent-ring:rgba(74,222,128,.28);
+      --bg:#0e1116; --bg2:#141923; --bg3:#1c2330;
+      --border:rgba(245,245,244,.07); --border-hi:rgba(245,245,244,.14);
+      --text:#f5f5f4; --dim:#9aa4b0; --muted:#5b6470;
+      --accent:#7dd3fc; --accent-dim:rgba(125,211,252,.10); --accent-ring:rgba(125,211,252,.30);
+      --on-accent:#06222e;
       --font:'Inter',system-ui,sans-serif; --mono:'DM Mono',ui-monospace,monospace;
-      --r:12px; --maxw:980px;
+      --r:14px; --maxw:980px;
     }
     html{scroll-behavior:smooth}
     body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}
@@ -75,22 +76,22 @@
 
     /* NAV */
     nav{position:fixed;inset:0 0 auto 0;z-index:100;height:58px;display:flex;align-items:center;justify-content:space-between;
-        padding:0 1.5rem;background:rgba(9,9,11,.82);backdrop-filter:blur(16px);border-bottom:1px solid var(--border)}
+        padding:0 1.5rem;background:rgba(14,17,22,.82);backdrop-filter:blur(16px);border-bottom:1px solid var(--border)}
     .brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;letter-spacing:-.01em}
     .brand img{width:26px;height:26px;border-radius:7px}
     .brand b{color:var(--text)} .brand span{color:var(--accent)}
     .nav-links{display:flex;gap:1.6rem}
     .nav-links a{font-size:13.5px;color:var(--dim);transition:color .15s}
     .nav-links a:hover{color:var(--text)}
-    .nav-dl{font-size:13px;font-weight:600;background:var(--accent);color:#08160d;padding:7px 16px;border-radius:7px;transition:transform .12s,opacity .15s}
+    .nav-dl{font-size:13px;font-weight:600;background:var(--accent);color:var(--on-accent);padding:7px 16px;border-radius:7px;transition:transform .12s,opacity .15s}
     .nav-dl:hover{opacity:.9;transform:translateY(-1px)}
 
     /* HERO */
     .hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
           padding:7rem 1.5rem 4rem;position:relative;overflow:hidden}
     .hero::before{content:'';position:absolute;top:-160px;left:50%;transform:translateX(-50%);width:720px;height:720px;
-                  background:radial-gradient(circle,rgba(74,222,128,.06) 0%,transparent 66%);pointer-events:none}
-    .hero-logo{width:84px;height:84px;border-radius:20px;margin-bottom:1.6rem;box-shadow:0 14px 50px -12px rgba(74,222,128,.35)}
+                  background:radial-gradient(circle,rgba(125,211,252,.07) 0%,transparent 66%);pointer-events:none}
+    .hero-logo{width:84px;height:84px;border-radius:20px;margin-bottom:1.6rem;box-shadow:0 14px 50px -12px rgba(125,211,252,.4)}
     .eyebrow{display:inline-flex;align-items:center;gap:7px;background:var(--accent-dim);border:1px solid var(--accent-ring);
              padding:4px 13px;border-radius:999px;font-family:var(--mono);font-size:11px;font-weight:500;color:var(--accent);
              letter-spacing:.08em;text-transform:uppercase;margin-bottom:1.5rem}
@@ -103,7 +104,7 @@
     .btn{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;padding:12px 26px;border-radius:9px;
          border:1px solid transparent;cursor:pointer;transition:transform .12s,opacity .15s,border-color .15s,color .15s}
     .btn svg{width:16px;height:16px;flex-shrink:0}
-    .btn-primary{background:var(--accent);color:#08160d}
+    .btn-primary{background:var(--accent);color:var(--on-accent)}
     .btn-primary:hover{opacity:.9;transform:translateY(-1px)}
     .btn-ghost{background:transparent;color:var(--dim);border-color:var(--border-hi);font-weight:400}
     .btn-ghost:hover{color:var(--text);border-color:rgba(255,255,255,.25)}
@@ -278,7 +279,6 @@
   <div class="container">
     <p class="tag">What's new</p>
     <h2 class="h">Always the latest build.</h2>
-    <p class="p">This section updates itself from the most recent GitHub release — version, date, and notes. No manual edits, ever.</p>
     <div class="release-card">
       <div class="release-head">
         <div class="release-ver"><b data-version>v—</b><span class="badge">Latest release</span></div>
@@ -318,8 +318,8 @@
 
       <div class="feat">
         <div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3"/></svg></div>
-        <h3>Button remapper</h3>
-        <p>Map your remote's colour and menu keys to any app — right on the home screen, no Accessibility Service.</p>
+        <h3>Button shortcuts</h3>
+        <p>Assign your remote's colour and menu keys to any app — right from the home screen, no Accessibility Service.</p>
       </div>
 
       <div class="feat">
@@ -330,8 +330,8 @@
 
       <div class="feat">
         <div class="feat-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg></div>
-        <h3>Hide apps</h3>
-        <p>Tuck away the apps you never open. They stay installed and remappable — just off your home screen.</p>
+        <h3>Manage apps</h3>
+        <p>Long-press any app to move, hide, open App info, or uninstall. Hidden apps stay installed — just off your home screen.</p>
       </div>
 
       <div class="feat">
@@ -349,7 +349,7 @@
       <div class="feat">
         <div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg></div>
         <h3>Wi-Fi &amp; settings pills</h3>
-        <p>Quick Wi-Fi access with a live connection indicator; long-press for Bluetooth &amp; remotes. A gear pill for everything else.</p>
+        <p>Quick Wi-Fi access with a live connection indicator, plus a gear pill — long-press it to jump straight to system settings.</p>
       </div>
 
       <div class="feat">
@@ -438,14 +438,14 @@
         <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </div>
       <div class="dl-text">
-        <h4>Fastest on Fire TV — the Downloader app</h4>
-        <p>Open <em>Downloader</em> by AFTVnews and enter this code. It always installs the latest version.</p>
+        <h4>Downloader</h4>
+        <p>Open the <em>Downloader</em> app by AFTVnews and enter this code — it always installs the latest version.</p>
       </div>
       <div class="dl-code">3465597</div>
     </a>
     <div class="install-list">
       <div class="install-item"><div class="step-n">01</div><div class="step-body"><h4>Download the APK</h4><p>Grab <code>BareLauncher.apk</code> from the <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest">latest release</a>.</p></div></div>
-      <div class="install-item"><div class="step-n">02</div><div class="step-body"><h4>Transfer to your TV</h4><p>Use a USB stick, a network share, or a tool like <em>Send Files To TV</em> or <em>Downloader</em>.</p></div></div>
+      <div class="install-item"><div class="step-n">02</div><div class="step-body"><h4>Transfer to your TV</h4><p>Use a USB stick, a network share, or an app like <em>LocalSend</em>.</p></div></div>
       <div class="install-item"><div class="step-n">03</div><div class="step-body"><h4>Allow unknown sources</h4><p>When prompted, allow installs from unknown sources for your file manager or browser.</p></div></div>
       <div class="install-item"><div class="step-n">04</div><div class="step-body"><h4>Install</h4><p>Open the APK and press Install. BareLauncher appears in your app list.</p></div></div>
       <div class="install-item"><div class="step-n">05</div><div class="step-body"><h4>Set as default launcher</h4><p>Use <em>Launcher Manager (XDA)</em> — recommended for Google TV, Android TV, and Fire TV.</p></div></div>
