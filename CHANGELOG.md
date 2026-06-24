@@ -5,6 +5,65 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-06-24
+
+The "home favourites row + pull-down app drawer" release — the biggest UX
+change since the launcher's first cut. Apple-TV / Fire-TV style banner tiles
+replace the round home-shelf icons, and a pull-down drawer holds the full app
+list. Still zero-dependency. Existing installs migrate transparently —
+favourites are seeded from the current order and ordering is unchanged.
+
+### Added
+
+- **Apple-TV / Fire-TV banner tiles.** The home shelf and the new drawer
+  render landscape 5:3 rounded-rectangle banner tiles — real `android:banner`
+  art when an app ships one, otherwise a generated icon-on-dark-plate tile —
+  sized dynamically so exactly **6 tiles fit per row on any panel width**
+  (`computeTileDims`). A new in-memory `bannerCache` / `bannerInflight`
+  pipeline mirrors the icon pipeline; tiles load lazily per visible cell so
+  cold start stays cheap (no eager decode of the whole list). The small round
+  chip icons remain on the keymap / hidden-apps surfaces (a view-level
+  circular clip over the shared `iconCache`).
+- **Pull-down app drawer.** `DPAD_DOWN` on a home cell opens a vertical
+  recycling grid of every non-hidden app; `DPAD_UP` from the top row (or
+  `BACK`) closes it. Frosted-glass backdrop via `RenderEffect` blur on
+  Android 12+, with a near-opaque grey fallback below. Drawer teardown is
+  deferred to `onResume` so launching an app from the drawer animates from the
+  drawer instead of briefly flashing the home screen.
+- **One continuous home/drawer space ("Option A").** A single flat ordered
+  list plus one `homeCount` integer (persisted under the new `home_count`
+  pref) records where the home/drawer boundary sits — the bottom favourites
+  row IS the first `homeCount` apps of the drawer order. All index math, focus
+  navigation, and the promote/demote Move rules live in the Android-free,
+  JVM-tested `HomeDrawerModel` (`COLS = 6`).
+- **`HomeDrawerModelTest`** — JVM unit tests for the drawer geometry,
+  navigation, and Option-A promote/demote Move rules.
+
+### Changed
+
+- **Unified, minimal Move flow on both surfaces.** Long-press opens the menu;
+  OK on **Move** starts moving; the D-pad then reorders (left/right on the
+  shelf; any direction in the drawer, crossing the home boundary to
+  promote/demote a favourite); OK or Back commits. The shared context menu and
+  its highlight logic now drive whichever surface is reordering through the
+  new `ReorderHost` interface, and the single icon-delivery pipeline feeds both
+  grids through the new `IconTarget` interface.
+- **Selection ring is now a rounded-rectangle halo** that hugs the banner
+  tile's corner (concentric stroke), replacing the circular ring.
+
+### Migration
+
+- `home_count` is absent on upgrade and resolves to the first `COLS` of the
+  user's **existing** stored order, so favourites are never reset.
+  `app_order` stays the single source of truth for ordering — the new key only
+  records the home/drawer split.
+
+### Housekeeping
+
+- Refreshed stale inline comments left over from the 8→6 column change and the
+  1.4.2 icon-sampling rewrite; corrected the documented focus-bounce tension.
+  No behavioural change.
+
 ## [1.4.9] — 2026-06-24
 
 Adds an About screen and reworks the clock and toolbar icons. Still
