@@ -47,6 +47,15 @@ final class AppleStyle {
 
     private AppleStyle() { /* no instances */ }
 
+    /** Shared CLEAR-mode xfermode used by {@link #drawGearGlyph} to punch
+     *  the cog's centre hole when it floats plate-less over the wallpaper.
+     *  Built once and reused so the idle gear's {@code onDraw} (which fires
+     *  on every focus change / invalidate) stays allocation-free, matching
+     *  the launcher's "zero per-draw allocation" invariant. PorterDuffXfermode
+     *  is immutable, so a single shared instance is thread-safe. */
+    private static final PorterDuffXfermode CLEAR_XFERMODE =
+            new PorterDuffXfermode(PorterDuff.Mode.CLEAR);
+
     /**
      * Apply the round-outline + no-system-focus-rect + hardware-layer
      * configuration shared by every toolbar pill button.
@@ -242,7 +251,7 @@ final class AppleStyle {
         // plate) draw the hole in the plate colour so it reads continuous.
         if (Color.alpha(plateColor) == 0) {
             Paint.Style prevStyle = paint.getStyle();
-            paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.CLEAR));
+            paint.setXfermode(CLEAR_XFERMODE);
             c.drawCircle(cx, cy, rHole, paint);
             paint.setXfermode(null);
             paint.setStyle(prevStyle);

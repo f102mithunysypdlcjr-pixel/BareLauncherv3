@@ -3796,7 +3796,7 @@ public class LauncherActivity extends Activity {
                     }
                     labelDisplay = disp;
                 }
-                Bitmap cached = bannerCache.get(app.packageName);
+                Bitmap cached = bannerCache != null ? bannerCache.get(app.packageName) : null;
                 if (cached != null) {
                     if (cached != iconBitmap) { iconBitmap = cached; invalidate(); }
                 } else {
@@ -4312,6 +4312,11 @@ public class LauncherActivity extends Activity {
             int h = getHeight() > 0 ? getHeight() : screenH;
             animate().alpha(0f).translationY(h * 0.06f)
                     .setDuration(140).setInterpolator(SCROLL_EASE)
+                    // Clear the open() ring-glue update listener. ViewPropertyAnimator
+                    // retains mUpdateListener across cancel()+start(), so without this
+                    // the open-time positionRing listener keeps firing during the close
+                    // tween and re-shows the ring we just hid above, trailing the slide.
+                    .setUpdateListener(null)
                     .withLayer()
                     .withEndAction(() -> {
                         setVisibility(GONE);
@@ -4731,7 +4736,7 @@ public class LauncherActivity extends Activity {
                     }
                     labelDisplay = disp;
                 }
-                Bitmap cached = bannerCache.get(app.packageName);
+                Bitmap cached = bannerCache != null ? bannerCache.get(app.packageName) : null;
                 if (cached != null) {
                     if (cached != iconBitmap) { iconBitmap = cached; invalidate(); }
                 } else {
@@ -6408,7 +6413,12 @@ public class LauncherActivity extends Activity {
                     showAboutList();
                     return true;
                 default:
-                    return true;
+                    // Swallow stray navigation/buttons so they can't bleed to
+                    // the surface underneath, but let device-control keys
+                    // (volume / mute / power / media) reach the platform — so
+                    // the DOWN edge stays balanced with the UP edge that
+                    // dispatchKeyEvent already lets through via isLetThroughKey.
+                    return !isLetThroughKey(kc);
             }
         }
         switch (kc) {
