@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  *       {@code ResolveInfo.loadIcon} / {@code PackageManager.getActivityIcon}
  *       (~5-15 ms per icon on cheap TV ROMs).</li>
  *   <li>{@link IconRenderer#process}: AdaptiveIconDrawable layering,
- *       white-plate detection via {@link Bitmap#copyPixelsToBuffer},
+ *       white-plate detection via a 12-point {@link Bitmap#getPixel} sample,
  *       circle clip + saveLayer ({@code SRC_IN}) compositing.
  *       (~5-20 ms per icon depending on icon shape.)</li>
  * </ol>

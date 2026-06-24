@@ -100,9 +100,10 @@ public class LauncherActivity extends Activity {
     private static final String KEY_APP_ORDER  = "app_order";
     /** v1.5.0: number of leading apps (in the visible / non-hidden order)
      *  that form the bottom "home favourites" row and, equivalently, the
-     *  centred first row of the pull-down app drawer. Range [0, 8]. Absent on
+     *  centred first row of the pull-down app drawer. Range [0, COLS]. Absent on
      *  first run after the v1.5.0 upgrade → resolved lazily to
-     *  {@link HomeDrawerModel#defaultHomeCount(int)} (the first 8 of the
+     *  {@link HomeDrawerModel#defaultHomeCount(int)} (the first
+     *  {@link HomeDrawerModel#COLS} of the
      *  user's EXISTING stored order) so an upgrade never resets favourites.
      *  The flat {@link #KEY_APP_ORDER} string is unchanged and stays the
      *  single source of truth for ordering; this key only records where the
@@ -913,7 +914,8 @@ public class LauncherActivity extends Activity {
      *
      *  <p>First call with a non-empty list reads the persisted value or, when
      *  absent (the v1.5.0 upgrade), falls back to
-     *  {@link HomeDrawerModel#defaultHomeCount(int)} — the first 8 of the
+     *  {@link HomeDrawerModel#defaultHomeCount(int)} — the first
+     *  {@link HomeDrawerModel#COLS} of the
      *  user's EXISTING stored order — and writes it back so the migration
      *  default sticks. Later calls only re-clamp in memory (persisting a
      *  shrink, e.g. when the user hides enough apps that the home row no
@@ -3493,7 +3495,7 @@ public class LauncherActivity extends Activity {
                             if (f && isAttachedToWindow() && getWidth() > 0)
                                 positionRing(CellView.this);
                         } else if (f) {
-                            // Subtle bouncy focus-IN: OvershootInterpolator(2.0)
+                            // Subtle bouncy focus-IN: OvershootInterpolator(2.8)
                             // ticks the cell ~7-8 % past FOCUS_SCALE then settles.
                             // Reads as a tiny "tap" of life on selection without
                             // dominating the shelf or stressing slow GPUs.
