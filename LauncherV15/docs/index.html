@@ -1,437 +1,294 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>BareLauncher — Minimal Android TV Launcher</title>
-  <meta name="description" content="Minimal, fast and privacy-focused Android TV launcher. No ads, no telemetry. ~138 KB." />
-  <meta property="og:title" content="BareLauncher" />
-  <meta property="og:description" content="The launcher Android TV deserves — fast, clean, and out of your way." />
+
+  <!-- Primary SEO -->
+  <title>BareLauncher — Fast, Minimal Android TV &amp; Fire TV Launcher (No Ads)</title>
+  <meta name="description" content="BareLauncher is a tiny, fast, privacy-first home launcher for Android TV, Google TV and Fire TV. No ads, no telemetry, no recommendations — just your apps. Under ~140 KB, zero dependencies. Free APK download." />
+  <meta name="keywords" content="BareLauncher, Android TV launcher, Fire TV launcher, Google TV launcher, minimal launcher, lightweight launcher, no ads launcher, no telemetry, custom launcher Android TV, Fire TV Stick launcher, replace stock launcher, app drawer, button remapper, hide apps, free TV launcher APK" />
+  <meta name="author" content="Mithun" />
+  <meta name="robots" content="index, follow" />
+  <meta name="theme-color" content="#09090b" />
+  <link rel="canonical" href="https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/" />
+
+  <!-- Icons -->
+  <link rel="icon" type="image/png" href="icon.png" />
+  <link rel="apple-touch-icon" href="icon.png" />
+
+  <!-- Open Graph -->
   <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="BareLauncher" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:url" content="https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/" />
+  <meta property="og:title" content="BareLauncher — Fast, Minimal Android TV &amp; Fire TV Launcher" />
+  <meta property="og:description" content="A tiny, fast, privacy-first home launcher for Android TV, Google TV and Fire TV. No ads, no telemetry, just your apps." />
+  <meta property="og:image" content="https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/screenshot1.png" />
+  <meta property="og:image:alt" content="BareLauncher home screen on an Android TV" />
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="BareLauncher — Fast, Minimal Android TV &amp; Fire TV Launcher" />
+  <meta name="twitter:description" content="A tiny, fast, privacy-first home launcher for Android TV, Google TV and Fire TV. No ads, no telemetry." />
+  <meta name="twitter:image" content="https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/screenshot1.png" />
+
+  <!-- Structured data: helps Google / Bing / DuckDuckGo understand this is a free app -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "BareLauncher",
+    "operatingSystem": "Android TV 8.0+ (API 26+), Google TV, Fire TV",
+    "applicationCategory": "UtilitiesApplication",
+    "applicationSubCategory": "Home Launcher",
+    "description": "A tiny, fast, privacy-first home launcher for Android TV, Google TV and Fire TV. No ads, no telemetry, no recommendations.",
+    "url": "https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/",
+    "downloadUrl": "https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest",
+    "image": "https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/icon.png",
+    "screenshot": "https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/screenshot1.png",
+    "author": { "@type": "Person", "name": "Mithun" },
+    "license": "https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/blob/main/LICENSE",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    :root {
-      --bg:           #09090b;
-      --bg2:          #0f1014;
-      --bg3:          #16181f;
-      --border:       rgba(255,255,255,0.06);
-      --border-hi:    rgba(255,255,255,0.12);
-      --text:         #f4f4f5;
-      --text-dim:     #8b8d97;
-      --text-muted:   #4b4d57;
-      --accent:       #4ade80;
-      --accent-dim:   rgba(74,222,128,0.10);
-      --accent-ring:  rgba(74,222,128,0.25);
-      --font:         'Inter', sans-serif;
-      --mono:         'DM Mono', monospace;
-      --radius:       10px;
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#09090b; --bg2:#101116; --bg3:#181a22;
+      --border:rgba(255,255,255,.07); --border-hi:rgba(255,255,255,.13);
+      --text:#f5f5f7; --dim:#9a9ca6; --muted:#5a5c66;
+      --accent:#4ade80; --accent-dim:rgba(74,222,128,.10); --accent-ring:rgba(74,222,128,.28);
+      --font:'Inter',system-ui,sans-serif; --mono:'DM Mono',ui-monospace,monospace;
+      --r:12px; --maxw:980px;
     }
-
-    html { scroll-behavior: smooth; }
-
-    body {
-      font-family: var(--font);
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { opacity: 0.75; }
+    html{scroll-behavior:smooth}
+    body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}
+    a{color:var(--accent);text-decoration:none}
+    img{max-width:100%;display:block}
+    ::selection{background:var(--accent-ring);color:#fff}
 
     /* NAV */
-    nav {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-      height: 56px;
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0 2rem;
-      background: rgba(9,9,11,0.88);
-      backdrop-filter: blur(14px);
-      border-bottom: 1px solid var(--border);
-    }
-    .nav-logo {
-      font-family: var(--mono);
-      font-size: 14px;
-      font-weight: 500;
-      color: var(--text);
-      letter-spacing: 0.01em;
-    }
-    .nav-logo span { color: var(--accent); }
-    .nav-links { display: flex; gap: 1.75rem; }
-    .nav-links a {
-      font-size: 13px;
-      color: var(--text-dim);
-      font-weight: 400;
-      transition: color 0.15s;
-    }
-    .nav-links a:hover { color: var(--text); opacity: 1; }
-    .nav-dl {
-      font-size: 13px;
-      font-weight: 500;
-      background: var(--accent);
-      color: #09090b;
-      padding: 6px 16px;
-      border-radius: 6px;
-      transition: opacity 0.15s;
-    }
-    .nav-dl:hover { opacity: 0.85; }
+    nav{position:fixed;inset:0 0 auto 0;z-index:100;height:58px;display:flex;align-items:center;justify-content:space-between;
+        padding:0 1.5rem;background:rgba(9,9,11,.82);backdrop-filter:blur(16px);border-bottom:1px solid var(--border)}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;letter-spacing:-.01em}
+    .brand img{width:26px;height:26px;border-radius:7px}
+    .brand b{color:var(--text)} .brand span{color:var(--accent)}
+    .nav-links{display:flex;gap:1.6rem}
+    .nav-links a{font-size:13.5px;color:var(--dim);transition:color .15s}
+    .nav-links a:hover{color:var(--text)}
+    .nav-dl{font-size:13px;font-weight:600;background:var(--accent);color:#08160d;padding:7px 16px;border-radius:7px;transition:transform .12s,opacity .15s}
+    .nav-dl:hover{opacity:.9;transform:translateY(-1px)}
 
     /* HERO */
-    .hero {
-      min-height: 100vh;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      text-align: center;
-      padding: 6rem 1.5rem 5rem;
-      position: relative; overflow: hidden;
-    }
-    .hero::before {
-      content: '';
-      position: absolute; top: -120px; left: 50%; transform: translateX(-50%);
-      width: 640px; height: 640px;
-      background: radial-gradient(circle, rgba(74,222,128,0.055) 0%, transparent 68%);
-      pointer-events: none;
-    }
-    .hero-eyebrow {
-      display: inline-flex; align-items: center; gap: 7px;
-      background: var(--accent-dim);
-      border: 1px solid var(--accent-ring);
-      padding: 4px 13px;
-      border-radius: 999px;
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 500;
-      color: var(--accent);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      margin-bottom: 2rem;
-    }
-    .hero-eyebrow::before {
-      content: '';
-      width: 5px; height: 5px;
-      background: var(--accent);
-      border-radius: 50%;
-      animation: blink 2.4s ease-in-out infinite;
-    }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+    .hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+          padding:7rem 1.5rem 4rem;position:relative;overflow:hidden}
+    .hero::before{content:'';position:absolute;top:-160px;left:50%;transform:translateX(-50%);width:720px;height:720px;
+                  background:radial-gradient(circle,rgba(74,222,128,.06) 0%,transparent 66%);pointer-events:none}
+    .hero-logo{width:84px;height:84px;border-radius:20px;margin-bottom:1.6rem;box-shadow:0 14px 50px -12px rgba(74,222,128,.35)}
+    .eyebrow{display:inline-flex;align-items:center;gap:7px;background:var(--accent-dim);border:1px solid var(--accent-ring);
+             padding:4px 13px;border-radius:999px;font-family:var(--mono);font-size:11px;font-weight:500;color:var(--accent);
+             letter-spacing:.08em;text-transform:uppercase;margin-bottom:1.5rem}
+    .eyebrow::before{content:'';width:5px;height:5px;background:var(--accent);border-radius:50%;animation:blink 2.4s ease-in-out infinite}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+    .hero h1{font-size:clamp(2.3rem,6vw,4rem);font-weight:700;line-height:1.08;letter-spacing:-.035em;margin-bottom:1.3rem;max-width:720px}
+    .hero h1 em{font-style:normal;color:var(--accent)}
+    .hero-sub{font-size:clamp(.98rem,1.8vw,1.1rem);color:var(--dim);max-width:500px;margin-bottom:2.4rem;font-weight:300;line-height:1.75}
+    .hero-btns{display:flex;gap:.75rem;flex-wrap:wrap;justify-content:center;margin-bottom:3.5rem}
+    .btn{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;padding:12px 26px;border-radius:9px;
+         border:1px solid transparent;cursor:pointer;transition:transform .12s,opacity .15s,border-color .15s,color .15s}
+    .btn svg{width:16px;height:16px;flex-shrink:0}
+    .btn-primary{background:var(--accent);color:#08160d}
+    .btn-primary:hover{opacity:.9;transform:translateY(-1px)}
+    .btn-ghost{background:transparent;color:var(--dim);border-color:var(--border-hi);font-weight:400}
+    .btn-ghost:hover{color:var(--text);border-color:rgba(255,255,255,.25)}
+    .hero-stats{display:flex;gap:2.6rem;justify-content:center;flex-wrap:wrap}
+    .stat{display:flex;flex-direction:column;align-items:center;gap:3px}
+    .stat-val{font-family:var(--mono);font-size:1.45rem;font-weight:500;color:var(--text)}
+    .stat-lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.09em}
 
-    .hero h1 {
-      font-size: clamp(2.2rem, 5.5vw, 3.8rem);
-      font-weight: 600;
-      line-height: 1.12;
-      letter-spacing: -0.03em;
-      margin-bottom: 1.4rem;
-      max-width: 700px;
-    }
-    .hero h1 em { font-style: normal; color: var(--accent); }
+    hr{border:none;border-top:1px solid var(--border)}
+    section{padding:5rem 1.5rem}
+    .container{max-width:var(--maxw);margin:0 auto}
+    .tag{font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:.6rem}
+    .h{font-size:clamp(1.5rem,3.2vw,2.1rem);font-weight:600;letter-spacing:-.025em;line-height:1.2;margin-bottom:.9rem}
+    .p{font-size:.97rem;color:var(--dim);max-width:500px;margin-bottom:2.6rem;font-weight:300;line-height:1.7}
 
-    .hero-sub {
-      font-size: clamp(0.95rem, 1.8vw, 1.05rem);
-      color: var(--text-dim);
-      max-width: 460px;
-      margin-bottom: 2.5rem;
-      font-weight: 300;
-      line-height: 1.75;
-    }
-
-    .hero-btns {
-      display: flex; gap: 0.75rem; flex-wrap: wrap;
-      justify-content: center; margin-bottom: 4rem;
-    }
-    .btn-primary {
-      display: inline-flex; align-items: center; gap: 7px;
-      background: var(--accent); color: #09090b;
-      font-family: var(--font); font-size: 14px; font-weight: 500;
-      padding: 11px 26px; border-radius: 8px;
-      border: none; cursor: pointer;
-      transition: opacity 0.15s, transform 0.12s;
-    }
-    .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); }
-    .btn-primary svg { width: 15px; height: 15px; flex-shrink: 0; }
-    .btn-ghost {
-      display: inline-flex; align-items: center; gap: 7px;
-      background: transparent; color: var(--text-dim);
-      font-family: var(--font); font-size: 14px; font-weight: 400;
-      padding: 11px 26px; border-radius: 8px;
-      border: 1px solid var(--border-hi);
-      cursor: pointer; transition: color 0.15s, border-color 0.15s;
-    }
-    .btn-ghost:hover { color: var(--text); border-color: rgba(255,255,255,0.22); }
-    .btn-ghost svg { width: 15px; height: 15px; flex-shrink: 0; }
-
-    .hero-stats {
-      display: flex; gap: 2.5rem;
-      justify-content: center; flex-wrap: wrap;
-    }
-    .stat { display: flex; flex-direction: column; align-items: center; gap: 3px; }
-    .stat-val {
-      font-family: var(--mono); font-size: 1.4rem; font-weight: 500; color: var(--text);
-    }
-    .stat-lbl {
-      font-size: 11px; color: var(--text-muted);
-      text-transform: uppercase; letter-spacing: 0.09em;
-    }
-
-    /* DIVIDER */
-    hr { border: none; border-top: 1px solid var(--border); }
-
-    /* SECTIONS */
-    section { padding: 5rem 1.5rem; }
-    .container { max-width: 920px; margin: 0 auto; }
-    .section-tag {
-      font-family: var(--mono); font-size: 11px; font-weight: 500;
-      letter-spacing: 0.1em; text-transform: uppercase;
-      color: var(--accent); margin-bottom: 0.6rem;
-    }
-    .section-h {
-      font-size: clamp(1.4rem, 3vw, 2rem);
-      font-weight: 600; letter-spacing: -0.025em;
-      line-height: 1.2; margin-bottom: 0.9rem;
-    }
-    .section-p {
-      font-size: 0.95rem; color: var(--text-dim);
-      max-width: 480px; margin-bottom: 2.75rem;
-      font-weight: 300; line-height: 1.7;
-    }
-
-    /* SCREENSHOTS */
-    .screenshots { background: var(--bg2); }
-    .shots-wrap {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-    }
-    @media(max-width:640px){ .shots-wrap{ grid-template-columns: 1fr; } }
-    .shot {
-      border-radius: var(--radius);
-      overflow: hidden;
-      border: 1px solid var(--border-hi);
-      background: var(--bg3);
-    }
-    .shot img {
-      width: 100%; display: block;
-      transition: transform 0.35s ease;
-    }
-    .shot:hover img { transform: scale(1.02); }
-    .shot-caption {
-      padding: 10px 14px;
-      font-size: 12px; color: var(--text-muted);
-      font-family: var(--mono); border-top: 1px solid var(--border);
-    }
+    /* WHAT'S NEW */
+    .whatsnew{background:var(--bg2)}
+    .release-card{background:var(--bg);border:1px solid var(--border-hi);border-radius:var(--r);padding:1.6rem 1.8rem}
+    .release-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.75rem;margin-bottom:1.1rem;
+                  padding-bottom:1.1rem;border-bottom:1px solid var(--border)}
+    .release-ver{display:flex;align-items:center;gap:11px}
+    .release-ver b{font-family:var(--mono);font-size:1.2rem;font-weight:500;color:var(--accent)}
+    .badge{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);
+           background:var(--accent-dim);border:1px solid var(--accent-ring);padding:3px 9px;border-radius:999px}
+    .release-date{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
+    .release-notes{font-size:13.5px;color:var(--dim);font-weight:300;line-height:1.7}
+    .release-notes h3{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--text);font-weight:600;margin:1rem 0 .5rem}
+    .release-notes h3:first-child{margin-top:0}
+    .release-notes ul{list-style:none;display:flex;flex-direction:column;gap:.45rem}
+    .release-notes li{display:flex;gap:10px}
+    .release-notes li::before{content:'';width:5px;height:5px;background:var(--accent);border-radius:50%;margin-top:9px;flex-shrink:0}
+    .release-notes strong{color:var(--text);font-weight:500}
+    .release-foot{margin-top:1.2rem;font-size:13px}
+    .release-foot a{font-weight:500}
 
     /* FEATURES */
-    .features-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 1px;
-      background: var(--border);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      overflow: hidden;
-    }
-    .feat {
-      background: var(--bg2);
-      padding: 1.6rem;
-      transition: background 0.15s;
-    }
-    .feat:hover { background: var(--bg3); }
-    .feat-icon {
-      width: 32px; height: 32px;
-      background: var(--accent-dim);
-      border: 1px solid var(--accent-ring);
-      border-radius: 7px;
-      display: flex; align-items: center; justify-content: center;
-      margin-bottom: 0.9rem;
-    }
-    .feat-icon svg {
-      width: 16px; height: 16px;
-      stroke: var(--accent); fill: none; stroke-width: 1.8;
-      stroke-linecap: round; stroke-linejoin: round;
-    }
-    .feat h3 { font-size: 13px; font-weight: 500; margin-bottom: 0.35rem; }
-    .feat p { font-size: 12.5px; color: var(--text-dim); font-weight: 300; line-height: 1.6; }
+    .features-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:1px;background:var(--border);
+                   border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+    .feat{background:var(--bg2);padding:1.6rem;transition:background .15s}
+    .feat:hover{background:var(--bg3)}
+    .feat-icon{width:34px;height:34px;background:var(--accent-dim);border:1px solid var(--accent-ring);border-radius:8px;
+               display:flex;align-items:center;justify-content:center;margin-bottom:.9rem}
+    .feat-icon svg{width:17px;height:17px;stroke:var(--accent);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+    .feat h3{font-size:13.5px;font-weight:600;margin-bottom:.35rem}
+    .feat p{font-size:12.5px;color:var(--dim);font-weight:300;line-height:1.6}
+
+    /* SCREENSHOTS */
+    .shots{background:var(--bg2)}
+    .shots-wrap{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+    @media(max-width:640px){.shots-wrap{grid-template-columns:1fr}}
+    .shot{border-radius:var(--r);overflow:hidden;border:1px solid var(--border-hi);background:var(--bg3)}
+    .shot img{width:100%;transition:transform .35s ease}
+    .shot:hover img{transform:scale(1.02)}
+    .shot-cap{padding:10px 14px;font-size:12px;color:var(--muted);font-family:var(--mono);border-top:1px solid var(--border)}
 
     /* SPECS */
-    .specs-bg { background: var(--bg2); }
-    .specs-grid {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; align-items: start;
-    }
-    @media(max-width:640px){ .specs-grid{ grid-template-columns:1fr; } }
-    .spec-list { list-style: none; display: flex; flex-direction: column; gap: 0.85rem; }
-    .spec-item { display: flex; align-items: flex-start; gap: 11px; }
-    .spec-dot {
-      width: 5px; height: 5px; background: var(--accent);
-      border-radius: 50%; margin-top: 9px; flex-shrink: 0;
-    }
-    .spec-item span { font-size: 13.5px; color: var(--text-dim); font-weight: 300; line-height: 1.55; }
-    .spec-item strong { color: var(--text); font-weight: 500; }
-    .spec-item code {
-      font-family: var(--mono); font-size: 12px;
-      background: var(--bg3); padding: 1px 6px;
-      border-radius: 4px; color: var(--accent);
-    }
-
-    .apk-card {
-      background: var(--bg);
-      border: 1px solid var(--border-hi);
-      border-radius: var(--radius);
-      padding: 1.75rem;
-      text-align: center;
-    }
-    .apk-num {
-      font-family: var(--mono); font-size: 3rem; font-weight: 500;
-      color: var(--accent); line-height: 1; margin-bottom: 4px;
-    }
-    .apk-unit { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 1.5rem; }
-    .apk-rows { display: flex; flex-direction: column; gap: 8px; text-align: left; }
-    .apk-row {
-      display: flex; justify-content: space-between;
-      font-size: 12px; padding-bottom: 8px;
-      border-bottom: 1px solid var(--border);
-    }
-    .apk-row:last-child { border-bottom: none; padding-bottom: 0; }
-    .apk-row span:first-child { color: var(--text-muted); }
-    .apk-row span:last-child { font-family: var(--mono); color: var(--text-dim); }
+    .specs-grid{display:grid;grid-template-columns:1fr 1fr;gap:2.5rem;align-items:start}
+    @media(max-width:640px){.specs-grid{grid-template-columns:1fr}}
+    .spec-list{list-style:none;display:flex;flex-direction:column;gap:.85rem}
+    .spec-item{display:flex;gap:11px}
+    .spec-dot{width:5px;height:5px;background:var(--accent);border-radius:50%;margin-top:9px;flex-shrink:0}
+    .spec-item span{font-size:13.5px;color:var(--dim);font-weight:300;line-height:1.55}
+    .spec-item strong{color:var(--text);font-weight:500}
+    .spec-item code{font-family:var(--mono);font-size:12px;background:var(--bg3);padding:1px 6px;border-radius:4px;color:var(--accent)}
+    .apk-card{background:var(--bg);border:1px solid var(--border-hi);border-radius:var(--r);padding:1.75rem;text-align:center}
+    .apk-num{font-family:var(--mono);font-size:3rem;font-weight:500;color:var(--accent);line-height:1;margin-bottom:4px}
+    .apk-unit{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;margin-bottom:1.5rem}
+    .apk-rows{display:flex;flex-direction:column;gap:8px;text-align:left}
+    .apk-row{display:flex;justify-content:space-between;font-size:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+    .apk-row:last-child{border-bottom:none;padding-bottom:0}
+    .apk-row span:first-child{color:var(--muted)}
+    .apk-row span:last-child{font-family:var(--mono);color:var(--dim)}
 
     /* DEVICES */
-    .device-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem;
-    }
-    .device-card {
-      background: var(--bg2); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 1.25rem;
-      display: flex; align-items: center; gap: 0.9rem;
-      transition: border-color 0.15s;
-    }
-    .device-card:hover { border-color: var(--border-hi); }
-    .device-icon { font-size: 1.6rem; line-height: 1; }
-    .device-card h4 { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
-    .device-card p { font-size: 12px; color: var(--text-muted); font-weight: 300; }
+    .device-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.75rem}
+    .device-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:1.25rem;
+                 display:flex;align-items:center;gap:.9rem;transition:border-color .15s}
+    .device-card:hover{border-color:var(--border-hi)}
+    .device-icon{font-size:1.6rem;line-height:1}
+    .device-card h4{font-size:13px;font-weight:600;margin-bottom:2px}
+    .device-card p{font-size:12px;color:var(--muted);font-weight:300}
 
     /* INSTALL */
-    .install-list { display: flex; flex-direction: column; }
-    .install-item {
-      display: flex; align-items: flex-start; gap: 1.1rem;
-      padding: 1.35rem 1.5rem;
-      background: var(--bg2); border: 1px solid var(--border);
-      border-bottom: none; transition: background 0.12s;
-    }
-    .install-item:first-child { border-radius: var(--radius) var(--radius) 0 0; }
-    .install-item:last-child  { border-bottom: 1px solid var(--border); border-radius: 0 0 var(--radius) var(--radius); }
-    .install-item:hover { background: var(--bg3); }
-    .step-n {
-      font-family: var(--mono); font-size: 11px; font-weight: 500;
-      color: var(--accent); background: var(--accent-dim);
-      border: 1px solid var(--accent-ring);
-      width: 26px; height: 26px; border-radius: 6px;
-      display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0; margin-top: 1px;
-    }
-    .step-body h4 { font-size: 13.5px; font-weight: 500; margin-bottom: 3px; }
-    .step-body p { font-size: 13px; color: var(--text-dim); font-weight: 300; }
-    .step-body p code {
-      font-family: var(--mono); font-size: 11.5px;
-      background: var(--bg3); padding: 1px 6px;
-      border-radius: 4px; color: var(--accent);
-    }
-    .step-body p em { font-style: normal; color: var(--text); }
+    .install-list{display:flex;flex-direction:column}
+    .install-item{display:flex;gap:1.1rem;padding:1.35rem 1.5rem;background:var(--bg2);border:1px solid var(--border);border-bottom:none;transition:background .12s}
+    .install-item:first-child{border-radius:var(--r) var(--r) 0 0}
+    .install-item:last-child{border-bottom:1px solid var(--border);border-radius:0 0 var(--r) var(--r)}
+    .install-item:hover{background:var(--bg3)}
+    .step-n{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--accent);background:var(--accent-dim);border:1px solid var(--accent-ring);
+            width:27px;height:27px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+    .step-body h4{font-size:13.5px;font-weight:600;margin-bottom:3px}
+    .step-body p{font-size:13px;color:var(--dim);font-weight:300}
+    .step-body code{font-family:var(--mono);font-size:11.5px;background:var(--bg3);padding:1px 6px;border-radius:4px;color:var(--accent)}
+    .step-body em{font-style:normal;color:var(--text)}
+
+    /* DOWNLOADER (AFTVnews) — fast Fire TV install via code */
+    .dl-card{display:flex;align-items:center;gap:1.1rem;background:linear-gradient(180deg,var(--accent-dim),transparent);
+             border:1px solid var(--accent-ring);border-radius:var(--r);padding:1.2rem 1.4rem;margin-bottom:1.25rem;
+             transition:transform .12s,border-color .15s}
+    .dl-card:hover{transform:translateY(-1px);border-color:var(--accent)}
+    .dl-badge{width:46px;height:46px;border-radius:11px;background:var(--bg);border:1px solid var(--accent-ring);
+              display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .dl-badge svg{width:23px;height:23px;stroke:var(--accent);fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+    .dl-text{flex:1;min-width:0}
+    .dl-text h4{font-size:14px;font-weight:600;color:var(--text);margin-bottom:2px}
+    .dl-text p{font-size:12.5px;color:var(--dim);font-weight:300;line-height:1.5}
+    .dl-text em{font-style:normal;color:var(--accent)}
+    .dl-code{font-family:var(--mono);font-size:1.5rem;font-weight:500;color:var(--accent);letter-spacing:.1em;
+             background:var(--bg);border:1px dashed var(--accent-ring);border-radius:10px;padding:9px 15px;flex-shrink:0;white-space:nowrap}
+    @media(max-width:560px){.dl-card{flex-wrap:wrap}.dl-code{font-size:1.3rem}}
 
     /* FOOTER */
-    footer {
-      border-top: 1px solid var(--border);
-      padding: 2.5rem 1.5rem;
-    }
-    .footer-inner {
-      max-width: 920px; margin: 0 auto;
-      display: flex; justify-content: space-between; align-items: center;
-      flex-wrap: wrap; gap: 1rem;
-    }
-    .footer-left { font-size: 13px; color: var(--text-muted); font-weight: 300; }
-    .footer-left strong { color: var(--text-dim); font-weight: 500; }
-    .footer-links { display: flex; gap: 1.5rem; }
-    .footer-links a { font-size: 13px; color: var(--text-muted); }
-    .footer-links a:hover { color: var(--text-dim); opacity: 1; }
+    footer{border-top:1px solid var(--border);padding:2.5rem 1.5rem}
+    .footer-inner{max-width:var(--maxw);margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem}
+    .footer-left{font-size:13px;color:var(--muted);font-weight:300}
+    .footer-left strong{color:var(--dim);font-weight:500}
+    .footer-links{display:flex;gap:1.5rem;flex-wrap:wrap}
+    .footer-links a{font-size:13px;color:var(--muted)}
+    .footer-links a:hover{color:var(--dim)}
 
-    /* ANIMATIONS */
-    @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(20px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-    .hero > * { animation: fadeUp 0.55s ease both; }
-    .hero > *:nth-child(1){ animation-delay:0s }
-    .hero > *:nth-child(2){ animation-delay:.08s }
-    .hero > *:nth-child(3){ animation-delay:.16s }
-    .hero > *:nth-child(4){ animation-delay:.24s }
-    .hero > *:nth-child(5){ animation-delay:.32s }
-
-    @media(max-width:600px){
-      nav .nav-links { display: none; }
-      .hero-stats { gap: 1.5rem; }
-      .footer-inner { flex-direction: column; align-items: flex-start; }
-    }
+    @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+    .hero>*{animation:fadeUp .55s ease both}
+    .hero>*:nth-child(1){animation-delay:0s}.hero>*:nth-child(2){animation-delay:.06s}
+    .hero>*:nth-child(3){animation-delay:.12s}.hero>*:nth-child(4){animation-delay:.18s}
+    .hero>*:nth-child(5){animation-delay:.24s}.hero>*:nth-child(6){animation-delay:.30s}
+    @media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto}}
+    @media(max-width:600px){nav .nav-links{display:none}.hero-stats{gap:1.5rem}.footer-inner{flex-direction:column;align-items:flex-start}}
   </style>
 </head>
 <body>
 
 <!-- NAV -->
 <nav>
-  <span class="nav-logo">Bare<span>Launcher</span></span>
+  <span class="brand"><img src="icon.png" alt="BareLauncher logo" /><b>Bare</b><span>Launcher</span></span>
   <div class="nav-links">
-    <a href="#screenshots">Screenshots</a>
+    <a href="#whatsnew">What's new</a>
     <a href="#features">Features</a>
     <a href="#specs">Specs</a>
     <a href="#install">Install</a>
   </div>
-  <a class="nav-dl" href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest" target="_blank" rel="noopener">
-    Download APK
-  </a>
+  <a class="nav-dl" href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest/download/BareLauncher.apk">Download APK</a>
 </nav>
 
 <!-- HERO -->
-<section class="hero">
-  <div class="hero-eyebrow">Android TV Launcher</div>
-  <h1>Fast, clean, and<br/><em>out of your way</em></h1>
-  <p class="hero-sub">A minimal Android TV home screen with no ads, no telemetry, and no promoted content. Just your apps, instantly.</p>
+<header class="hero">
+  <img class="hero-logo" src="icon.png" alt="BareLauncher app icon" />
+  <div class="eyebrow">Android TV &middot; Google TV &middot; Fire TV</div>
+  <h1>The launcher your TV<br/><em>actually deserves</em></h1>
+  <p class="hero-sub">A tiny, fast, privacy-first home screen. No ads, no telemetry, no recommendations you never asked for — just your apps, instantly.</p>
   <div class="hero-btns">
-    <a class="btn-primary" href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest" target="_blank" rel="noopener">
-      <svg viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    <a class="btn btn-primary" href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest/download/BareLauncher.apk">
+      <svg viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       Download APK
     </a>
-    <a class="btn-ghost" href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3" target="_blank" rel="noopener">
+    <a class="btn btn-ghost" href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3">
       <svg viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22"/></svg>
       View on GitHub
     </a>
   </div>
   <div class="hero-stats">
-    <div class="stat"><span class="stat-val">~138 KB</span><span class="stat-lbl">APK size</span></div>
+    <div class="stat"><span class="stat-val" data-version>v—</span><span class="stat-lbl">Latest</span></div>
+    <div class="stat"><span class="stat-val">~140 KB</span><span class="stat-lbl">APK size</span></div>
     <div class="stat"><span class="stat-val">0</span><span class="stat-lbl">Trackers</span></div>
     <div class="stat"><span class="stat-val">0</span><span class="stat-lbl">Ads</span></div>
-    <div class="stat"><span class="stat-val">v1.4.5</span><span class="stat-lbl">Latest</span></div>
   </div>
-</section>
+</header>
 
 <hr />
 
-<!-- SCREENSHOTS -->
-<section id="screenshots" class="screenshots">
+<!-- WHAT'S NEW (auto-filled from the latest GitHub release) -->
+<section id="whatsnew" class="whatsnew">
   <div class="container">
-    <p class="section-tag">Screenshots</p>
-    <h2 class="section-h">See it in action.</h2>
-    <p class="section-p">Clean home screen with wallpaper support. All settings in one place — no clutter.</p>
-    <div class="shots-wrap">
-      <div class="shot">
-        <img src="screenshot1.png" alt="BareLauncher home screen showing apps on a mountain wallpaper" loading="lazy" />
-        <div class="shot-caption">Home screen</div>
+    <p class="tag">What's new</p>
+    <h2 class="h">Always the latest build.</h2>
+    <p class="p">This section updates itself from the most recent GitHub release — version, date, and notes. No manual edits, ever.</p>
+    <div class="release-card">
+      <div class="release-head">
+        <div class="release-ver"><b data-version>v—</b><span class="badge">Latest release</span></div>
+        <span class="release-date" id="rel-date">—</span>
       </div>
-      <div class="shot">
-        <img src="screenshot2.png" alt="BareLauncher settings menu open with options" loading="lazy" />
-        <div class="shot-caption">Settings panel</div>
+      <div class="release-notes" id="rel-notes">
+        <p style="color:var(--muted)">Loading the latest release notes…</p>
+      </div>
+      <div class="release-foot">
+        <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases" target="_blank" rel="noopener">View full changelog &amp; all releases &rarr;</a>
       </div>
     </div>
   </div>
@@ -442,73 +299,63 @@
 <!-- FEATURES -->
 <section id="features">
   <div class="container">
-    <p class="section-tag">Features</p>
-    <h2 class="section-h">Everything you need.<br/>Nothing you don't.</h2>
-    <p class="section-p">Built for people who want their TV to work — not to sell them things.</p>
+    <p class="tag">Features</p>
+    <h2 class="h">Everything you need.<br/>Nothing you don't.</h2>
+    <p class="p">Built for people who want their TV to work — not to sell them things.</p>
     <div class="features-grid">
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-        </div>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
         <h3>Instant navigation</h3>
-        <p>Smooth, zero-lag app scrolling with a TV remote. Custom recycling shelf built from scratch.</p>
+        <p>Zero-lag app scrolling on a TV remote, powered by a custom recycling shelf built from scratch.</p>
       </div>
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3"/></svg>
-        </div>
-        <h3>Button shortcuts</h3>
-        <p>Built-in button shortcut mapper that works directly on the home screen. No Accessibility Service required.</p>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>
+        <h3>Home row + app drawer</h3>
+        <p>A favourites row on the home screen and a pull-down drawer for everything else. Reorder freely with the D-pad.</p>
       </div>
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
-        </div>
-        <h3>Hide &amp; reorder apps</h3>
-        <p>Hide apps you never use, reorder the rest freely. Your home screen, your way.</p>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8zM6 1v3M10 1v3M14 1v3"/></svg></div>
+        <h3>Button remapper</h3>
+        <p>Map your remote's colour and menu keys to any app — right on the home screen, no Accessibility Service.</p>
       </div>
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/><line x1="3" y1="3" x2="21" y2="21"/></svg>
-        </div>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/><line x1="3" y1="3" x2="21" y2="21"/></svg></div>
         <h3>Zero telemetry</h3>
-        <p>No analytics, no crash reporting, no background network calls. Your usage stays on your device.</p>
+        <p>No analytics, no crash reporting, no background network calls. What you do on your TV stays on your TV.</p>
       </div>
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
-        </div>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg></div>
+        <h3>Hide apps</h3>
+        <p>Tuck away the apps you never open. They stay installed and remappable — just off your home screen.</p>
+      </div>
+
+      <div class="feat">
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></div>
         <h3>Wallpaper support</h3>
-        <p>Full wallpaper support with hardware bitmap config — saves 8–32 MB of RAM compared to software rendering.</p>
+        <p>Set any wallpaper, rendered with hardware bitmaps that save 8–32 MB of RAM versus software rendering.</p>
       </div>
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        </div>
-        <h3>Locale-aware clock</h3>
-        <p>Clock with day-of-week prefix in any language. Refreshes immediately on timezone and time changes.</p>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+        <h3>3-state clock</h3>
+        <p>Full time + day/date, time-only, or off. Locale-aware, 12/24-hour, and updates instantly on timezone changes.</p>
       </div>
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg>
-        </div>
-        <h3>Wi-Fi shortcut</h3>
-        <p>One-press Wi-Fi pill on the home screen for quick network access.</p>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg></div>
+        <h3>Wi-Fi &amp; settings pills</h3>
+        <p>Quick Wi-Fi access with a live connection indicator; long-press for Bluetooth &amp; remotes. A gear pill for everything else.</p>
       </div>
 
       <div class="feat">
-        <div class="feat-icon">
-          <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-        </div>
+        <div class="feat-icon"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
         <h3>Cold-start cache</h3>
-        <p>Wallpaper, shelf, and icons all paint in the very first frame on every cold start after the first launch.</p>
+        <p>Wallpaper, shelf, and icons all paint in the very first frame on every launch after the first.</p>
       </div>
 
     </div>
@@ -517,42 +364,38 @@
 
 <hr />
 
-<!-- SPECS -->
-<section id="specs" class="specs-bg">
+<!-- SCREENSHOTS -->
+<section id="screenshots" class="shots">
   <div class="container">
-    <p class="section-tag">Under the hood</p>
-    <h2 class="section-h">Built to be tiny<br/>by design.</h2>
+    <p class="tag">Screenshots</p>
+    <h2 class="h">See it in action.</h2>
+    <p class="p">A clean home screen with wallpaper support, and every setting in one quiet place.</p>
+    <div class="shots-wrap">
+      <div class="shot"><img src="screenshot1.png" alt="BareLauncher home screen with apps over a wallpaper on Android TV" loading="lazy" /><div class="shot-cap">Home screen</div></div>
+      <div class="shot"><img src="screenshot2.png" alt="BareLauncher settings panel open on Android TV" loading="lazy" /><div class="shot-cap">Settings panel</div></div>
+    </div>
+  </div>
+</section>
+
+<hr />
+
+<!-- SPECS -->
+<section id="specs">
+  <div class="container">
+    <p class="tag">Under the hood</p>
+    <h2 class="h">Tiny by design.</h2>
     <div class="specs-grid">
       <ul class="spec-list">
-        <li class="spec-item">
-          <span class="spec-dot"></span>
-          <span><strong>Zero runtime AndroidX dependencies</strong> — no AppCompat, Material, RecyclerView, ConstraintLayout, or Lifecycle.</span>
-        </li>
-        <li class="spec-item">
-          <span class="spec-dot"></span>
-          <span><strong>Programmatic UI</strong> — no XML layouts, no inflated resource bloat. Everything drawn in code.</span>
-        </li>
-        <li class="spec-item">
-          <span class="spec-dot"></span>
-          <span><strong>Custom recycling shelf</strong> instead of RecyclerView — tight control, zero dependency overhead.</span>
-        </li>
-        <li class="spec-item">
-          <span class="spec-dot"></span>
-          <span><strong>R8 minification and resource shrinking</strong> on every release build. Dead code has nowhere to hide.</span>
-        </li>
-        <li class="spec-item">
-          <span class="spec-dot"></span>
-          <span><strong>Pure Java</strong> — no Kotlin standard library shipped. APK stays lean.</span>
-        </li>
-        <li class="spec-item">
-          <span class="spec-dot"></span>
-          <span><strong>No native code</strong>, no <code>lib/</code> folder — the same universal APK runs on every architecture.</span>
-        </li>
+        <li class="spec-item"><span class="spec-dot"></span><span><strong>Zero runtime dependencies</strong> — no AppCompat, Material, RecyclerView, ConstraintLayout, or Lifecycle.</span></li>
+        <li class="spec-item"><span class="spec-dot"></span><span><strong>Fully programmatic UI</strong> — no XML layouts, no inflated resource bloat. Everything drawn in code.</span></li>
+        <li class="spec-item"><span class="spec-dot"></span><span><strong>Custom recycling shelf</strong> instead of RecyclerView — tight control, zero overhead.</span></li>
+        <li class="spec-item"><span class="spec-dot"></span><span><strong>R8 + resource shrinking</strong> on every release build. Dead code has nowhere to hide.</span></li>
+        <li class="spec-item"><span class="spec-dot"></span><span><strong>Pure Java</strong> — no Kotlin standard library shipped.</span></li>
+        <li class="spec-item"><span class="spec-dot"></span><span><strong>No native code</strong>, no <code>lib/</code> folder — one universal APK runs on every architecture.</span></li>
       </ul>
-
       <div class="apk-card">
-        <div class="apk-num">138</div>
-        <div class="apk-unit">KB — Universal APK</div>
+        <div class="apk-num">~140</div>
+        <div class="apk-unit">KB &mdash; universal APK</div>
         <div class="apk-rows">
           <div class="apk-row"><span>Minimum Android</span><span>API 26 (Android 8)</span></div>
           <div class="apk-row"><span>Architectures</span><span>ARMv7, ARMv8, x86_64</span></div>
@@ -570,38 +413,14 @@
 <!-- DEVICES -->
 <section id="devices">
   <div class="container">
-    <p class="section-tag">Compatibility</p>
-    <h2 class="section-h">Works on the hardware<br/>that needs it most.</h2>
-    <p class="section-p">Designed for Android TV and Fire TV, where stock launchers are crowded with ads and promotions.</p>
+    <p class="tag">Compatibility</p>
+    <h2 class="h">Works where it's needed most.</h2>
+    <p class="p">Built for the hardware whose stock launcher is crowded with ads and promotions.</p>
     <div class="device-grid">
-      <div class="device-card">
-        <div class="device-icon">📺</div>
-        <div>
-          <h4>Android TV / Google TV</h4>
-          <p>All modern devices</p>
-        </div>
-      </div>
-      <div class="device-card">
-        <div class="device-icon">🔥</div>
-        <div>
-          <h4>Fire TV Stick</h4>
-          <p>4K, 4K Max, Lite</p>
-        </div>
-      </div>
-      <div class="device-card">
-        <div class="device-icon">📦</div>
-        <div>
-          <h4>Fire TV Cube</h4>
-          <p>All generations</p>
-        </div>
-      </div>
-      <div class="device-card">
-        <div class="device-icon">📡</div>
-        <div>
-          <h4>Mi Box &amp; Mi Stick</h4>
-          <p>Xiaomi Android TV</p>
-        </div>
-      </div>
+      <div class="device-card"><div class="device-icon">📺</div><div><h4>Android TV / Google TV</h4><p>All modern devices</p></div></div>
+      <div class="device-card"><div class="device-icon">🔥</div><div><h4>Fire TV Stick</h4><p>4K, 4K Max, Lite</p></div></div>
+      <div class="device-card"><div class="device-icon">📦</div><div><h4>Fire TV Cube</h4><p>All generations</p></div></div>
+      <div class="device-card"><div class="device-icon">📡</div><div><h4>Mi Box &amp; Mi Stick</h4><p>Xiaomi Android TV</p></div></div>
     </div>
   </div>
 </section>
@@ -611,45 +430,25 @@
 <!-- INSTALL -->
 <section id="install">
   <div class="container">
-    <p class="section-tag">Getting started</p>
-    <h2 class="section-h">Sideload in minutes.</h2>
-    <p class="section-p">Not on the Play Store or Amazon Appstore — sideload only.</p>
+    <p class="tag">Getting started</p>
+    <h2 class="h">Sideload in minutes.</h2>
+    <p class="p">Not on the Play Store or Amazon Appstore — sideload only.</p>
+    <a class="dl-card" href="https://aftv.news/3465597" target="_blank" rel="noopener">
+      <div class="dl-badge">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </div>
+      <div class="dl-text">
+        <h4>Fastest on Fire TV — the Downloader app</h4>
+        <p>Open <em>Downloader</em> by AFTVnews and enter this code. It always installs the latest version.</p>
+      </div>
+      <div class="dl-code">3465597</div>
+    </a>
     <div class="install-list">
-      <div class="install-item">
-        <div class="step-n">01</div>
-        <div class="step-body">
-          <h4>Download the APK</h4>
-          <p>Open the <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest" target="_blank" rel="noopener">latest release</a> and download <code>BareLauncher-&lt;version&gt;.apk</code>.</p>
-        </div>
-      </div>
-      <div class="install-item">
-        <div class="step-n">02</div>
-        <div class="step-body">
-          <h4>Transfer to your TV</h4>
-          <p>Use a USB stick, network share, or a sideload tool like <em>Send Files To TV</em> or <em>Downloader</em>.</p>
-        </div>
-      </div>
-      <div class="install-item">
-        <div class="step-n">03</div>
-        <div class="step-body">
-          <h4>Allow unknown sources</h4>
-          <p>When prompted, allow installs from unknown sources for your file manager or browser.</p>
-        </div>
-      </div>
-      <div class="install-item">
-        <div class="step-n">04</div>
-        <div class="step-body">
-          <h4>Install the APK</h4>
-          <p>Tap the APK file and press Install. BareLauncher will appear in your app list.</p>
-        </div>
-      </div>
-      <div class="install-item">
-        <div class="step-n">05</div>
-        <div class="step-body">
-          <h4>Set as default launcher</h4>
-          <p>Use <em>Launcher Manager (XDA)</em> — recommended for Google TV, Android TV, and Fire TV.</p>
-        </div>
-      </div>
+      <div class="install-item"><div class="step-n">01</div><div class="step-body"><h4>Download the APK</h4><p>Grab <code>BareLauncher.apk</code> from the <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest">latest release</a>.</p></div></div>
+      <div class="install-item"><div class="step-n">02</div><div class="step-body"><h4>Transfer to your TV</h4><p>Use a USB stick, a network share, or a tool like <em>Send Files To TV</em> or <em>Downloader</em>.</p></div></div>
+      <div class="install-item"><div class="step-n">03</div><div class="step-body"><h4>Allow unknown sources</h4><p>When prompted, allow installs from unknown sources for your file manager or browser.</p></div></div>
+      <div class="install-item"><div class="step-n">04</div><div class="step-body"><h4>Install</h4><p>Open the APK and press Install. BareLauncher appears in your app list.</p></div></div>
+      <div class="install-item"><div class="step-n">05</div><div class="step-body"><h4>Set as default launcher</h4><p>Use <em>Launcher Manager (XDA)</em> — recommended for Google TV, Android TV, and Fire TV.</p></div></div>
     </div>
   </div>
 </section>
@@ -659,18 +458,85 @@
 <!-- FOOTER -->
 <footer>
   <div class="footer-inner">
-    <div class="footer-left">
-      <strong>BareLauncher</strong> — PolyForm Noncommercial License 1.0.0.<br/>
-      Free for personal and non-commercial use.
-    </div>
+    <div class="footer-left"><strong>BareLauncher</strong> — PolyForm Noncommercial License 1.0.0.<br/>Free for personal &amp; non-commercial use. Made with care by Mithun.</div>
     <div class="footer-links">
-      <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases" target="_blank" rel="noopener">Releases</a>
-      <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
-      <a href="https://ko-fi.com/barelauncher" target="_blank" rel="noopener">Ko-fi ☕</a>
+      <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3">GitHub</a>
+      <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases">Releases</a>
+      <a href="https://aftv.news/3465597">Downloader code: 3465597</a>
+      <a href="https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/blob/main/LICENSE">License</a>
+      <a href="https://ko-fi.com/barelauncher">Ko-fi ☕</a>
     </div>
   </div>
 </footer>
+
+<script>
+  // Auto-fill the latest version + changelog from the GitHub Releases API.
+  // Static page, no build step: this runs in the visitor's browser. If the
+  // API is unreachable or rate-limited, the page still reads cleanly — the
+  // version falls back to a sensible label and the notes block is hidden.
+  (function () {
+    var REPO = 'f102mithunysypdlcjr-pixel/BareLauncherv3';
+    var FALLBACK_VERSION = 'v1.4.10';
+
+    function esc(s){return s.replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+    // Minimal, safe Markdown -> HTML for release notes (headings, bullets, bold).
+    function renderNotes(md){
+      var lines = md.replace(/\r/g,'').split('\n');
+      var out = [], inList = false;
+      function closeList(){ if(inList){ out.push('</ul>'); inList=false; } }
+      for (var i=0;i<lines.length;i++){
+        var ln = lines[i].trim();
+        if (!ln){ closeList(); continue; }
+        var h = ln.match(/^#{1,6}\s+(.*)$/);
+        if (h){ closeList(); out.push('<h3>'+inline(h[1])+'</h3>'); continue; }
+        var b = ln.match(/^[-*]\s+(.*)$/);
+        if (b){ if(!inList){ out.push('<ul>'); inList=true; } out.push('<li>'+inline(b[1])+'</li>'); continue; }
+        closeList(); out.push('<p>'+inline(ln)+'</p>');
+      }
+      closeList();
+      return out.join('');
+    }
+    function inline(s){
+      s = esc(s);
+      s = s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+      s = s.replace(/`([^`]+)`/g,'<code>$1</code>');
+      return s;
+    }
+
+    function setVersion(v){
+      var els = document.querySelectorAll('[data-version]');
+      for (var i=0;i<els.length;i++) els[i].textContent = v;
+    }
+
+    fetch('https://api.github.com/repos/'+REPO+'/releases/latest', {headers:{'Accept':'application/vnd.github+json'}})
+      .then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .then(function(d){
+        var tag = d.tag_name || '';
+        var ver = tag ? (tag.charAt(0)==='v'?tag:'v'+tag) : FALLBACK_VERSION;
+        setVersion(ver);
+        var dateEl = document.getElementById('rel-date');
+        if (dateEl && d.published_at){
+          dateEl.textContent = new Date(d.published_at)
+            .toLocaleDateString(undefined,{year:'numeric',month:'long',day:'numeric'});
+        }
+        var notesEl = document.getElementById('rel-notes');
+        var body = (d.body||'').trim();
+        if (notesEl){
+          notesEl.innerHTML = body ? renderNotes(body)
+            : '<p style="color:var(--muted)">See the full notes on GitHub.</p>';
+        }
+      })
+      .catch(function(){
+        setVersion(FALLBACK_VERSION);
+        var dateEl = document.getElementById('rel-date'); if (dateEl) dateEl.textContent = '';
+        var notesEl = document.getElementById('rel-notes');
+        if (notesEl) notesEl.innerHTML =
+          '<p style="color:var(--muted)">Couldn\u2019t load live release notes. ' +
+          '<a href="https://github.com/'+REPO+'/releases">View them on GitHub &rarr;</a></p>';
+      });
+  })();
+</script>
 
 </body>
 </html>
