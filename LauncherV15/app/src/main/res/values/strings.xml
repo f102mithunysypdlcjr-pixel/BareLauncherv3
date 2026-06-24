@@ -74,6 +74,7 @@
     <!-- Toasts -->
     <string name="toast_no_network_settings">Cannot open network settings</string>
     <string name="toast_no_settings">Cannot open settings</string>
+    <string name="toast_no_bluetooth">Bluetooth / accessories settings unavailable on this device</string>
     <string name="toast_no_app_info">Cannot open app info</string>
     <string name="toast_app_unavailable">App not available</string>
     <string name="toast_no_file_picker">No file picker available</string>
