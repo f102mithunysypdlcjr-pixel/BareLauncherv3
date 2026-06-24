@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script>document.documentElement.classList.add('js');</script>
 
   <!-- Primary SEO -->
   <title>BareLauncher — The Fast, Minimal Android TV &amp; Fire TV Launcher</title>
@@ -82,14 +83,15 @@
     .section-pad{padding:96px 0}
     .divider{height:1px;background:var(--border)}
 
-    /* scroll reveal */
-    .reveal{opacity:0;transform:translateY(22px);transition:opacity .65s cubic-bezier(.16,1,.3,1),transform .65s cubic-bezier(.16,1,.3,1)}
-    .reveal.vis{opacity:1;transform:translateY(0)}
+    /* scroll reveal — hidden only when JS is active, so the page is fully
+       visible if JS is disabled or fails to run */
+    .reveal{transition:opacity .65s cubic-bezier(.16,1,.3,1),transform .65s cubic-bezier(.16,1,.3,1)}
+    .js .reveal:not(.vis){opacity:0;transform:translateY(22px)}
     .reveal.d1{transition-delay:.08s}.reveal.d2{transition-delay:.16s}.reveal.d3{transition-delay:.24s}
 
-    /* hero fade-up */
+    /* hero fade-up — same: only animates under .js, never leaves content hidden */
     @keyframes fu{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
-    .fu{opacity:0;animation:fu .7s cubic-bezier(.16,1,.3,1) forwards}
+    .js .fu{opacity:0;animation:fu .7s cubic-bezier(.16,1,.3,1) forwards}
     .fu.a1{animation-delay:.08s}.fu.a2{animation-delay:.18s}.fu.a3{animation-delay:.28s}.fu.a4{animation-delay:.38s}.fu.a5{animation-delay:.50s}
 
     /* buttons */
@@ -235,7 +237,7 @@
     .footer-links a{font-size:13px;color:var(--text-dim)}
     .footer-links a:hover{color:var(--text-muted)}
 
-    @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto}.reveal{opacity:1;transform:none}}
+    @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto}.fu,.reveal{opacity:1!important;transform:none!important}}
   </style>
 </head>
 <body>
@@ -290,7 +292,7 @@
 <section id="whatsnew" class="section-pad">
   <div class="container">
     <p class="section-eyebrow reveal">What's new</p>
-    <h2 class="section-h reveal d1">Always the latest build.</h2>
+    <h2 class="section-h reveal d1">What changed in the latest release.</h2>
     <div class="release-card reveal d2">
       <div class="release-head">
         <div class="release-ver"><b data-version>v—</b><span class="rel-badge">Latest release</span></div>
