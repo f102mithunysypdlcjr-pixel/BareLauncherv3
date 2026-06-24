@@ -2571,31 +2571,47 @@ public class LauncherActivity extends Activity {
 
     /** Open the device's Bluetooth / "Remote & accessories" screen (WiFi pill
      *  long-press). On Android TV the pairing screen is a dedicated settings
-     *  activity, so we try its known component first, then the standard
-     *  Bluetooth-settings action, then fall back to general Settings, picking
-     *  the first that actually resolves. */
+     *  activity whose class name varies by ROM, so we try a broad set of known
+     *  components first, then the standard Bluetooth-settings action, picking
+     *  the first that actually resolves.
+     *
+     *  <p>Deliberately does NOT fall back to general System Settings: the gear
+     *  pill already opens that, so silently landing there made the long-press
+     *  look broken (it just duplicated the gear). When no Bluetooth/accessories
+     *  target exists on the ROM we surface an honest toast instead. */
     private void openRemoteAccessories() {
-        // 1) Android TV "Remote & accessories" / accessory-pairing activities.
+        // 1) Android TV "Remote & accessories" / accessory-pairing activities,
+        //    plus the phone-style Bluetooth settings activity. Covers AOSP
+        //    Android TV, Google TV, and phone/tablet ROMs. The first that the
+        //    PackageManager can resolve wins.
         String[][] components = {
+                // AOSP / Google TV "Remote & accessories" list (the native screen).
                 { "com.android.tv.settings", "com.android.tv.settings.accessories.AccessoriesActivity" },
                 { "com.android.tv.settings", "com.android.tv.settings.accessories.AccessorySettingsActivity" },
                 { "com.android.tv.settings", "com.android.tv.settings.connectivity.BluetoothPreferenceActivity" },
+                // Direct accessory-pairing flow (older TvSettings builds expose
+                // only this; it opens the "searching for accessories" screen).
+                { "com.android.tv.settings", "com.android.tv.settings.accessories.AddAccessoryActivity" },
+                // Phone / tablet (and some TV ROMs that reuse the handset
+                // Settings package) Bluetooth list.
+                { "com.android.settings", "com.android.settings.Settings$BluetoothSettingsActivity" },
+                { "com.android.settings", "com.android.settings.bluetooth.BluetoothSettings" },
         };
         for (String[] cn : components) {
             Intent i = new Intent().setClassName(cn[0], cn[1])
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             if (tryStartActivityResolved(i)) return;
         }
-        // 2) Standard Bluetooth settings action (phones / most TV ROMs).
+        // 2) Standard Bluetooth settings action (phones / most TV ROMs that
+        //    don't expose the activity under a name we know).
         Intent bt = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (tryStartActivityResolved(bt)) return;
-        // 3) Last resort: general Settings.
-        try {
-            startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-        } catch (Exception ignored) {
-            showToast(getString(R.string.toast_no_settings));
-        }
+        // 3) No Bluetooth/accessories screen on this ROM. Tell the user rather
+        //    than silently opening general Settings (which the gear already
+        //    does — the duplication is exactly what this long-press should
+        //    NOT be).
+        showToast(getString(R.string.toast_no_bluetooth));
     }
 
     /** Register a default-network callback so the WiFi pill glyph tracks
