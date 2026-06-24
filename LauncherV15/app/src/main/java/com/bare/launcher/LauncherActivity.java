@@ -237,6 +237,12 @@ public class LauncherActivity extends Activity {
     private WallpaperController wallpaperCtl;
     private TextView           clockView;
     private View               netBtn;
+    /** Live WiFi-connected state driving the netBtn glyph (filled when
+     *  connected, outline when not). Updated by {@link #netCallback} and on
+     *  resume; UI-thread only. */
+    private boolean            wifiConnected = false;
+    private android.net.ConnectivityManager connMgr = null;
+    private android.net.ConnectivityManager.NetworkCallback netCallback = null;
     private RingView           ringView;
     private FrameLayout        root;
     private Toast              currentToast;
@@ -678,8 +684,8 @@ public class LauncherActivity extends Activity {
     private static final int ABOUT_ROW_KOFI = 0, ABOUT_ROW_GITHUB = 1;
     // ⚠ EDIT THESE: your Ko-fi page URL and the Downloader app code that
     // resolves to your latest GitHub release APK. Placeholders until set.
-    private static final String ABOUT_KOFI_URL       = "https://ko-fi.com/mithun";
-    private static final String ABOUT_DOWNLOADER_CODE = "xxxxxx";
+    private static final String ABOUT_KOFI_URL       = "https://ko-fi.com/barelauncher";
+    private static final String ABOUT_DOWNLOADER_CODE = "3465597";
     private static final String ABOUT_GITHUB_RELEASES =
             "https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest";
 
@@ -1313,6 +1319,8 @@ public class LauncherActivity extends Activity {
         hideSystemUI();
         startClock();
         registerTimeReceiver();
+        registerNetworkCallback();   // live WiFi-state for the netBtn glyph
+        refreshWifiState();          // pick up any change while we were away
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         // v1.5.x: finish the drawer teardown deferred from onPause (see
         // drawerWasOpenAtPause). Done here, not in onPause, so the app-launch
@@ -1427,6 +1435,7 @@ public class LauncherActivity extends Activity {
         uiHandler.removeCallbacksAndMessages(null);
         unregisterPkgReceiver();
         unregisterTimeReceiver();
+        unregisterNetworkCallback();
         // Cancel any in-flight toast. Toast.makeText(this, ...) holds a
         // strong reference to the activity through its TN binder on older
         // ROMs; without an explicit cancel a 3.5 s "long" toast in flight
@@ -1765,16 +1774,21 @@ public class LauncherActivity extends Activity {
         root.addView(shelf);
 
         clockView = new TextView(this);
-        // v1.4.9: the rounded "pill" plate is gone — the clock now floats
-        // directly over the wallpaper as bare digits for a bigger, more
-        // minimal look. A soft drop shadow restores legibility on bright
-        // wallpapers (the job the plate used to do).
+        // v1.4.9: the rounded "pill" plate is gone — the clock floats directly
+        // over the wallpaper as bare digits for a bigger, more minimal look. A
+        // soft drop shadow restores legibility on bright wallpapers (the job
+        // the plate used to do).
         clockView.setShadowLayer(dp(6), 0, dp(2), 0xB3000000);
         // No plate → only a small inset so the digits don't kiss the screen
-        // edge. The day/date second line sits directly beneath the time.
+        // edge. The day/date line sits directly beneath the time.
         clockView.setPadding(dp(2), 0, dp(2), 0);
         clockView.setIncludeFontPadding(false);
-        clockView.setLineSpacing(0f, 0.95f);   // tighten the time / date lines
+        // Left-align both lines and give a small, positive inter-line gap so
+        // the day/date line sits cleanly *below* the time (a negative/<1.0
+        // multiplier made the second line ride up into the time's descenders,
+        // which read as "misaligned").
+        clockView.setGravity(Gravity.START);
+        clockView.setLineSpacing(dp(2), 1.0f);
         clockView.setContentDescription(getString(R.string.cd_clock));
         clockView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
@@ -1786,14 +1800,13 @@ public class LauncherActivity extends Activity {
         clkLp.topMargin = dp(14);
         clockView.setLayoutParams(clkLp);
         clockView.setTextColor(Color.WHITE);
-        // Bigger time now that the plate is gone (was 22 sp inside a pill).
-        // 38 sp reads strongly across a TV room while staying minimal; the
-        // day/date line below renders at 0.40x via ClockFormatter.
-        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 38);
-        // sans-serif-medium reads as confident without the chunkiness
-        // of BOLD. AM/PM still drops to thin via the TypefaceSpan in
-        // {@link ClockFormatter}.
-        clockView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        // Bigger, more modern clock now that the plate is gone (was 22 sp in a
+        // pill, then 38 sp). 44 sp in a light weight reads as a clean, modern
+        // time; the day/date line below renders at 0.40x via ClockFormatter.
+        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
+        // sans-serif-light: a thinner, more modern face than medium, which
+        // suits the larger plate-less digits.
+        clockView.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         clockView.setLetterSpacing(0.01f);
         // If the user has the clock off, hide it before the first paint so
         // cold start never flashes a visible-then-hidden clock. {@link
@@ -2262,23 +2275,21 @@ public class LauncherActivity extends Activity {
 
     private View buildNetBtn(int sz) {
         View v = new View(this) {
-            // Pure shortcut button: opens WiFi settings. No status indicator —
-            // the system already surfaces connectivity in its own UI; mirroring
-            // it here creates two sources of truth that can disagree.
+            // WiFi status pill. The mark is a filled "slice" (sector) when WiFi
+            // is connected and an outline-only slice when it is not — a minimal,
+            // at-a-glance connectivity indicator. Short-press opens WiFi
+            // settings; long-press opens Bluetooth settings.
             //
-            // Glyph: bold "3 thick bar" WiFi fan matching the reference image.
-            // Three concentric arcs with ROUND caps so the band ends read as
-            // smooth pill tips rather than chiselled edges. A small solid
-            // wedge sits at the apex as the fan's source.
-            //
-            // Colour rule unchanged: dark-glass plate idle, frosted-white plate
-            // on focus, glyph inverts (white→dark) so the symbol always reads.
-            private final Paint stroke    = makeBtnStrokePaint();   // ROUND caps
-            private final Paint dot       = makeBtnPaint(true);
-            private final Paint bgIdle    = makeBgIdlePaint();
+            // Colour rule: no plate when idle (the mark floats over the
+            // wallpaper, whole-view alpha lowered); on focus the frosted-white
+            // plate + rim returns as the selection indicator and the mark
+            // inverts to dark.
+            private final Paint fill      = makeBtnPaint(true);
+            private final Paint stroke    = makeBtnStrokePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
             private final Paint rim       = makeRimPaint();
             private final RectF oval      = new RectF();
+            private final android.graphics.Path slice = new android.graphics.Path();
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
@@ -2286,66 +2297,48 @@ public class LauncherActivity extends Activity {
                 float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
-                // Minimal look: no plate when idle — the glyph floats over the
-                // wallpaper (whole-view alpha is lowered when unfocused). On
-                // focus the frosted-white plate + rim returns as the selection
-                // indicator and the glyph inverts to dark.
                 if (focused) {
                     c.drawCircle(cx, cy, r, bgFocus);
                     c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
                 }
-
                 int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
-                stroke.setColor(symbolColor);
-                dot.setColor(symbolColor);
 
-                // Geometry tuned to match the reference image:
-                //   ic    icon "container" radius
-                //   sw    band thickness — 22% of ic gives a chunky bar feel
-                //         without crowding the arcs together
-                //   ay    arc anchor — sits below cell centre so the fan
-                //         radiates upward from a low source point
-                //   radii 0.40 / 0.66 / 0.92 — slightly wider outer ring than
-                //         before so the largest bar reads as a confident band
-                //   sweep 110° centred on top (215°→325°) — symmetric around
-                //         270° (straight up) so the fan reads as upright,
-                //         not tilted to one side
-                //   apex  small solid wedge (filled circle) anchored just above
-                //         the inner-most band's endpoints
-                float ic         = r * 0.96f;
-                float sw         = ic * 0.22f;
-                float ay         = cy + ic * 0.36f;
-                float dotR       = sw * 0.55f;
-                float dotY       = ay - sw * 0.05f;
-                stroke.setStrokeWidth(sw);
-                stroke.setStrokeJoin(Paint.Join.ROUND);
-                stroke.setStrokeCap(Paint.Cap.ROUND);   // ROUND caps for the soft pill-tip look
+                // Slice: vertex at the bottom, a ~92° arc across the top,
+                // centred on straight-up (270°), so it reads as an upright
+                // WiFi "fan". Filled when connected, outline when not.
+                float ic   = r * 0.96f;
+                float vx   = cx;
+                float vy   = cy + ic * 0.46f;     // vertex below centre
+                float rad  = ic * 1.02f;          // arc radius from the vertex
+                float half = 46f;                 // half sweep angle
+                oval.set(vx - rad, vy - rad, vx + rad, vy + rad);
+                slice.reset();
+                slice.moveTo(vx, vy);
+                slice.arcTo(oval, 270f - half, half * 2f);
+                slice.close();
 
-                c.drawCircle(cx, dotY, dotR, dot);
-                // Inner band full length; the 2nd and 3rd (outer) bands are
-                // drawn progressively shorter for a more minimal fan. Each arc
-                // stays centred on 270° (straight up) so the fan reads upright.
-                float[] radii  = { ic * 0.40f, ic * 0.66f, ic * 0.92f };
-                float[] sweeps = { 110f, 92f, 78f };
-                for (int i = 0; i < radii.length; i++) {
-                    float rr  = radii[i];
-                    float arc = sweeps[i];
-                    oval.set(cx - rr, ay - rr, cx + rr, ay + rr);
-                    c.drawArc(oval, 270f - arc / 2f, arc, false, stroke);
+                if (wifiConnected) {
+                    fill.setColor(symbolColor);
+                    fill.setStyle(Paint.Style.FILL);
+                    c.drawPath(slice, fill);
+                } else {
+                    stroke.setColor(symbolColor);
+                    stroke.setStyle(Paint.Style.STROKE);
+                    stroke.setStrokeWidth(Math.max(dp(1), ic * 0.11f));
+                    stroke.setStrokeJoin(Paint.Join.ROUND);
+                    stroke.setStrokeCap(Paint.Cap.ROUND);
+                    c.drawPath(slice, stroke);
                 }
             }
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
-        // Long-press intentionally NOT bound. The system-Settings shortcut
-        // moved to the gear pill in v1.3.0 (it's the most common
-        // destination from the panel and now lives next to the gear's
-        // short-press = "open panel" entry). Leaving WiFi long-press
-        // unbound reserves it for a future power-user shortcut without
-        // committing to a feature now. Important: we do NOT register an
-        // OnLongClickListener that returns true; doing so would swallow
-        // long-press events. Without a listener, long-press is a no-op
-        // and short-press still fires cleanly on key UP / touch UP.
+        // Short-press → WiFi settings; long-press → Bluetooth settings.
+        v.setOnLongClickListener(view -> {
+            view.playSoundEffect(SoundEffectConstants.CLICK);
+            openBluetoothSettings();
+            return true;
+        });
         v.setAlpha(0.6f);   // dimmed when idle; brightens to full on focus
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
@@ -2409,7 +2402,6 @@ public class LauncherActivity extends Activity {
             // are factory-built (shared style with the rest of the
             // toolbar pills) and untouched by drawGearGlyph.
             private final Paint fill      = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint bgIdle    = makeBgIdlePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
             private final Paint rim       = makeRimPaint();
             @Override protected void onDraw(Canvas c) {
@@ -2548,6 +2540,70 @@ public class LauncherActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         } catch (Exception ignored) {
             showToast(getString(R.string.toast_no_settings));
+        }
+    }
+
+    /** Open Bluetooth settings (WiFi pill long-press). Falls back to the
+     *  general Settings screen, then a toast, on stripped ROMs. */
+    private void openBluetoothSettings() {
+        String[] actions = { Settings.ACTION_BLUETOOTH_SETTINGS, Settings.ACTION_SETTINGS };
+        for (String a : actions) {
+            try { startActivity(new Intent(a).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return; }
+            catch (Exception ignored) { /* try next */ }
+        }
+        showToast(getString(R.string.toast_no_settings));
+    }
+
+    /** Register a default-network callback so the WiFi pill glyph tracks
+     *  connect / disconnect live. Idempotent. ACCESS_NETWORK_STATE (a normal
+     *  install-time permission) gates this; on a denial / stripped ROM the
+     *  try/catch leaves the glyph in its last (default outline) state. */
+    private void registerNetworkCallback() {
+        if (netCallback != null) return;
+        try {
+            connMgr = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (connMgr == null) return;
+            netCallback = new android.net.ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(android.net.Network n) { postWifiRefresh(); }
+                @Override public void onLost(android.net.Network n) { postWifiRefresh(); }
+                @Override public void onCapabilitiesChanged(
+                        android.net.Network n, android.net.NetworkCapabilities caps) { postWifiRefresh(); }
+            };
+            connMgr.registerDefaultNetworkCallback(netCallback);
+        } catch (Exception ignored) { netCallback = null; }
+    }
+
+    private void unregisterNetworkCallback() {
+        if (connMgr != null && netCallback != null) {
+            try { connMgr.unregisterNetworkCallback(netCallback); } catch (Exception ignored) { }
+        }
+        netCallback = null;
+    }
+
+    private void postWifiRefresh() { uiHandler.post(this::refreshWifiState); }
+
+    /** Recompute WiFi-connected state; repaint the pill only on a change. */
+    private void refreshWifiState() {
+        boolean c = isWifiConnected();
+        if (c != wifiConnected) {
+            wifiConnected = c;
+            View nb = netBtn;
+            if (nb != null) nb.invalidate();
+        }
+    }
+
+    private boolean isWifiConnected() {
+        try {
+            android.net.ConnectivityManager cm = (connMgr != null) ? connMgr
+                    : (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            android.net.Network n = cm.getActiveNetwork();
+            if (n == null) return false;
+            android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(n);
+            return caps != null
+                    && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI);
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -5917,6 +5973,12 @@ public class LauncherActivity extends Activity {
                     TextView cvOn = clockView;
                     if (cvOn != null) cvOn.setVisibility(View.VISIBLE);
                     startClock();
+                    // startClock() only re-renders when it transitions from
+                    // not-running to running; a FULL↔TIME_ONLY switch leaves it
+                    // already running, so force the paint here too — otherwise
+                    // the day/date line wouldn't appear/disappear until the next
+                    // minute tick (or a relaunch).
+                    tickClock(System.currentTimeMillis());
                 } else {
                     stopClock();
                     TextView cv = clockView;

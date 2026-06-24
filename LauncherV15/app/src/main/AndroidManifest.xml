@@ -16,6 +16,11 @@
     <!-- Required to enumerate installed apps for the launcher grid -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <!-- Read the active network's transport so the WiFi pill can show a
+         filled (connected) vs outline (not connected) glyph. Normal
+         install-time permission — no runtime prompt. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- Allows launching the system uninstall dialog reliably on Android 14+
          and Android TV ROMs that gate ACTION_DELETE / ACTION_UNINSTALL_PACKAGE
          behind this normal-protection-level permission. -->

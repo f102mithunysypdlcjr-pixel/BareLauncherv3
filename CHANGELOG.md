@@ -28,15 +28,17 @@ encoder (no library, no network).
 ### Changed
 
 - **Clock is now a 3-state cycle** (Settings → Clock): Full (time +
-  day/date) → Time only → Off → Full. Pre-1.4.9 show/hide installs
-  migrate automatically.
+  day/date) → Time only → Off → Full, switching live (no relaunch).
+  Pre-1.4.9 show/hide installs migrate automatically.
 - **Clock restyle**: the rounded pill plate is gone — the time floats
-  bigger over the wallpaper with a soft shadow for legibility, and a
-  small, dim "day, date month" line sits beneath it.
-- **Minimal Wi-Fi and gear icons**: no plate when idle (the glyph floats
-  and is dimmed), with the plate returning on focus as the selection
-  indicator. The Wi-Fi fan's 2nd and 3rd bars are slightly shorter for a
-  cleaner look.
+  bigger over the wallpaper in a lighter, more modern face with a soft
+  shadow for legibility, and a small, dim "day, date month" line sits
+  left-aligned directly beneath it.
+- **Wi-Fi pill now shows connection state**: a filled slice when Wi-Fi is
+  connected, an outline slice when it is not (live, via a default-network
+  callback). Long-pressing the Wi-Fi pill opens Bluetooth settings.
+- **Minimal gear icon**: no plate when idle (the glyph floats and is
+  dimmed); the plate returns on focus as the selection indicator.
 - **Slightly more spacing between app tiles.**
 
 ## [1.4.8] — 2026-06-24
