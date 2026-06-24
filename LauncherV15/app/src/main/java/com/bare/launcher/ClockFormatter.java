@@ -3,6 +3,7 @@ package com.bare.launcher;
 import android.graphics.Typeface;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.text.style.TypefaceSpan;
@@ -60,6 +61,11 @@ final class ClockFormatter {
     private final RelativeSizeSpan       amPmSize  = new RelativeSizeSpan(0.42f);
     private final TypefaceSpan           amPmFace  = new TypefaceSpan("sans-serif-thin");
     private final StyleSpan              amPmStyle = new StyleSpan(Typeface.NORMAL);
+    // Spans for the small, dim "day, date month" line rendered below the
+    // time when showDate is on. Pre-built and re-applied per tick.
+    private final RelativeSizeSpan       dateSize  = new RelativeSizeSpan(0.40f);
+    private final TypefaceSpan           dateFace  = new TypefaceSpan("sans-serif");
+    private final ForegroundColorSpan    dateColor = new ForegroundColorSpan(0xB3FFFFFF);
 
     /** -1 sentinel = "no minute paint yet". {@link #shouldRepaint} returns
      *  {@code true} on the first call after construction or a reset. */
@@ -178,18 +184,8 @@ final class ClockFormatter {
 
         ssb.clear();
         ssb.clearSpans();
-        // Optional date prefix. Calendar.getDisplayName allocates a small
-        // String per call — at one tick per minute this is below GC pressure.
-        // Falls back gracefully if the locale ever returns null.
-        if (showDate) {
-            String day = cal.getDisplayName(Calendar.DAY_OF_WEEK,
-                    Calendar.SHORT, Locale.getDefault());
-            if (day != null && !day.isEmpty()) {
-                ssb.append(day);
-                ssb.append(" \u00B7 ");
-            }
-        }
 
+        // Big time line first.
         int timeStart = ssb.length();
         ssb.append(String.valueOf(chars, 0, pos));
 
@@ -198,6 +194,25 @@ final class ClockFormatter {
             ssb.setSpan(amPmSize,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             ssb.setSpan(amPmFace,  timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             ssb.setSpan(amPmStyle, timeStart + amStart, timeStart + pos, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+
+        // Optional second line: small, dim "Day, D Mon" (e.g. "Sat, 21 Jun").
+        // Calendar.getDisplayName allocates small Strings — at one tick per
+        // minute this is below GC pressure. Falls back gracefully on nulls.
+        if (showDate) {
+            ssb.append('\n');
+            int lineStart = ssb.length();
+            String day = cal.getDisplayName(Calendar.DAY_OF_WEEK,
+                    Calendar.SHORT, Locale.getDefault());
+            String mon = cal.getDisplayName(Calendar.MONTH,
+                    Calendar.SHORT, Locale.getDefault());
+            if (day != null && !day.isEmpty()) { ssb.append(day); ssb.append(", "); }
+            ssb.append(Integer.toString(cal.get(Calendar.DAY_OF_MONTH)));
+            if (mon != null && !mon.isEmpty()) { ssb.append(' '); ssb.append(mon); }
+            int lineEnd = ssb.length();
+            ssb.setSpan(dateSize,  lineStart, lineEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            ssb.setSpan(dateFace,  lineStart, lineEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            ssb.setSpan(dateColor, lineStart, lineEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         return ssb;
     }

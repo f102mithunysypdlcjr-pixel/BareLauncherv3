@@ -50,6 +50,18 @@
     <string name="settings_row_set_wallpaper">Set wallpaper</string>
     <string name="settings_row_show_clock">Show clock</string>
     <string name="settings_row_system_settings">System Settings</string>
+    <string name="settings_row_about">About</string>
+
+    <!-- About card (v1.4.9). Version is filled in at runtime from the
+         installed package, so it always matches the actual app version. -->
+    <string name="about_app_name">BareLauncher</string>
+    <string name="about_kofi">Support me on Ko-fi</string>
+    <!-- %1$s is the Downloader app code for the latest release APK. -->
+    <string name="about_downloader_code">Downloader code:  %1$s</string>
+    <string name="about_check_github">Check latest version on GitHub</string>
+    <string name="about_made_by">Made by Mithun</string>
+    <string name="about_qr_kofi_caption">Scan to open my Ko-fi page</string>
+    <string name="about_qr_github_caption">If you find a newer version on the GitHub page, just use the Downloader code above to download and install it.</string>
 
     <!-- Remote key shortcut labels. Order must match SHORTCUT_KEYCODES. -->
     <string name="key_red">Red</string>
