@@ -5,6 +5,42 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.9] — 2026-06-24
+
+Adds an About screen and reworks the clock and toolbar icons. Still
+zero-dependency: the QR codes are generated on-device by a small built-in
+encoder (no library, no network).
+
+### Added
+
+- **About card** (Settings → About): app version (read live from the
+  installed package, so it always matches the build), a "Support me on
+  Ko-fi" row that shows a scannable QR of the Ko-fi page, the Downloader
+  code for the latest release, a "Check latest version on GitHub" row
+  that shows a QR of the releases page (with a note to use the Downloader
+  code to grab a newer build), and a "Made by Mithun" credit. Version,
+  code, and credit lines carry no selector; the two QR rows are
+  selectable.
+- **Self-contained QR generator** (`QrCode`): byte-mode, level-M,
+  versions 1–10, dependency-free and offline. Only runs when a QR is
+  opened, so there is no steady-state cost.
+
+### Changed
+
+- **Clock is now a 3-state cycle** (Settings → Clock): Full (time +
+  day/date) → Time only → Off → Full, switching live (no relaunch).
+  Pre-1.4.9 show/hide installs migrate automatically.
+- **Clock restyle**: the rounded pill plate is gone — the time floats
+  bigger over the wallpaper in a lighter, more modern face with a soft
+  shadow for legibility, and a small, dim "day, date month" line sits
+  left-aligned directly beneath it.
+- **Wi-Fi pill now shows connection state**: a filled slice when Wi-Fi is
+  connected, an outline slice when it is not (live, via a default-network
+  callback). Long-pressing the Wi-Fi pill opens Bluetooth settings.
+- **Minimal gear icon**: no plate when idle (the glyph floats and is
+  dimmed); the plate returns on focus as the selection indicator.
+- **Slightly more spacing between app tiles.**
+
 ## [1.4.8] — 2026-06-24
 
 App-drawer UX pass. Nine reported issues fixed, all on the existing

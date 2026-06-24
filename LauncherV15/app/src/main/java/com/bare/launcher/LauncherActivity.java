@@ -127,6 +127,11 @@ public class LauncherActivity extends Activity {
      *  v1.3.0 introduced this toggle alongside the unified settings panel.
      *  Default true so existing installs see no behaviour change. */
     private static final String KEY_SHOW_CLOCK = "show_clock";
+    /** v1.4.9: 3-state clock display mode (replaces the boolean show/hide).
+     *  Persisted as an int; see {@link #CLOCK_FULL} / {@link #CLOCK_TIME_ONLY}
+     *  / {@link #CLOCK_OFF}. {@link #KEY_SHOW_CLOCK} is still read once for
+     *  migration of pre-v1.4.9 installs. */
+    private static final String KEY_CLOCK_MODE = "clock_mode";
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
@@ -232,6 +237,12 @@ public class LauncherActivity extends Activity {
     private WallpaperController wallpaperCtl;
     private TextView           clockView;
     private View               netBtn;
+    /** Live WiFi-connected state driving the netBtn glyph (filled when
+     *  connected, outline when not). Updated by {@link #netCallback} and on
+     *  resume; UI-thread only. */
+    private boolean            wifiConnected = false;
+    private android.net.ConnectivityManager connMgr = null;
+    private android.net.ConnectivityManager.NetworkCallback netCallback = null;
     private RingView           ringView;
     private FrameLayout        root;
     private Toast              currentToast;
@@ -262,6 +273,13 @@ public class LauncherActivity extends Activity {
      *  in one step. Default {@code true} preserves v1.2.x behaviour for
      *  existing installs. */
     private boolean showClock  = true;
+    /** 3-state clock display, cycled by the settings "Clock" row:
+     *  FULL = big time + small day/date line; TIME_ONLY = big time only;
+     *  OFF = hidden. {@link #showClock} stays as the convenience gate
+     *  ({@code clockMode != CLOCK_OFF}) so existing tick/visibility code
+     *  is untouched. */
+    private static final int CLOCK_FULL = 0, CLOCK_TIME_ONLY = 1, CLOCK_OFF = 2;
+    private int clockMode = CLOCK_FULL;
     // Tracks the system 12/24-hour preference; re-detected in startClock()
     // so a change in Settings → Date & time is picked up on the next
     // onResume without a ContentObserver.
@@ -291,8 +309,9 @@ public class LauncherActivity extends Activity {
         TextView cv = clockView;
         if (cv == null) return;
         if (!showClock) return;
-        if (!clockFmt.shouldRepaint(now, true, is24Hour)) return; // no visible change
-        cv.setText(clockFmt.format(now, true, is24Hour), TextView.BufferType.SPANNABLE);
+        boolean withDate = (clockMode == CLOCK_FULL);
+        if (!clockFmt.shouldRepaint(now, withDate, is24Hour)) return; // no visible change
+        cv.setText(clockFmt.format(now, withDate, is24Hour), TextView.BufferType.SPANNABLE);
     }
 
     // Volatile because these fields are nulled on the UI thread inside
@@ -645,6 +664,31 @@ public class LauncherActivity extends Activity {
      *  SLOTS and dismiss the keymap card so the panel re-opens. */
     private boolean                     hideManagerSkipSlotsOnExit = false;
 
+    // ── About overlay (v1.4.9) ───────────────────────────────────────────
+    // Drill-through card opened from the settings panel's "About" row. Shows
+    // the app version (auto, from PackageManager), a Ko-fi support row + QR,
+    // the Downloader code for the latest release, a "check latest on GitHub"
+    // row + QR, and a "Made by Mithun" footer. The two QR-bearing rows are
+    // selectable; the version / code / credit lines carry no selector.
+    private FrameLayout                 aboutOverlay   = null;
+    private android.widget.LinearLayout aboutCard      = null;
+    private android.widget.LinearLayout aboutListView  = null;  // the row list
+    private android.widget.LinearLayout aboutQrView    = null;  // QR sub-view (swaps with the list)
+    private ImageView                   aboutQrImage   = null;
+    private TextView                    aboutQrCaption = null;
+    private final android.widget.LinearLayout[] aboutRows = new android.widget.LinearLayout[2];
+    private int                         aboutSelectedRow = 0;
+    private boolean                     aboutOpenedFromSettings = false;
+    private boolean                     aboutShowingQr = false;
+    /** 0 = Ko-fi support, 1 = GitHub latest release. */
+    private static final int ABOUT_ROW_KOFI = 0, ABOUT_ROW_GITHUB = 1;
+    // ⚠ EDIT THESE: your Ko-fi page URL and the Downloader app code that
+    // resolves to your latest GitHub release APK. Placeholders until set.
+    private static final String ABOUT_KOFI_URL       = "https://ko-fi.com/barelauncher";
+    private static final String ABOUT_DOWNLOADER_CODE = "3465597";
+    private static final String ABOUT_GITHUB_RELEASES =
+            "https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest";
+
     /** Single shared dim backdrop View added to {@link #root} in
      *  {@link #buildLayout}. Both the settings panel and the keymap
      *  card reference it via {@link #ensureOverlayBackdropVisible} /
@@ -665,7 +709,8 @@ public class LauncherActivity extends Activity {
     private static final int SETTINGS_ROW_WALLPAPER       = 2;
     private static final int SETTINGS_ROW_SHOW_CLOCK      = 3;
     private static final int SETTINGS_ROW_SYSTEM_SETTINGS = 4;
-    private static final int SETTINGS_ROW_COUNT           = 5;
+    private static final int SETTINGS_ROW_ABOUT           = 5;
+    private static final int SETTINGS_ROW_COUNT           = 6;
 
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
      *  Single source of truth for "ring should not be visible right now".
@@ -1206,6 +1251,12 @@ public class LauncherActivity extends Activity {
             // user-visible behaviour stays identical regardless of which
             // delivery path the platform chose.
             backInvokedCallback = () -> {
+                // 0. About overlay open → its own Back (QR → list, list → settings).
+                FrameLayout ab = aboutOverlay;
+                if (ab != null && ab.getVisibility() == View.VISIBLE) {
+                    handleAboutKey(KeyEvent.KEYCODE_BACK);
+                    return;
+                }
                 // 1. Keymap overlay open → close it.
                 FrameLayout ko = keymapOverlay;
                 if (ko != null && ko.getVisibility() == View.VISIBLE) {
@@ -1268,6 +1319,8 @@ public class LauncherActivity extends Activity {
         hideSystemUI();
         startClock();
         registerTimeReceiver();
+        registerNetworkCallback();   // live WiFi-state for the netBtn glyph
+        refreshWifiState();          // pick up any change while we were away
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         // v1.5.x: finish the drawer teardown deferred from onPause (see
         // drawerWasOpenAtPause). Done here, not in onPause, so the app-launch
@@ -1382,6 +1435,7 @@ public class LauncherActivity extends Activity {
         uiHandler.removeCallbacksAndMessages(null);
         unregisterPkgReceiver();
         unregisterTimeReceiver();
+        unregisterNetworkCallback();
         // Cancel any in-flight toast. Toast.makeText(this, ...) holds a
         // strong reference to the activity through its TN binder on older
         // ROMs; without an explicit cancel a 3.5 s "long" toast in flight
@@ -1454,6 +1508,9 @@ public class LauncherActivity extends Activity {
         netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
         settingsOverlay = null; settingsCard = null; settingsColumn = null;
+        aboutOverlay = null; aboutCard = null; aboutListView = null;
+        aboutQrView = null; aboutQrImage = null; aboutQrCaption = null;
+        aboutRows[0] = null; aboutRows[1] = null;
         menuOverlay = null; menuHide = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
         keymapOverlay = null; keymapColumn = null; keymapCard = null;
         keymapPickerView = null; keymapPickerTitle = null;
@@ -1570,6 +1627,10 @@ public class LauncherActivity extends Activity {
 
     @Override @SuppressWarnings("deprecation")
     public void onBackPressed() {
+        FrameLayout ao = aboutOverlay;
+        if (ao != null && ao.getVisibility() == View.VISIBLE) {
+            handleAboutKey(KeyEvent.KEYCODE_BACK); return;
+        }
         FrameLayout sp = settingsOverlay;
         if (sp != null && sp.getVisibility() == View.VISIBLE) {
             hideSettingsPanel(); return;
@@ -1713,22 +1774,21 @@ public class LauncherActivity extends Activity {
         root.addView(shelf);
 
         clockView = new TextView(this);
-        // Clock now wears the same visual vocabulary as the top-right toolbar
-        // pills: dark-glass plate + 1 dp white rim, drawn as a capsule
-        // (round-rect with radius = height/2). The plate provides clean
-        // separation from the wallpaper, so the heavy 14 dp drop shadow that
-        // used to sit behind the digits is gone — it was only there because
-        // the bare digits had no other contrast. With a real plate the
-        // shadow becomes redundant ink that smudges the look on bright
-        // wallpapers.
-        clockView.setBackground(AppleStyle.makePillBackground(density));
-        // Symmetric padding gives the capsule a balanced "premium" feel.
-        // Vertical inset matches the toolbar plates' visual weight; the
-        // resulting pill height (~ dp(40)) lines up with BTN_VIEW_SZ so
-        // the clock and the toolbar buttons sit on the same horizontal
-        // baseline at the top of the screen.
-        clockView.setPadding(dp(16), dp(7), dp(16), dp(7));
+        // v1.4.9: the rounded "pill" plate is gone — the clock floats directly
+        // over the wallpaper as bare digits for a bigger, more minimal look. A
+        // soft drop shadow restores legibility on bright wallpapers (the job
+        // the plate used to do).
+        clockView.setShadowLayer(dp(6), 0, dp(2), 0xB3000000);
+        // No plate → only a small inset so the digits don't kiss the screen
+        // edge. The day/date line sits directly beneath the time.
+        clockView.setPadding(dp(2), 0, dp(2), 0);
         clockView.setIncludeFontPadding(false);
+        // Left-align both lines and give a small, positive inter-line gap so
+        // the day/date line sits cleanly *below* the time (a negative/<1.0
+        // multiplier made the second line ride up into the time's descenders,
+        // which read as "misaligned").
+        clockView.setGravity(Gravity.START);
+        clockView.setLineSpacing(dp(2), 1.0f);
         clockView.setContentDescription(getString(R.string.cd_clock));
         clockView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         FrameLayout.LayoutParams clkLp = new FrameLayout.LayoutParams(WRAP, WRAP);
@@ -1740,21 +1800,18 @@ public class LauncherActivity extends Activity {
         clkLp.topMargin = dp(14);
         clockView.setLayoutParams(clkLp);
         clockView.setTextColor(Color.WHITE);
-        // Compact 22 sp — was 44 sp. The plate frames the digits now,
-        // so the text doesn't need to carry all the visual weight on
-        // its own. 22 sp keeps the time legible from across a TV room
-        // while sitting quietly in the corner.
-        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 22);
-        // sans-serif-medium reads as confident without the chunkiness
-        // of BOLD inside a smaller pill. AM/PM still drops to thin via
-        // the TypefaceSpan in {@link ClockFormatter}.
-        clockView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        clockView.setLetterSpacing(0.02f);
-        // If the user has opted out of the clock pill, hide it before the
-        // first paint so cold start never flashes a visible-then-hidden
-        // pill. {@link #startClock} also enforces this on every resume,
-        // but doing it here avoids the one-frame visibility flicker on
-        // slow-laying-out ROMs.
+        // Bigger, more modern clock now that the plate is gone (was 22 sp in a
+        // pill, then 38 sp). 44 sp in a light weight reads as a clean, modern
+        // time; the day/date line below renders at 0.40x via ClockFormatter.
+        clockView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
+        // sans-serif-light: a thinner, more modern face than medium, which
+        // suits the larger plate-less digits.
+        clockView.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        clockView.setLetterSpacing(0.01f);
+        // If the user has the clock off, hide it before the first paint so
+        // cold start never flashes a visible-then-hidden clock. {@link
+        // #startClock} also enforces this on every resume, but doing it here
+        // avoids the one-frame visibility flicker on slow-laying-out ROMs.
         if (!showClock) clockView.setVisibility(View.GONE);
         root.addView(clockView);
 
@@ -2218,23 +2275,21 @@ public class LauncherActivity extends Activity {
 
     private View buildNetBtn(int sz) {
         View v = new View(this) {
-            // Pure shortcut button: opens WiFi settings. No status indicator —
-            // the system already surfaces connectivity in its own UI; mirroring
-            // it here creates two sources of truth that can disagree.
+            // WiFi status pill. The mark is a filled "slice" (sector) when WiFi
+            // is connected and an outline-only slice when it is not — a minimal,
+            // at-a-glance connectivity indicator. Short-press opens WiFi
+            // settings; long-press opens Bluetooth settings.
             //
-            // Glyph: bold "3 thick bar" WiFi fan matching the reference image.
-            // Three concentric arcs with ROUND caps so the band ends read as
-            // smooth pill tips rather than chiselled edges. A small solid
-            // wedge sits at the apex as the fan's source.
-            //
-            // Colour rule unchanged: dark-glass plate idle, frosted-white plate
-            // on focus, glyph inverts (white→dark) so the symbol always reads.
-            private final Paint stroke    = makeBtnStrokePaint();   // ROUND caps
-            private final Paint dot       = makeBtnPaint(true);
-            private final Paint bgIdle    = makeBgIdlePaint();
+            // Colour rule: no plate when idle (the mark floats over the
+            // wallpaper, whole-view alpha lowered); on focus the frosted-white
+            // plate + rim returns as the selection indicator and the mark
+            // inverts to dark.
+            private final Paint fill      = makeBtnPaint(true);
+            private final Paint stroke    = makeBtnStrokePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
             private final Paint rim       = makeRimPaint();
             private final RectF oval      = new RectF();
+            private final android.graphics.Path slice = new android.graphics.Path();
             @Override protected void onDraw(Canvas c) {
                 int w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
@@ -2242,61 +2297,53 @@ public class LauncherActivity extends Activity {
                 float scale = focused ? 1f : 0.86f;
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
-                // Background plate — frosted white when focused, dark glass when idle
-                c.drawCircle(cx, cy, r, focused ? bgFocus : bgIdle);
-                // Subtle 1dp inner rim — gives the glass plate a defined edge
-                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
-
+                if (focused) {
+                    c.drawCircle(cx, cy, r, bgFocus);
+                    c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+                }
                 int symbolColor = focused ? 0xFF0F0F12 : 0xFFFFFFFF;
-                stroke.setColor(symbolColor);
-                dot.setColor(symbolColor);
 
-                // Geometry tuned to match the reference image:
-                //   ic    icon "container" radius
-                //   sw    band thickness — 22% of ic gives a chunky bar feel
-                //         without crowding the arcs together
-                //   ay    arc anchor — sits below cell centre so the fan
-                //         radiates upward from a low source point
-                //   radii 0.40 / 0.66 / 0.92 — slightly wider outer ring than
-                //         before so the largest bar reads as a confident band
-                //   sweep 110° centred on top (215°→325°) — symmetric around
-                //         270° (straight up) so the fan reads as upright,
-                //         not tilted to one side
-                //   apex  small solid wedge (filled circle) anchored just above
-                //         the inner-most band's endpoints
-                float ic         = r * 0.96f;
-                float sw         = ic * 0.22f;
-                float ay         = cy + ic * 0.36f;
-                float dotR       = sw * 0.55f;
-                float dotY       = ay - sw * 0.05f;
-                float startAngle = 215f, sweep = 110f;
+                // Slice: vertex at the bottom, a ~92° arc across the top,
+                // centred on straight-up (270°), so it reads as an upright
+                // WiFi "fan". Filled when connected, outline when not.
+                float ic   = r * 0.96f;
+                float vx   = cx;
+                float vy   = cy + ic * 0.46f;     // vertex below centre
+                float rad  = ic * 1.02f;          // arc radius from the vertex
+                float half = 46f;                 // half sweep angle
+                oval.set(vx - rad, vy - rad, vx + rad, vy + rad);
+                slice.reset();
+                slice.moveTo(vx, vy);
+                slice.arcTo(oval, 270f - half, half * 2f);
+                slice.close();
 
-                stroke.setStrokeWidth(sw);
-                stroke.setStrokeJoin(Paint.Join.ROUND);
-                stroke.setStrokeCap(Paint.Cap.ROUND);   // ROUND caps for the soft pill-tip look
-
-                c.drawCircle(cx, dotY, dotR, dot);
-                float[] radii = { ic * 0.40f, ic * 0.66f, ic * 0.92f };
-                for (float rr : radii) {
-                    oval.set(cx - rr, ay - rr, cx + rr, ay + rr);
-                    c.drawArc(oval, startAngle, sweep, false, stroke);
+                if (wifiConnected) {
+                    fill.setColor(symbolColor);
+                    fill.setStyle(Paint.Style.FILL);
+                    c.drawPath(slice, fill);
+                } else {
+                    stroke.setColor(symbolColor);
+                    stroke.setStyle(Paint.Style.STROKE);
+                    stroke.setStrokeWidth(Math.max(dp(1), ic * 0.11f));
+                    stroke.setStrokeJoin(Paint.Join.ROUND);
+                    stroke.setStrokeCap(Paint.Cap.ROUND);
+                    c.drawPath(slice, stroke);
                 }
             }
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
-        // Long-press intentionally NOT bound. The system-Settings shortcut
-        // moved to the gear pill in v1.3.0 (it's the most common
-        // destination from the panel and now lives next to the gear's
-        // short-press = "open panel" entry). Leaving WiFi long-press
-        // unbound reserves it for a future power-user shortcut without
-        // committing to a feature now. Important: we do NOT register an
-        // OnLongClickListener that returns true; doing so would swallow
-        // long-press events. Without a listener, long-press is a no-op
-        // and short-press still fires cleanly on key UP / touch UP.
+        // Short-press → WiFi settings; long-press → Bluetooth settings.
+        v.setOnLongClickListener(view -> {
+            view.playSoundEffect(SoundEffectConstants.CLICK);
+            openBluetoothSettings();
+            return true;
+        });
+        v.setAlpha(0.6f);   // dimmed when idle; brightens to full on focus
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
             view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
+                    .alpha(f ? 1f : 0.6f)
                     .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
@@ -2355,7 +2402,6 @@ public class LauncherActivity extends Activity {
             // are factory-built (shared style with the rest of the
             // toolbar pills) and untouched by drawGearGlyph.
             private final Paint fill      = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint bgIdle    = makeBgIdlePaint();
             private final Paint bgFocus   = makeBgFocusPaint();
             private final Paint rim       = makeRimPaint();
             @Override protected void onDraw(Canvas c) {
@@ -2366,18 +2412,21 @@ public class LauncherActivity extends Activity {
                 float cx = w / 2f, cy = h / 2f;
                 float r = Math.min(cx, cy) * scale;
 
-                Paint plate = focused ? bgFocus : bgIdle;
-                c.drawCircle(cx, cy, r, plate);
-                c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
-
-                // Solid filled gear (v1.3.3 redesign — was a stroke-only
-                // line gear). The hole punches through with the SAME
-                // plate colour the pill body was just drawn with, so
-                // the cut-out reads continuous against the underlying
-                // dim backdrop / wallpaper.
-                int symbolColor = focused ? AppleStyle.SYMBOL_FOCUSED : AppleStyle.SYMBOL_IDLE;
-                AppleStyle.drawGearGlyph(c, cx, cy, r,
-                        symbolColor, plate.getColor(), fill);
+                // Minimal look: no plate when idle — the gear floats over the
+                // wallpaper (whole-view alpha is lowered when unfocused). On
+                // focus the frosted-white plate + rim returns as the selection
+                // indicator and the gear inverts to dark.
+                if (focused) {
+                    c.drawCircle(cx, cy, r, bgFocus);
+                    c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
+                    AppleStyle.drawGearGlyph(c, cx, cy, r,
+                            AppleStyle.SYMBOL_FOCUSED, bgFocus.getColor(), fill);
+                } else {
+                    // Idle: solid white cog with a transparent centre (no plate
+                    // colour to punch the hole against). View alpha dims it.
+                    AppleStyle.drawGearGlyph(c, cx, cy, r,
+                            AppleStyle.SYMBOL_IDLE, 0x00000000, fill);
+                }
             }
         };
         applyApplePillStyle(v);
@@ -2397,9 +2446,11 @@ public class LauncherActivity extends Activity {
             openSystemSettings();
             return true;
         });
+        v.setAlpha(0.6f);   // dimmed when idle; brightens to full on focus
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
             view.animate().scaleX(f ? BTN_FOCUS_SCALE : 1f).scaleY(f ? BTN_FOCUS_SCALE : 1f)
+                    .alpha(f ? 1f : 0.6f)
                     .setDuration(100).setInterpolator(FOCUS_EASE).start();
             view.invalidate();
         });
@@ -2492,6 +2543,70 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** Open Bluetooth settings (WiFi pill long-press). Falls back to the
+     *  general Settings screen, then a toast, on stripped ROMs. */
+    private void openBluetoothSettings() {
+        String[] actions = { Settings.ACTION_BLUETOOTH_SETTINGS, Settings.ACTION_SETTINGS };
+        for (String a : actions) {
+            try { startActivity(new Intent(a).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return; }
+            catch (Exception ignored) { /* try next */ }
+        }
+        showToast(getString(R.string.toast_no_settings));
+    }
+
+    /** Register a default-network callback so the WiFi pill glyph tracks
+     *  connect / disconnect live. Idempotent. ACCESS_NETWORK_STATE (a normal
+     *  install-time permission) gates this; on a denial / stripped ROM the
+     *  try/catch leaves the glyph in its last (default outline) state. */
+    private void registerNetworkCallback() {
+        if (netCallback != null) return;
+        try {
+            connMgr = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (connMgr == null) return;
+            netCallback = new android.net.ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(android.net.Network n) { postWifiRefresh(); }
+                @Override public void onLost(android.net.Network n) { postWifiRefresh(); }
+                @Override public void onCapabilitiesChanged(
+                        android.net.Network n, android.net.NetworkCapabilities caps) { postWifiRefresh(); }
+            };
+            connMgr.registerDefaultNetworkCallback(netCallback);
+        } catch (Exception ignored) { netCallback = null; }
+    }
+
+    private void unregisterNetworkCallback() {
+        if (connMgr != null && netCallback != null) {
+            try { connMgr.unregisterNetworkCallback(netCallback); } catch (Exception ignored) { }
+        }
+        netCallback = null;
+    }
+
+    private void postWifiRefresh() { uiHandler.post(this::refreshWifiState); }
+
+    /** Recompute WiFi-connected state; repaint the pill only on a change. */
+    private void refreshWifiState() {
+        boolean c = isWifiConnected();
+        if (c != wifiConnected) {
+            wifiConnected = c;
+            View nb = netBtn;
+            if (nb != null) nb.invalidate();
+        }
+    }
+
+    private boolean isWifiConnected() {
+        try {
+            android.net.ConnectivityManager cm = (connMgr != null) ? connMgr
+                    : (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            android.net.Network n = cm.getActiveNetwork();
+            if (n == null) return false;
+            android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(n);
+            return caps != null
+                    && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     final class RecyclingShelfView extends ViewGroup implements ReorderHost {
 
         private static final int BUFFER = 4;
@@ -2575,7 +2690,7 @@ public class LauncherActivity extends Activity {
             scroller = new OverScroller(ctx, SCROLL_EASE);
             cellW   = tileWpx;
             cellH   = cellHpx;
-            sidePad = dp(10);
+            sidePad = dp(12);
             edgePad = dp(48);
             stride  = cellW + sidePad * 2;
             setFocusable(false);
@@ -3712,7 +3827,7 @@ public class LauncherActivity extends Activity {
             scroller = new OverScroller(ctx, SCROLL_EASE);
             cellW     = tileWpx;
             cellH     = cellHpx;
-            sidePad   = dp(10);
+            sidePad   = dp(12);
             stride    = cellW + sidePad * 2;
             rowGap    = dp(14);
             rowStride = cellH + rowGap;
@@ -5291,6 +5406,18 @@ public class LauncherActivity extends Activity {
      *       storms on a held key. */
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        FrameLayout ao = aboutOverlay;
+        if (ao != null && ao.getVisibility() == View.VISIBLE) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (handleAboutKey(event.getKeyCode())) return true;
+                return super.dispatchKeyEvent(event);
+            }
+            // Mirror the settings panel's KEY_UP contract: only swallow the
+            // UP edge of keys we consume on DOWN; let device-control keys
+            // (volume / power / media) reach the platform.
+            if (isLetThroughKey(event.getKeyCode())) return super.dispatchKeyEvent(event);
+            return true;
+        }
         FrameLayout ko = keymapOverlay;
         if (ko != null && ko.getVisibility() == View.VISIBLE) {
             if (handleKeymapOverlayKey(event)) return true;
@@ -5397,6 +5524,9 @@ public class LauncherActivity extends Activity {
      *  re-open is queued. Drives the backdrop's stay-or-fade decision. */
     private boolean anyOverlayLogicallyOpen() {
         if (keymapOpenedFromSettings) return true;
+        if (aboutOpenedFromSettings) return true;
+        FrameLayout ao = aboutOverlay;
+        if (ao != null && ao.getVisibility() == View.VISIBLE) return true;
         FrameLayout sp = settingsOverlay;
         if (sp != null && sp.getVisibility() == View.VISIBLE) return true;
         FrameLayout ko = keymapOverlay;
@@ -5502,6 +5632,7 @@ public class LauncherActivity extends Activity {
                 R.string.settings_row_set_wallpaper,
                 R.string.settings_row_show_clock,
                 R.string.settings_row_system_settings,
+                R.string.settings_row_about,
         };
         for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
@@ -5746,18 +5877,15 @@ public class LauncherActivity extends Activity {
             if (indicatorView instanceof TextView) {
                 TextView ind = (TextView) indicatorView;
                 if (i == SETTINGS_ROW_SHOW_CLOCK) {
-                    // The toggle row's indicator carries an additional
-                    // channel of state: ON = ✓ visible, OFF = ✓ alpha-
-                    // dimmed (rendered nearly invisible) so the row's
-                    // height stays constant and the layout doesn't
-                    // shift when the toggle flips.
-                    ind.setText("\u2713");
-                    if (showClock) {
-                        ind.setTextColor(sel ? selTx : 0xFF7DD3FC); // sky cyan when on + idle
+                    // 3-state indicator (v1.4.9): show the current clock mode
+                    // as a short word so the row reads its own state at a
+                    // glance. OFF is dimmed; the active states use sky cyan.
+                    ind.setText(clockMode == CLOCK_FULL ? "Full"
+                              : clockMode == CLOCK_TIME_ONLY ? "Time" : "Off");
+                    if (clockMode == CLOCK_OFF) {
+                        ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
                     } else {
-                        // 0x33 alpha — visually reads as "off" without
-                        // collapsing the row layout.
-                        ind.setTextColor(sel ? 0x66111114 : 0x33FFFFFF);
+                        ind.setTextColor(sel ? selTx : 0xFF7DD3FC); // sky cyan when on + idle
                     }
                 } else {
                     ind.setTextColor(sel ? selTx : idleTx);
@@ -5827,38 +5955,419 @@ public class LauncherActivity extends Activity {
                 openStoragePicker();
                 break;
             case SETTINGS_ROW_SHOW_CLOCK:
-                // In-place toggle. Persist + apply + repaint indicator.
-                // Panel stays open so the user can flip multiple
-                // toggles in sequence (no toggle other than this one
-                // exists today, but the design accommodates future
-                // additions trivially).
-                showClock = !showClock;
+                // 3-state cycle (v1.4.9): FULL (time + day/date) → TIME_ONLY
+                // (just the time) → OFF (hidden) → FULL. Persist + apply +
+                // repaint indicator. Panel stays open so the user can cycle
+                // through the states in sequence.
+                clockMode = (clockMode + 1) % 3;
+                showClock = (clockMode != CLOCK_OFF);
                 prefs.edit()
-                        .putBoolean(KEY_SHOW_CLOCK, showClock).apply();
+                        .putInt(KEY_CLOCK_MODE, clockMode)
+                        .putBoolean(KEY_SHOW_CLOCK, showClock)   // keep the legacy key in sync
+                        .apply();
                 if (showClock) {
-                    // Rendering the clock for the first time after a
-                    // toggle: reset formatter so the next paint runs
-                    // unconditionally (the per-minute idempotency guard
-                    // would otherwise skip the redraw if the minute
-                    // hasn't changed since the launcher cold-started).
+                    // Re-render unconditionally: reset the formatter's
+                    // per-minute idempotency guard so flipping FULL↔TIME_ONLY
+                    // repaints immediately even within the same minute.
                     clockFmt.reset();
+                    TextView cvOn = clockView;
+                    if (cvOn != null) cvOn.setVisibility(View.VISIBLE);
                     startClock();
+                    // startClock() only re-renders when it transitions from
+                    // not-running to running; a FULL↔TIME_ONLY switch leaves it
+                    // already running, so force the paint here too — otherwise
+                    // the day/date line wouldn't appear/disappear until the next
+                    // minute tick (or a relaunch).
+                    tickClock(System.currentTimeMillis());
                 } else {
-                    // Hide pill and stop scheduling. clockFmt itself
-                    // doesn't need teardown — it's a tiny pooled
-                    // formatter that will simply not be invoked.
                     stopClock();
                     TextView cv = clockView;
                     if (cv != null) cv.setVisibility(View.GONE);
                 }
-                refreshSettingsRows(); // repaint the ✓ indicator
+                refreshSettingsRows(); // repaint the state indicator
                 break;
             case SETTINGS_ROW_SYSTEM_SETTINGS:
                 hideSettingsPanel();
                 openSystemSettings();
                 break;
+            case SETTINGS_ROW_ABOUT:
+                // Drill-through to the About card. Mark it as opened from the
+                // settings panel so Back returns here, mirroring the keymap
+                // card's keymapOpenedFromSettings contract.
+                pendingSettingsCursor = SETTINGS_ROW_ABOUT;
+                aboutOpenedFromSettings = true;
+                hideSettingsPanel();
+                showAboutOverlay();
+                break;
             default:
                 break;
+        }
+    }
+
+    // ── About overlay build / show / hide / navigate / QR ───────────────
+
+    /** App version string for the About card header, read from the installed
+     *  package so it always matches the actual build (auto-updates on every
+     *  release without a code change). */
+    private String appVersionName() {
+        try {
+            String v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            return (v != null) ? "v" + v : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** Lazy-build the About card on first {@link #showAboutOverlay}. */
+    private void buildAboutOverlay() {
+        FrameLayout r = root; if (r == null) return;
+        FrameLayout ov = new FrameLayout(this) {
+            @Override public boolean onTouchEvent(MotionEvent ev) {
+                if (ev.getAction() == MotionEvent.ACTION_DOWN) {
+                    android.widget.LinearLayout c = aboutCard;
+                    if (c != null) {
+                        float x = ev.getX(), y = ev.getY();
+                        float l = c.getX(), t = c.getY();
+                        float rt = l + c.getWidth(), b = t + c.getHeight();
+                        if (x < l || x > rt || y < t || y > b) { hideAboutOverlay(); return true; }
+                    }
+                }
+                return super.onTouchEvent(ev);
+            }
+        };
+        ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        ov.setVisibility(View.GONE);
+        ov.setClickable(true);
+        ov.setFocusable(true);
+
+        android.widget.LinearLayout card = new android.widget.LinearLayout(this);
+        card.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.graphics.drawable.GradientDrawable cardBg =
+                new android.graphics.drawable.GradientDrawable();
+        cardBg.setColor(0xF21A1A1F);
+        cardBg.setStroke(Math.max(1, dp(1) / 2), 0x1AFFFFFF);
+        cardBg.setCornerRadius(dp(18));
+        card.setBackground(cardBg);
+        card.setPadding(dp(18), dp(14), dp(18), dp(14));
+        card.setClipChildren(false);
+        card.setClipToPadding(false);
+
+        final int contentW = dp(270);
+
+        // ── List sub-view ──
+        android.widget.LinearLayout list = new android.widget.LinearLayout(this);
+        list.setOrientation(android.widget.LinearLayout.VERTICAL);
+
+        // Version (top, no selector) — auto from the installed package.
+        TextView version = new TextView(this);
+        version.setText(getString(R.string.about_app_name) + "   " + appVersionName());
+        version.setTextColor(0xFFFFFFFF);
+        version.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 17);
+        version.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        version.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams vLp =
+                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
+        vLp.bottomMargin = dp(14);
+        list.addView(version, vLp);
+
+        // Ko-fi support row (selectable, leading cup icon).
+        aboutRows[ABOUT_ROW_KOFI] = buildAboutRow(getString(R.string.about_kofi), makeKofiIcon(), contentW);
+        list.addView(aboutRows[ABOUT_ROW_KOFI]);
+
+        // Downloader code (no selector).
+        TextView code = new TextView(this);
+        code.setText(getString(R.string.about_downloader_code, ABOUT_DOWNLOADER_CODE));
+        code.setTextColor(0xB3FFFFFF);
+        code.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        code.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        code.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams codeLp =
+                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
+        codeLp.topMargin = dp(4);
+        codeLp.bottomMargin = dp(4);
+        list.addView(code, codeLp);
+
+        // GitHub latest-release row (selectable, no icon).
+        aboutRows[ABOUT_ROW_GITHUB] = buildAboutRow(getString(R.string.about_check_github), null, contentW);
+        list.addView(aboutRows[ABOUT_ROW_GITHUB]);
+
+        // Footer credit (no selector).
+        TextView credit = new TextView(this);
+        credit.setText(R.string.about_made_by);
+        credit.setTextColor(0x80FFFFFF);
+        credit.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        credit.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        credit.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams crLp =
+                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
+        crLp.topMargin = dp(14);
+        list.addView(credit, crLp);
+
+        // Per-row click handlers (mirror d-pad activation).
+        for (int i = 0; i < aboutRows.length; i++) {
+            final int idx = i;
+            android.widget.LinearLayout row = aboutRows[i];
+            if (row == null) continue;
+            row.setClickable(true);
+            row.setOnClickListener(v -> {
+                v.playSoundEffect(SoundEffectConstants.CLICK);
+                aboutSelectedRow = idx;
+                refreshAboutRows();
+                showAboutQr(idx);
+            });
+        }
+
+        // ── QR sub-view (swaps in over the list) ──
+        android.widget.LinearLayout qr = new android.widget.LinearLayout(this);
+        qr.setOrientation(android.widget.LinearLayout.VERTICAL);
+        qr.setGravity(Gravity.CENTER_HORIZONTAL);
+        qr.setVisibility(View.GONE);
+
+        ImageView qrImg = new ImageView(this);
+        // White plate behind the QR so the quiet zone always reads cleanly
+        // regardless of the (dark) card colour.
+        android.graphics.drawable.GradientDrawable qrPlate =
+                new android.graphics.drawable.GradientDrawable();
+        qrPlate.setColor(0xFFFFFFFF);
+        qrPlate.setCornerRadius(dp(8));
+        qrImg.setBackground(qrPlate);
+        qrImg.setPadding(dp(6), dp(6), dp(6), dp(6));
+        int qrSz = dp(216);
+        qr.addView(qrImg, new android.widget.LinearLayout.LayoutParams(qrSz, qrSz));
+
+        TextView cap = new TextView(this);
+        cap.setTextColor(0xCCFFFFFF);
+        cap.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        cap.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        cap.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams capLp =
+                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
+        capLp.topMargin = dp(12);
+        qr.addView(cap, capLp);
+
+        card.addView(list);
+        card.addView(qr);
+
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        cardLp.gravity = Gravity.CENTER;
+        card.setLayoutParams(cardLp);
+        ov.addView(card);
+        r.addView(ov);
+
+        aboutOverlay   = ov;
+        aboutCard      = card;
+        aboutListView  = list;
+        aboutQrView    = qr;
+        aboutQrImage   = qrImg;
+        aboutQrCaption = cap;
+    }
+
+    /** Build one About list row: optional leading icon + label, with a
+     *  rounded background that the selection paint fills. Full content width
+     *  so the selection pill spans the card. */
+    private android.widget.LinearLayout buildAboutRow(String label, View icon, int width) {
+        android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(9), dp(14), dp(9));
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setCornerRadius(dp(10));
+        bg.setColor(Color.TRANSPARENT);
+        row.setBackground(bg);
+        if (icon != null) {
+            android.widget.LinearLayout.LayoutParams ic =
+                    new android.widget.LinearLayout.LayoutParams(dp(22), dp(22));
+            ic.setMarginEnd(dp(10));
+            row.addView(icon, ic);
+        }
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextColor(0xE6FFFFFF);
+        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
+        tv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        tv.setSingleLine(true);
+        tv.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(tv, new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        android.widget.LinearLayout.LayoutParams rlp =
+                new android.widget.LinearLayout.LayoutParams(width, WRAP);
+        rlp.topMargin = dp(2);
+        rlp.bottomMargin = dp(2);
+        row.setLayoutParams(rlp);
+        return row;
+    }
+
+    /** A small Ko-fi-style coffee cup, drawn into a bitmap (no asset). */
+    private View makeKofiIcon() {
+        int s = Math.max(1, dp(22));
+        Bitmap b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas c = new android.graphics.Canvas(b);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final int kofiRed = 0xFFFF5E5B;
+        // Cup body.
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(kofiRed);
+        android.graphics.RectF body =
+                new android.graphics.RectF(s * 0.16f, s * 0.42f, s * 0.64f, s * 0.84f);
+        c.drawRoundRect(body, s * 0.07f, s * 0.07f, p);
+        // Handle.
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(s * 0.08f);
+        android.graphics.RectF handle =
+                new android.graphics.RectF(s * 0.58f, s * 0.48f, s * 0.84f, s * 0.78f);
+        c.drawArc(handle, -70f, 140f, false, p);
+        // Steam.
+        p.setColor(0xCCFFFFFF);
+        p.setStrokeWidth(s * 0.05f);
+        p.setStrokeCap(Paint.Cap.ROUND);
+        c.drawLine(s * 0.30f, s * 0.34f, s * 0.30f, s * 0.14f, p);
+        c.drawLine(s * 0.46f, s * 0.34f, s * 0.46f, s * 0.14f, p);
+        ImageView iv = new ImageView(this);
+        iv.setImageBitmap(b);
+        return iv;
+    }
+
+    private void showAboutOverlay() {
+        if (destroyed) return;
+        if (aboutOverlay == null) buildAboutOverlay();
+        final FrameLayout ov = aboutOverlay;
+        if (ov == null) return;
+        RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
+        ensureOverlayBackdropVisible();
+
+        aboutShowingQr = false;
+        aboutSelectedRow = 0;
+        if (aboutListView != null) aboutListView.setVisibility(View.VISIBLE);
+        if (aboutQrView != null) aboutQrView.setVisibility(View.GONE);
+        refreshAboutRows();
+
+        ov.setVisibility(View.VISIBLE);
+        ov.bringToFront();
+        ov.requestFocus();
+
+        final android.widget.LinearLayout card = aboutCard;
+        if (card != null) {
+            card.animate().cancel();
+            card.setAlpha(0f);
+            card.setScaleX(0.96f); card.setScaleY(0.92f);
+            card.post(() -> {
+                if (card != aboutCard) return;
+                card.setPivotX(card.getWidth() / 2f);
+                card.setPivotY(card.getHeight() / 2f);
+                card.animate()
+                        .alpha(1f).scaleX(1f).scaleY(1f)
+                        .setDuration(160).setInterpolator(MENU_IN).withLayer().start();
+            });
+        }
+    }
+
+    private void hideAboutOverlay() {
+        final FrameLayout ov = aboutOverlay;
+        if (ov == null) return;
+        final boolean returnToSettings = aboutOpenedFromSettings;
+        aboutOpenedFromSettings = false;
+        aboutShowingQr = false;
+        final android.widget.LinearLayout card = aboutCard;
+        final Runnable end = () -> {
+            if (ov != aboutOverlay) return;
+            ov.setVisibility(View.GONE);
+            if (returnToSettings) {
+                // Re-open the settings panel on the About row, mirroring the
+                // keymap → settings back-stack behaviour.
+                pendingSettingsCursor = SETTINGS_ROW_ABOUT;
+                showSettingsPanel();
+            } else {
+                dismissOverlayBackdropIfIdle();
+            }
+        };
+        if (card != null) {
+            card.animate().cancel();
+            card.animate()
+                    .alpha(0f).scaleX(0.96f).scaleY(0.92f)
+                    .setDuration(110).setInterpolator(MENU_OUT).withLayer()
+                    .withEndAction(end).start();
+        } else {
+            end.run();
+        }
+    }
+
+    /** Swap the list out for the QR view of the given row's link. */
+    private void showAboutQr(int which) {
+        String url = (which == ABOUT_ROW_KOFI) ? ABOUT_KOFI_URL : ABOUT_GITHUB_RELEASES;
+        Bitmap bmp = QrCode.render(url, dp(204), 0xFF101014, 0xFFFFFFFF);
+        if (aboutQrImage != null) aboutQrImage.setImageBitmap(bmp);
+        if (aboutQrCaption != null) {
+            aboutQrCaption.setText(which == ABOUT_ROW_KOFI
+                    ? R.string.about_qr_kofi_caption
+                    : R.string.about_qr_github_caption);
+        }
+        aboutShowingQr = true;
+        if (aboutListView != null) aboutListView.setVisibility(View.GONE);
+        if (aboutQrView != null) aboutQrView.setVisibility(View.VISIBLE);
+    }
+
+    /** Return from the QR view back to the row list. */
+    private void showAboutList() {
+        aboutShowingQr = false;
+        if (aboutQrView != null) aboutQrView.setVisibility(View.GONE);
+        if (aboutListView != null) aboutListView.setVisibility(View.VISIBLE);
+        refreshAboutRows();
+    }
+
+    /** Paint the selected About row's pill + invert its text. */
+    private void refreshAboutRows() {
+        final int selBg = 0xFFEFEFEF, idleBg = Color.TRANSPARENT;
+        final int selTx = 0xFF111114, idleTx = 0xE6FFFFFF;
+        for (int i = 0; i < aboutRows.length; i++) {
+            android.widget.LinearLayout row = aboutRows[i];
+            if (row == null) continue;
+            boolean sel = (i == aboutSelectedRow);
+            android.graphics.drawable.Drawable bg = row.getBackground();
+            if (bg instanceof android.graphics.drawable.GradientDrawable) {
+                ((android.graphics.drawable.GradientDrawable) bg).setColor(sel ? selBg : idleBg);
+            }
+            for (int c = 0; c < row.getChildCount(); c++) {
+                View ch = row.getChildAt(c);
+                if (ch instanceof TextView) ((TextView) ch).setTextColor(sel ? selTx : idleTx);
+            }
+        }
+    }
+
+    /** D-pad / OK / Back handling for the About overlay. */
+    private boolean handleAboutKey(int kc) {
+        if (aboutShowingQr) {
+            // Any of OK / Back returns to the list; swallow navigation.
+            switch (kc) {
+                case KeyEvent.KEYCODE_DPAD_CENTER:
+                case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_BUTTON_A:
+                case KeyEvent.KEYCODE_BACK:
+                    showAboutList();
+                    return true;
+                default:
+                    return true;
+            }
+        }
+        switch (kc) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                aboutSelectedRow = (aboutSelectedRow + aboutRows.length - 1) % aboutRows.length;
+                refreshAboutRows();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                aboutSelectedRow = (aboutSelectedRow + 1) % aboutRows.length;
+                refreshAboutRows();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+                showAboutQr(aboutSelectedRow);
+                return true;
+            case KeyEvent.KEYCODE_BACK:
+                hideAboutOverlay();
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -7922,7 +8431,16 @@ public class LauncherActivity extends Activity {
         // clock" toggle is a single bundled control: when true the formatter
         // renders day-of-week + time, when false the pill is hidden and no
         // minute tick is scheduled (zero CPU per minute).
-        showClock = prefs.getBoolean(KEY_SHOW_CLOCK, true);
+        // Clock display preference. v1.4.9 replaced the boolean show/hide with
+        // a 3-state mode (full → time-only → off), persisted as an int under
+        // KEY_CLOCK_MODE. Pre-1.4.9 installs only have the boolean KEY_SHOW_CLOCK,
+        // so migrate from it the first time (true → FULL, false → OFF).
+        int storedMode = prefs.getInt(KEY_CLOCK_MODE, -1);
+        if (storedMode < CLOCK_FULL || storedMode > CLOCK_OFF) {
+            storedMode = prefs.getBoolean(KEY_SHOW_CLOCK, true) ? CLOCK_FULL : CLOCK_OFF;
+        }
+        clockMode = storedMode;
+        showClock = (clockMode != CLOCK_OFF);   // convenience gate for existing tick/visibility code
     }
 
     @SuppressWarnings("deprecation")
@@ -8024,7 +8542,7 @@ public class LauncherActivity extends Activity {
      *  (slightly more rounded per user request), capped so tiles don't get
      *  huge on very wide panels. */
     private void computeTileDims() {
-        int sidePad = dp(10);
+        int sidePad = dp(12);
         int avail   = Math.max(0, screenW - dp(24) * 2);
         int stride  = avail > 0 ? avail / 6 : dp(150);
         int cw = stride - sidePad * 2;

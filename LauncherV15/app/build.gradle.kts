@@ -401,8 +401,12 @@ android {
         // hide-refocus fix, instant grid moves, divider + label + background
         // polish, drawer-close cross-fade, and a compact hidden-apps panel.
         // No new features, no API changes — SemVer PATCH bump.
-        versionCode   = 26
-        versionName   = "1.4.8"
+        // 1.4.9: About card (version + Ko-fi QR + Downloader code + GitHub
+        // release QR + credit), 3-state clock (full → time-only → off) with a
+        // bigger plate-less clock + day/date line, minimal floating Wi-Fi/gear
+        // icons, and a touch more spacing between app tiles.
+        versionCode   = 27
+        versionName   = "1.4.9"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
