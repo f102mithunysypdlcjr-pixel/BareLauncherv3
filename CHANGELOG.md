@@ -43,9 +43,11 @@ encoder (no library, no network).
 - **Drawer background** is now a transparent grey tint (was a white veil
   that washed out over light wallpapers); the divider between the home
   row and the grid is centred between the two app rows.
-- **Drawer app move matches the home shelf**: long-press goes straight to
-  Move (left/right reorder immediately, no extra OK); up/down still reach
-  Hide / Uninstall / App info, and OK on Move enables full 2-D moves.
+- **Unified, minimal app-move flow** on both the home shelf and the
+  drawer: long-press opens the menu, press OK on **Move** to start moving,
+  then the D-pad reorders (left/right on the shelf; any direction in the
+  drawer); OK or Back commits. Same steps everywhere — no immediate-move
+  shortcuts.
 - **Slightly more spacing between app tiles.**
 
 ## [1.4.8] — 2026-06-24

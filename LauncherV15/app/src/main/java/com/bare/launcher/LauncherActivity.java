@@ -2692,13 +2692,12 @@ public class LauncherActivity extends Activity {
         boolean reorderMode   = false;
         int     dragIndex     = -1;
 
-        // True once the user has pressed LEFT/RIGHT during the current
-        // reorder session — i.e. they've actually started moving the app.
-        // While true, swapWithNeighbour() keeps the context menu hidden
-        // instead of re-showing it on every swap, so the menu doesn't sit
-        // on top of (and obscure) the icon sliding into place. Reset on
-        // every enter/exit so a fresh long-press always shows the menu.
+        // True once the user has confirmed "Move" from the menu (OK on the
+        // Move row). Only then does LEFT/RIGHT reorder the app. Reset on every
+        // enter/exit. The menu is hidden while moving so it doesn't sit over
+        // the sliding icon.
         boolean menuDismissedForMove = false;
+        boolean moveActive = false;   // stage 2: LEFT/RIGHT perform the move
 
         // True while a programmatic D-pad-held navigation is being processed.
         // Triggers two short-circuits in CellView.onFocusChange:
@@ -2768,7 +2767,7 @@ public class LauncherActivity extends Activity {
             if (!reorderMode) return;
             menuSelection = MENU_MOVE;
             LauncherActivity.this.updateMenuHighlight();
-            exitReorderMode(true);   // "Move" confirm persists the order
+            enterActiveMove();   // "Move" confirm → start moving (LEFT/RIGHT)
         }
 
         void enterReorderMode(int idx) {
@@ -2777,6 +2776,7 @@ public class LauncherActivity extends Activity {
             dragIndex     = idx;
             menuSelection = MENU_MOVE;
             menuDismissedForMove = false;
+            moveActive    = false;
             LauncherActivity.this.menuHost = this;   // shelf owns the shared menu now
             rebindAll();
             // Lazy-init the context menu overlay on first entry. Cold start
@@ -2795,6 +2795,7 @@ public class LauncherActivity extends Activity {
             reorderMode = false;
             dragIndex   = -1;
             menuDismissedForMove = false;
+            moveActive  = false;
             hideContextMenu();
             if (persist) saveOrder();
             rebindAll();
@@ -2811,18 +2812,15 @@ public class LauncherActivity extends Activity {
             });
         }
 
-        /** Bring the context menu back if a move (swapWithNeighbour) hid it.
-         *  Called from DPAD_UP/DOWN before a real selection change — those
-         *  keys are explicit "I want to look at the menu" intent, unlike
-         *  LEFT/RIGHT which mean "keep moving". showContextMenu() already
-         *  cancels any in-flight hide animation and the existing alpha-check
-         *  guard in hideContextMenu()'s withEndAction protects against the
-         *  cancel/restart race, so no extra synchronization is needed here. */
-        private void reshowMenuIfHidden() {
-            if (!menuDismissedForMove) return;
-            menuDismissedForMove = false;
+        /** Stage-2 entry from the menu's "Move" row: hide the menu so it
+         *  doesn't sit over the sliding icon; LEFT/RIGHT now reorder the app.
+         *  OK or BACK commits. */
+        private void enterActiveMove() {
+            moveActive = true;
+            menuDismissedForMove = true;
+            hideContextMenu();
             CellView cv = attached.get(dragIndex);
-            if (cv != null) LauncherActivity.this.showContextMenu(cv);
+            if (cv != null) LauncherActivity.this.positionRing(cv);
         }
 
         void swapWithNeighbour(int targetIdx) {
@@ -3550,38 +3548,46 @@ public class LauncherActivity extends Activity {
                         if (isCenterKey && suppressCenterUntilUp) return true;
 
                         if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+
+                        if (moveActive) {
+                            // Stage 2 — Move confirmed: LEFT/RIGHT reorder,
+                            // OK / BACK commit.
+                            switch (kc) {
+                                case KeyEvent.KEYCODE_DPAD_LEFT:
+                                    swapWithNeighbour(dragIndex - 1); return true;
+                                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                                    swapWithNeighbour(dragIndex + 1); return true;
+                                case KeyEvent.KEYCODE_DPAD_CENTER:
+                                case KeyEvent.KEYCODE_ENTER:
+                                case KeyEvent.KEYCODE_BUTTON_A:
+                                case KeyEvent.KEYCODE_BACK:
+                                    exitReorderMode(true); return true;   // commit
+                                default:
+                                    return true;   // swallow UP/DOWN — no vertical move on the shelf
+                            }
+                        }
+
+                        // Stage 1 — menu shown: UP/DOWN navigate, OK selects.
                         switch (kc) {
                             case KeyEvent.KEYCODE_DPAD_LEFT:
-                                if (menuSelection == MENU_MOVE) swapWithNeighbour(dragIndex - 1);
-                                return true;
                             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                                if (menuSelection == MENU_MOVE) swapWithNeighbour(dragIndex + 1);
-                                return true;
+                                return true;   // no move until "Move" is confirmed
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                // Cycle MOVE → APP_INFO → UNINSTALL (top); stop at top.
-                                // Re-show the menu on an actual selection change — UP/DOWN
-                                // are explicit menu-navigation keys, so if the menu is
-                                // currently hidden (post-move, see menuDismissedForMove)
-                                // the user is signalling they want to look at it again.
-                                if      (menuSelection == MENU_MOVE)     { reshowMenuIfHidden(); menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_APP_INFO) { reshowMenuIfHidden(); menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_UNINSTALL){ reshowMenuIfHidden(); menuSelection = MENU_HIDE;     updateMenuHighlight(); }
+                                if      (menuSelection == MENU_MOVE)     { menuSelection = MENU_APP_INFO;  updateMenuHighlight(); }
+                                else if (menuSelection == MENU_APP_INFO) { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_UNINSTALL){ menuSelection = MENU_HIDE;      updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                // Cycle UNINSTALL → APP_INFO → MOVE; DOWN at MOVE confirms.
-                                // No reshow on the confirm branch — it's about to exit and
-                                // hide anyway, so showing first would just flash the menu.
-                                if      (menuSelection == MENU_HIDE)      { reshowMenuIfHidden(); menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_UNINSTALL) { reshowMenuIfHidden(); menuSelection = MENU_APP_INFO; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_APP_INFO)  { reshowMenuIfHidden(); menuSelection = MENU_MOVE;     updateMenuHighlight(); }
-                                else exitReorderMode(true);
+                                if      (menuSelection == MENU_HIDE)      { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
+                                else if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_APP_INFO;  updateMenuHighlight(); }
+                                else if (menuSelection == MENU_APP_INFO)  { menuSelection = MENU_MOVE;      updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                             case KeyEvent.KEYCODE_BUTTON_A:
                                 if      (menuSelection == MENU_UNINSTALL) triggerUninstall();
                                 else if (menuSelection == MENU_APP_INFO)  triggerAppInfo();
                                 else if (menuSelection == MENU_HIDE)      RecyclingShelfView.this.onMenuHide();
-                                else exitReorderMode(true);
+                                else                                      enterActiveMove();   // MOVE
                                 return true;
                             case KeyEvent.KEYCODE_BACK:
                                 exitReorderMode(false); return true;
@@ -3864,10 +3870,6 @@ public class LauncherActivity extends Activity {
         boolean closing      = false;
         int     dragIndex    = -1;
         int     menuSelection = RecyclingShelfView.MENU_MOVE;
-        /** Mirrors the home shelf: once the user starts moving (first L/R),
-         *  the menu hides so it can't sit over the sliding cell; UP/DOWN
-         *  reshow + navigate it again. */
-        boolean menuDismissedForMove = false;
         boolean fastNav      = false;
 
         AppDrawer(Context ctx) {
@@ -4338,7 +4340,6 @@ public class LauncherActivity extends Activity {
             if (reorderMode || idx < 0 || idx >= displayed.size()) return;
             reorderMode = true;
             moveActive  = false;
-            menuDismissedForMove = false;
             dragIndex   = idx;
             focusedIndex = idx;
             menuSelection = RecyclingShelfView.MENU_MOVE;
@@ -4357,15 +4358,6 @@ public class LauncherActivity extends Activity {
             hideContextMenu();
             DrawerCell cv = attached.get(dragIndex);
             if (cv != null) LauncherActivity.this.positionRing(cv);
-        }
-
-        /** Re-show the context menu over the dragged cell if a prior L/R move
-         *  hid it (mirrors the home shelf's reshow-on-UP/DOWN behaviour). */
-        private void reshowMenuIfHidden() {
-            if (!menuDismissedForMove) return;
-            menuDismissedForMove = false;
-            DrawerCell cv = attached.get(dragIndex);
-            if (cv != null) LauncherActivity.this.showContextMenu(cv);
         }
 
         void exitReorderMode(boolean persist) {
@@ -4599,38 +4591,21 @@ public class LauncherActivity extends Activity {
                                 default: return false;
                             }
                         }
-                        // Stage 1 — menu shown. LEFT/RIGHT move immediately
-                        // (like the home shelf, no OK needed); UP/DOWN cycle
-                        // the menu (and reshow it if a move hid it); OK on Move
-                        // enters full 2-D move (for vertical promote/demote).
+                        // Stage 1 — menu shown: UP/DOWN navigate, OK selects.
                         switch (kc) {
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                reshowMenuIfHidden();
                                 if      (menuSelection == RecyclingShelfView.MENU_MOVE)     { menuSelection = RecyclingShelfView.MENU_APP_INFO;  updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_APP_INFO) { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL){ menuSelection = RecyclingShelfView.MENU_HIDE;     updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                reshowMenuIfHidden();
                                 if      (menuSelection == RecyclingShelfView.MENU_HIDE)      { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL) { menuSelection = RecyclingShelfView.MENU_APP_INFO; updateMenuHighlight(); }
                                 else if (menuSelection == RecyclingShelfView.MENU_APP_INFO)  { menuSelection = RecyclingShelfView.MENU_MOVE;     updateMenuHighlight(); }
                                 return true;
                             case KeyEvent.KEYCODE_DPAD_LEFT:
                             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                                // Move right away when Move is selected. The
-                                // menu hides on the first move so it doesn't
-                                // sit over the sliding cell (UP/DOWN brings it
-                                // back). When another menu item is selected,
-                                // L/R are swallowed (no horizontal action).
-                                if (menuSelection == RecyclingShelfView.MENU_MOVE) {
-                                    if (!menuDismissedForMove) {
-                                        menuDismissedForMove = true;
-                                        hideContextMenu();
-                                    }
-                                    moveDir(kc);
-                                }
-                                return true;
+                                return true; // no move until "Move" is confirmed (stage 2)
                             case KeyEvent.KEYCODE_DPAD_CENTER:
                             case KeyEvent.KEYCODE_ENTER:
                             case KeyEvent.KEYCODE_BUTTON_A:
