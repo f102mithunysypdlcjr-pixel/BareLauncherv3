@@ -677,6 +677,13 @@ public class LauncherActivity extends Activity {
     private android.widget.LinearLayout aboutQrView    = null;  // QR sub-view (swaps with the list)
     private ImageView                   aboutQrImage   = null;
     private TextView                    aboutQrCaption = null;
+    /** Clickable link shown beneath the QR (opens the same URL in the user's
+     *  browser, for devices that have one). The Ko-fi QR shows the raw URL;
+     *  the GitHub QR shows a short "BareLauncher latest version" label. */
+    private TextView                    aboutQrLink    = null;
+    /** URL the {@link #aboutQrLink} / QR-page OK press opens. Set by
+     *  {@link #showAboutQr(int)} to match the currently shown QR. */
+    private String                      aboutQrUrl     = null;
     private final android.widget.LinearLayout[] aboutRows = new android.widget.LinearLayout[2];
     private int                         aboutSelectedRow = 0;
     private boolean                     aboutOpenedFromSettings = false;
@@ -1512,6 +1519,7 @@ public class LauncherActivity extends Activity {
         settingsOverlay = null; settingsCard = null; settingsColumn = null;
         aboutOverlay = null; aboutCard = null; aboutListView = null;
         aboutQrView = null; aboutQrImage = null; aboutQrCaption = null;
+        aboutQrLink = null; aboutQrUrl = null;
         aboutRows[0] = null; aboutRows[1] = null;
         menuOverlay = null; menuHide = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
         keymapOverlay = null; keymapColumn = null; keymapCard = null;
@@ -2357,12 +2365,11 @@ public class LauncherActivity extends Activity {
         };
         applyApplePillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
-        // Short-press → WiFi settings; long-press → Bluetooth / Remote & accessories.
-        v.setOnLongClickListener(view -> {
-            view.playSoundEffect(SoundEffectConstants.CLICK);
-            openRemoteAccessories();
-            return true;
-        });
+        // Short-press → WiFi / network settings. (The long-press → Bluetooth
+        // shortcut was removed in v1.5.x: it was unreliable across TV ROMs —
+        // the accessory-pairing activity name varies and many boxes resolved
+        // none of them — so it read as a dead gesture. WiFi long-press is now
+        // unbound.)
         v.setAlpha(0.6f);   // dimmed when idle; brightens to full on focus
         v.setOnFocusChangeListener((view, f) -> {
             view.animate().cancel();
@@ -2569,51 +2576,6 @@ public class LauncherActivity extends Activity {
         } catch (Exception ignored) {
             showToast(getString(R.string.toast_no_settings));
         }
-    }
-
-    /** Open the device's Bluetooth / "Remote & accessories" screen (WiFi pill
-     *  long-press). On Android TV the pairing screen is a dedicated settings
-     *  activity whose class name varies by ROM, so we try a broad set of known
-     *  components first, then the standard Bluetooth-settings action, picking
-     *  the first that actually resolves.
-     *
-     *  <p>Deliberately does NOT fall back to general System Settings: the gear
-     *  pill already opens that, so silently landing there made the long-press
-     *  look broken (it just duplicated the gear). When no Bluetooth/accessories
-     *  target exists on the ROM we surface an honest toast instead. */
-    private void openRemoteAccessories() {
-        // 1) Android TV "Remote & accessories" / accessory-pairing activities,
-        //    plus the phone-style Bluetooth settings activity. Covers AOSP
-        //    Android TV, Google TV, and phone/tablet ROMs. The first that the
-        //    PackageManager can resolve wins.
-        String[][] components = {
-                // AOSP / Google TV "Remote & accessories" list (the native screen).
-                { "com.android.tv.settings", "com.android.tv.settings.accessories.AccessoriesActivity" },
-                { "com.android.tv.settings", "com.android.tv.settings.accessories.AccessorySettingsActivity" },
-                { "com.android.tv.settings", "com.android.tv.settings.connectivity.BluetoothPreferenceActivity" },
-                // Direct accessory-pairing flow (older TvSettings builds expose
-                // only this; it opens the "searching for accessories" screen).
-                { "com.android.tv.settings", "com.android.tv.settings.accessories.AddAccessoryActivity" },
-                // Phone / tablet (and some TV ROMs that reuse the handset
-                // Settings package) Bluetooth list.
-                { "com.android.settings", "com.android.settings.Settings$BluetoothSettingsActivity" },
-                { "com.android.settings", "com.android.settings.bluetooth.BluetoothSettings" },
-        };
-        for (String[] cn : components) {
-            Intent i = new Intent().setClassName(cn[0], cn[1])
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            if (tryStartActivityResolved(i)) return;
-        }
-        // 2) Standard Bluetooth settings action (phones / most TV ROMs that
-        //    don't expose the activity under a name we know).
-        Intent bt = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (tryStartActivityResolved(bt)) return;
-        // 3) No Bluetooth/accessories screen on this ROM. Tell the user rather
-        //    than silently opening general Settings (which the gear already
-        //    does — the duplication is exactly what this long-press should
-        //    NOT be).
-        showToast(getString(R.string.toast_no_bluetooth));
     }
 
     /** Register a default-network callback so the WiFi pill glyph tracks
@@ -3010,6 +2972,25 @@ public class LauncherActivity extends Activity {
          *  shelf then has to clamp — visible as a brief mis-positioned
          *  ring before snap-back). */
         int lastIndex() { return displayed.isEmpty() ? 0 : displayed.size() - 1; }
+
+        /** Re-decode and re-deliver the banner tile for any on-screen cell
+         *  bound to {@code pkg}. Called from the loadApps reconcile after a
+         *  package replace/update so the updated app's new banner appears
+         *  immediately instead of waiting for the cell to recycle. The caller
+         *  evicts the bannerCache entry first, so {@code loadBannerAsync}
+         *  re-decodes from the freshly-grafted ResolveInfo. UI-thread only. */
+        void refreshBanner(String pkg) {
+            if (pkg == null) return;
+            for (int i = 0; i < attached.size(); i++) {
+                CellView cv = attached.valueAt(i);
+                if (cv != null && cv.boundApp != null
+                        && pkg.equals(cv.boundApp.packageName)) {
+                    cv.iconBitmap = null;
+                    cv.invalidate();
+                    LauncherActivity.this.loadBannerAsync(cv.boundApp, cv);
+                }
+            }
+        }
 
         /** Programmatic focus jump.
          *  @param snap  true → no smooth-scroll animation. Used for held
@@ -4178,6 +4159,22 @@ public class LauncherActivity extends Activity {
             }
         }
 
+        /** Drawer counterpart of {@link RecyclingShelfView#refreshBanner} —
+         *  re-decode the banner for any on-screen drawer cell bound to
+         *  {@code pkg} after a package update. UI-thread only. */
+        void refreshBanner(String pkg) {
+            if (pkg == null) return;
+            for (int i = 0; i < attached.size(); i++) {
+                DrawerCell cv = attached.valueAt(i);
+                if (cv != null && cv.boundApp != null
+                        && pkg.equals(cv.boundApp.packageName)) {
+                    cv.iconBitmap = null;
+                    cv.invalidate();
+                    LauncherActivity.this.loadBannerAsync(cv.boundApp, cv);
+                }
+            }
+        }
+
         private void doScrollTo(int y) {
             int newY = clampScrollY(y);
             if (newY == scrollY) return;
@@ -5000,6 +4997,28 @@ public class LauncherActivity extends Activity {
                                     if (c2 != null) c2.remove(old.packageName);
                                     iconInflight.remove(old.packageName);
                                     preWarmIcon(old);
+                                    // v1.5.x: the home / drawer cells display
+                                    // BANNER tiles, not the round chip icon — so
+                                    // a package replace must ALSO drop the cached
+                                    // banner (which could have been re-decoded
+                                    // from the STALE ResolveInfo in the window
+                                    // between the broadcast and this reconcile)
+                                    // and force any on-screen cell to re-decode
+                                    // from the now-fresh ri. Without this the
+                                    // updated app kept its old banner — and a
+                                    // banner generated from a stale ri's icon
+                                    // resource id is exactly how the historical
+                                    // "icon falls back to the stock Android icon
+                                    // after an update" bug surfaced. The fresh
+                                    // ri was grafted onto `old` just above, so
+                                    // loadBannerAsync now resolves the new art.
+                                    LruCache<String, Bitmap> bc = bannerCache;
+                                    if (bc != null) bc.remove(old.packageName);
+                                    bannerInflight.remove(old.packageName);
+                                    RecyclingShelfView sb = shelf;
+                                    if (sb != null) sb.refreshBanner(old.packageName);
+                                    AppDrawer db = drawer;
+                                    if (db != null) db.refreshBanner(old.packageName);
                                 }
                             }
                             pendingIconInvalidations.clear();
@@ -6230,6 +6249,37 @@ public class LauncherActivity extends Activity {
         capLp.topMargin = dp(12);
         qr.addView(cap, capLp);
 
+        // Clickable link under the QR — opens the same URL in the user's
+        // browser (for boxes that have one). Styled as a rounded pill so it
+        // reads as a button; it is the QR page's single actionable element,
+        // so OK on the QR page activates it (see handleAboutKey). Touch
+        // devices get the OnClickListener too. Dependency-free: a plain
+        // ACTION_VIEW intent, guarded so a browser-less TV just shows a toast.
+        TextView link = new TextView(this);
+        link.setTextColor(0xFF8AB4F8);   // accent "link" blue
+        link.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+        link.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        link.setGravity(Gravity.CENTER);
+        link.setSingleLine(true);
+        link.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        link.setPadding(dp(14), dp(9), dp(14), dp(9));
+        android.graphics.drawable.GradientDrawable linkBg =
+                new android.graphics.drawable.GradientDrawable();
+        linkBg.setCornerRadius(dp(10));
+        linkBg.setColor(0x1AFFFFFF);
+        linkBg.setStroke(Math.max(1, dp(1) / 2), 0x338AB4F8);
+        link.setBackground(linkBg);
+        link.setClickable(true);
+        link.setFocusable(false);   // d-pad activation is handled in handleAboutKey
+        link.setOnClickListener(v -> {
+            v.playSoundEffect(SoundEffectConstants.CLICK);
+            openInBrowser(aboutQrUrl);
+        });
+        android.widget.LinearLayout.LayoutParams linkLp =
+                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
+        linkLp.topMargin = dp(12);
+        qr.addView(link, linkLp);
+
         card.addView(list);
         card.addView(qr);
 
@@ -6245,6 +6295,7 @@ public class LauncherActivity extends Activity {
         aboutQrView    = qr;
         aboutQrImage   = qrImg;
         aboutQrCaption = cap;
+        aboutQrLink    = link;
     }
 
     /** Build one About list row: optional leading icon + label, with a
@@ -6380,6 +6431,7 @@ public class LauncherActivity extends Activity {
     /** Swap the list out for the QR view of the given row's link. */
     private void showAboutQr(int which) {
         String url = (which == ABOUT_ROW_KOFI) ? ABOUT_KOFI_URL : ABOUT_GITHUB_RELEASES;
+        aboutQrUrl = url;
         Bitmap bmp = QrCode.render(url, dp(204), 0xFF101014, 0xFFFFFFFF);
         if (aboutQrImage != null) aboutQrImage.setImageBitmap(bmp);
         if (aboutQrCaption != null) {
@@ -6387,9 +6439,35 @@ public class LauncherActivity extends Activity {
                     ? R.string.about_qr_kofi_caption
                     : R.string.about_qr_github_caption);
         }
+        if (aboutQrLink != null) {
+            // Ko-fi shows the raw URL (the user asked for the full link text);
+            // GitHub shows the short "BareLauncher latest version" label.
+            aboutQrLink.setText(which == ABOUT_ROW_KOFI
+                    ? url
+                    : getString(R.string.about_github_link_button));
+        }
         aboutShowingQr = true;
         if (aboutListView != null) aboutListView.setVisibility(View.GONE);
         if (aboutQrView != null) aboutQrView.setVisibility(View.VISIBLE);
+    }
+
+    /** Open {@code url} in whatever browser the user has installed. Offline,
+     *  dependency-free — a plain {@link Intent#ACTION_VIEW}. Guarded with a
+     *  resolve check so a TV box with no browser shows an honest toast
+     *  instead of throwing {@link android.content.ActivityNotFoundException}.
+     *  The launcher itself never handles {@code http(s)} VIEW intents (it has
+     *  no such filter), so this can never loop back into us. */
+    private void openInBrowser(String url) {
+        if (url == null || url.isEmpty()) return;
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (i.resolveActivity(pm) != null) {
+                startActivity(i);
+                return;
+            }
+        } catch (Exception ignored) { /* fall through to the toast */ }
+        showToast(getString(R.string.toast_no_browser));
     }
 
     /** Return from the QR view back to the row list. */
@@ -6422,11 +6500,14 @@ public class LauncherActivity extends Activity {
     /** D-pad / OK / Back handling for the About overlay. */
     private boolean handleAboutKey(int kc) {
         if (aboutShowingQr) {
-            // Any of OK / Back returns to the list; swallow navigation.
             switch (kc) {
+                // OK activates the link button → open in the user's browser.
                 case KeyEvent.KEYCODE_DPAD_CENTER:
                 case KeyEvent.KEYCODE_ENTER:
                 case KeyEvent.KEYCODE_BUTTON_A:
+                    openInBrowser(aboutQrUrl);
+                    return true;
+                // Back returns to the row list.
                 case KeyEvent.KEYCODE_BACK:
                     showAboutList();
                     return true;
