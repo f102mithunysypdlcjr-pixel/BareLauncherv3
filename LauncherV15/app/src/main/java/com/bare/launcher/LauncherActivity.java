@@ -563,9 +563,20 @@ public class LauncherActivity extends Activity {
     private TextView                    keymapPickerTitle   = null;  // "Pick app for Red"
     private android.widget.HorizontalScrollView keymapPickerHsv = null;
     private android.widget.LinearLayout keymapPickerStrip   = null;  // horizontal app chips
-    private int                         keymapPickerIdx     = 0;     // 0 = "None" sentinel, 1..N = appList[i-1]
+    private int                         keymapPickerIdx     = 0;     // 0 = "None" sentinel, 1..N = keymapPickerApps[i-1]
     private int                         keymapPickerLastIdx = -1;    // tracks last-painted selection so refresh only animates the two chips that changed
     private int                         keymapPickerSlotRow = 0;     // which slot row triggered the picker
+    /** Stable, ALPHABETICALLY-SORTED snapshot of the apps shown in the
+     *  picker chip strip. Built together with the chips in
+     *  {@link #rebuildPickerChips}; every picker consumer (commit,
+     *  pre-select, icon top-up, live icon delivery) resolves through THIS
+     *  list, never through {@link #appList} by position. That is the fix
+     *  for the "I pick app A but app B gets bound" bug: the home/drawer
+     *  order can be reordered freely without ever changing which chip maps
+     *  to which package, because the picker order is alphabetical and
+     *  independent of the shelf/drawer order. Chip {@code i} (after the
+     *  leading "Not assigned" sentinel) maps to {@code keymapPickerApps.get(i)}. */
+    private final java.util.List<AppInfo> keymapPickerApps = new ArrayList<>();
     // Picker chip strip is rebuilt only when the underlying app list
     // changes — avoids re-allocating ~N TextViews on every overlay open.
     private int                         keymapPickerBuiltSize = -1;
@@ -7224,12 +7235,13 @@ public class LauncherActivity extends Activity {
         }
         // Pre-select the chip matching the current binding so left/right
         // navigates from where the user is, not always from the start.
+        // Resolve against the picker's own sorted snapshot — never appList.
         int kc = SHORTCUT_KEYCODES[rowIdx];
         String pkg = keyMap.get(kc);
         int idx = 0; // 0 = "None" sentinel
         if (pkg != null) {
-            for (int i = 0; i < appList.size(); i++) {
-                if (appList.get(i).packageName.equals(pkg)) { idx = i + 1; break; }
+            for (int i = 0; i < keymapPickerApps.size(); i++) {
+                if (keymapPickerApps.get(i).packageName.equals(pkg)) { idx = i + 1; break; }
             }
         }
         keymapPickerIdx     = idx;
@@ -7260,8 +7272,11 @@ public class LauncherActivity extends Activity {
             keyMap.delete(kc);
         } else {
             int appIdx = keymapPickerIdx - 1;
-            if (appIdx >= 0 && appIdx < appList.size()) {
-                keyMap.put(kc, appList.get(appIdx).packageName);
+            // Resolve through the picker's sorted snapshot — the chip the
+            // user highlighted ALWAYS maps to this exact app, regardless of
+            // any later home/drawer reorder.
+            if (appIdx >= 0 && appIdx < keymapPickerApps.size()) {
+                keyMap.put(kc, keymapPickerApps.get(appIdx).packageName);
             }
         }
         saveKeyMap();
@@ -7272,19 +7287,28 @@ public class LauncherActivity extends Activity {
         exitAppPicker();
     }
 
-    /** Rebuild the chip strip from the current appList. Called only when
-     *  the app list size has changed since the last build (see enterAppPicker),
-     *  not on every reopen. Each chip is a small horizontal LinearLayout
-     *  with an optional icon and a label. */
+    /** Rebuild the chip strip from a stable, alphabetically-sorted snapshot
+     *  of {@link #appList}. Called when the app-list size changes since the
+     *  last build (see enterAppPicker) or when a package broadcast / reconcile
+     *  invalidates the cache — NOT on every reopen. The picker order is
+     *  intentionally INDEPENDENT of the home/drawer order: reordering apps on
+     *  the shelf or in the drawer never changes which chip maps to which
+     *  package, so a binding can't drift onto the wrong app. */
     private void rebuildPickerChips() {
         android.widget.LinearLayout strip = keymapPickerStrip;
         if (strip == null) return;
         strip.removeAllViews();
+        // Stable alphabetical snapshot — the single source of truth for the
+        // chip order AND for every package lookup the picker performs.
+        keymapPickerApps.clear();
+        keymapPickerApps.addAll(appList);
+        Collections.sort(keymapPickerApps,
+                (a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label));
         // First chip is the "Not assigned" sentinel — always present so the
         // user can clear a binding from the picker without a separate gesture.
         addPickerChip(strip, getString(R.string.keymap_not_assigned), null, true);
-        for (int i = 0; i < appList.size(); i++) {
-            AppInfo a = appList.get(i);
+        for (int i = 0; i < keymapPickerApps.size(); i++) {
+            AppInfo a = keymapPickerApps.get(i);
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
             addPickerChip(strip, a.label, b, false);
         }
@@ -7292,11 +7316,11 @@ public class LauncherActivity extends Activity {
 
     /** Mirror of {@link #refreshHideChipIcons} for the keymap picker strip.
      *  The picker has a leading "Not assigned" sentinel chip with no
-     *  ImageView, so chip i in the strip corresponds to appList[i-1]. */
+     *  ImageView, so chip i in the strip corresponds to keymapPickerApps[i-1]. */
     private void refreshPickerChipIcons() {
         android.widget.LinearLayout strip = keymapPickerStrip;
         if (strip == null || iconCache == null) return;
-        int n = Math.min(strip.getChildCount() - 1, appList.size());
+        int n = Math.min(strip.getChildCount() - 1, keymapPickerApps.size());
         for (int i = 0; i < n; i++) {
             View chip = strip.getChildAt(i + 1); // +1 skips the sentinel
             if (!(chip instanceof android.widget.LinearLayout)) continue;
@@ -7306,7 +7330,7 @@ public class LauncherActivity extends Activity {
             if (!(v instanceof ImageView)) continue;
             ImageView iv = (ImageView) v;
             if (iv.getVisibility() == View.VISIBLE && iv.getDrawable() != null) continue;
-            Bitmap b = iconCache.get(appList.get(i).packageName);
+            Bitmap b = iconCache.get(keymapPickerApps.get(i).packageName);
             if (b != null) {
                 iv.setImageBitmap(b);
                 iv.setVisibility(View.VISIBLE);
@@ -7330,7 +7354,6 @@ public class LauncherActivity extends Activity {
         // this right now?" signal.
         FrameLayout ko = keymapOverlay;
         if (ko == null || ko.getVisibility() != View.VISIBLE) return;
-        int idx = indexInAppList(pkg);
         // Hide-manager strip: rows are indexed by hideListApps (the filtered
         // subset of hidden apps), NOT by appList. Indexing the strip with the
         // appList index painted the icon onto the wrong hidden row (icon/name
@@ -7347,11 +7370,18 @@ public class LauncherActivity extends Activity {
                 }
             }
         }
-        // Picker strip: leading sentinel offsets app indices by 1.
+        // Picker strip: match by package against the picker's sorted snapshot
+        // (the leading "Not assigned" sentinel offsets chip indices by 1).
         if (keymapMode == KEYMAP_MODE_PICKER) {
             android.widget.LinearLayout pStrip = keymapPickerStrip;
-            if (pStrip != null && idx >= 0 && (idx + 1) < pStrip.getChildCount()) {
-                setChipIcon(pStrip.getChildAt(idx + 1), 0, bmp);
+            if (pStrip != null) {
+                for (int i = 0, n = keymapPickerApps.size(); i < n; i++) {
+                    if (pkg.equals(keymapPickerApps.get(i).packageName)) {
+                        if ((i + 1) < pStrip.getChildCount())
+                            setChipIcon(pStrip.getChildAt(i + 1), 0, bmp);
+                        break;
+                    }
+                }
             }
         }
         // Slot rows: only when the slot list is the active sub-mode AND
@@ -7372,17 +7402,6 @@ public class LauncherActivity extends Activity {
             }
             if (bound) refreshKeymapRows();
         }
-    }
-
-    /** Linear scan over appList for the given pkg. Cheap (≤ ~50 entries on
-     *  a typical TV) and only used by {@link #onIconLoaded} which itself
-     *  is rate-limited by icon-decode throughput. Avoids a parallel
-     *  pkg→index map purely for this one path. */
-    private int indexInAppList(String pkg) {
-        for (int i = 0, n = appList.size(); i < n; i++) {
-            if (pkg.equals(appList.get(i).packageName)) return i;
-        }
-        return -1;
     }
 
     /** Set the bitmap on an ImageView at a fixed child index inside a chip
@@ -7728,11 +7747,19 @@ public class LauncherActivity extends Activity {
         if (strip == null) return;
         strip.removeAllViews();
         hideListApps.clear();
-        // Only hidden apps appear here; row i ↔ hideListApps.get(i).
+        // Only hidden apps appear here, in stable ALPHABETICAL order — row
+        // i ↔ hideListApps.get(i). The order is independent of the
+        // home/drawer order so it never shifts under a reorder, and every
+        // consumer (toggle, icon top-up, live icon delivery) resolves
+        // through this same list by package.
         for (int i = 0; i < appList.size(); i++) {
             AppInfo a = appList.get(i);
-            if (!hiddenApps.contains(a.packageName)) continue;
-            hideListApps.add(a);
+            if (hiddenApps.contains(a.packageName)) hideListApps.add(a);
+        }
+        Collections.sort(hideListApps,
+                (a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label));
+        for (int i = 0; i < hideListApps.size(); i++) {
+            AppInfo a = hideListApps.get(i);
             Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
             addHideRow(strip, a.label, b);
         }
