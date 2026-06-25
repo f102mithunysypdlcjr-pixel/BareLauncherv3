@@ -917,15 +917,13 @@ public class LauncherActivity extends Activity {
         // would render in the OLD cached order for ~200 ms before the
         // PM-scan reconcile detects the order change and re-renders —
         // visible as a transient flicker after every reorder + reboot.
-        // Best-effort write on a background thread.
+        // Best-effort write on a background thread: appExecutor uses a
+        // DiscardPolicy, so a saturated (or shut-down) executor silently
+        // drops the task rather than throwing — the cache then converges
+        // on the next loadApps reconcile that detects the new order.
         final ArrayList<AppInfo> snapshot = new ArrayList<>(appList);
         final Context appCtx = getApplicationContext();
-        try {
-            appExecutor.execute(() -> AppListCache.writeFileFromAppInfo(appCtx, snapshot));
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            // Executor saturated; the cache will converge on the next
-            // loadApps reconcile that detects the new order.
-        }
+        appExecutor.execute(() -> AppListCache.writeFileFromAppInfo(appCtx, snapshot));
     }
 
     /** Persist the home/drawer boundary. Cheap and synchronous — written only
@@ -1147,30 +1145,27 @@ public class LauncherActivity extends Activity {
      *  visually identical to a layered one — and marginally cheaper (no layer
      *  alloc / save-restore). */
     private void beginHomeFadeIn() {
-        fadeViewIn(shelf, false);
-        if (showClock) fadeViewIn(clockView, false);
-        fadeViewIn(ringView, false);
+        fadeViewIn(shelf);
+        if (showClock) fadeViewIn(clockView);
+        fadeViewIn(ringView);
         // Toolbar pills fade in to their dim idle alpha (0.6 — the rest value
         // their own focus listeners use), so an unfocused pill lands correctly
         // and the corner cluster no longer pops while the centre cross-fades.
-        // No hardware layer: they're tiny leaf views, a plain alpha tween is
-        // already free.
-        fadeViewIn(netBtn, 0.6f, false);
-        fadeViewIn(mapperBtnView, 0.6f, false);
+        fadeViewIn(netBtn, 0.6f);
+        fadeViewIn(mapperBtnView, 0.6f);
     }
 
-    private void fadeViewIn(View v, boolean withLayer) {
-        fadeViewIn(v, 1f, withLayer);
+    private void fadeViewIn(View v) {
+        fadeViewIn(v, 1f);
     }
 
-    private void fadeViewIn(View v, float to, boolean withLayer) {
+    private void fadeViewIn(View v, float to) {
         if (v == null) return;
         v.animate().cancel();
         v.setAlpha(0f);
-        android.view.ViewPropertyAnimator a = v.animate()
-                .alpha(to).setDuration(DRAWER_ANIM_MS).setInterpolator(SCROLL_EASE);
-        if (withLayer) a.withLayer();
-        a.start();
+        v.animate()
+                .alpha(to).setDuration(DRAWER_ANIM_MS).setInterpolator(SCROLL_EASE)
+                .start();
     }
 
     /** Snap the home surface (shelf, clock, ring, toolbar pills) back to its
