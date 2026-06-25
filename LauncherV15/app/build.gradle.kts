@@ -407,12 +407,12 @@ android {
         // icons, and a touch more spacing between app tiles.
         //
         // Bumped 27 → 28: 2.0.0 — the first public release of the redesigned
-        // launcher. SemVer MAJOR bump: the home screen is now an Apple-TV /
-        // Fire-TV style banner-tile favourites row with a pull-down app
-        // drawer (the legacy single-row icon shelf is gone), which is a large
-        // enough UX change to warrant a major version even though the upgrade
-        // is transparent (favourites seed from the user's existing order and
-        // KEY_APP_ORDER stays the single source of truth).
+        // launcher. SemVer MAJOR bump: the home screen is now a TV-style
+        // banner-tile favourites row with a pull-down app drawer (the legacy
+        // single-row icon shelf is gone), which is a large enough UX change to
+        // warrant a major version even though the upgrade is transparent
+        // (favourites seed from the user's existing order and KEY_APP_ORDER
+        // stays the single source of truth).
         //
         // Rolls up every unreleased increment since the last public tag
         // (v1.4.7): 1.4.8 (drawer UX pass), 1.4.9 (About card + 3-state clock

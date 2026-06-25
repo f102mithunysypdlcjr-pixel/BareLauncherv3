@@ -7,31 +7,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [2.0.0] — 2026-06-25
 
-A big redesign. BareLauncher gets a fresh TV-style home screen and a
-pull-down app drawer — while staying the same fast, lightweight launcher
-with no ads and no tracking.
+A brand-new look. BareLauncher gets a fresh home screen and a pull-down
+app drawer — and it's still the same fast, lightweight launcher with no
+ads and no tracking.
 
-### New
+### What's new
 
-- **Redesigned home screen.** Your favourite apps sit in a tidy row along
-  the bottom as large, easy-to-read tiles.
-- **Pull-down app drawer.** Press down on the home row to see all your
-  apps in a clean grid; press up or Back to close.
-- **Organise apps the same way everywhere.** Hold OK on any app to Move
-  it, Hide it, Uninstall it, or open its App info — on both the home row
-  and in the drawer.
-- **About screen** (in Settings) with the app version, a "Support on
-  Ko-fi" link, and a link to get the latest version — each with a QR code
-  and a tappable link that opens in your browser.
-- **Choose your clock:** full (time with day and date), time only, or off.
-
-### Improved
-
-- Cleaner floating Wi-Fi and settings icons that stay visible on any
-  wallpaper; the Wi-Fi icon now shows when you're connected.
-- Hide apps you don't want on screen, and manage them from Settings.
-- App icons stay correct after an app updates.
-- Smoother animations, plus speed and stability improvements throughout.
+- A redesigned home screen with bigger, cleaner app tiles.
+- A new app drawer — press down to see all your apps, and press up or Back
+  to close it.
+- Move, hide, or uninstall any app straight from the home screen or the
+  drawer: just hold OK and choose.
+- Hide apps you don't use from the drawer, and unhide them later from the
+  menu.
+- A new clock you can set to show the time with day and date, the time
+  only, or turn off completely.
+- Sharper, higher-quality wallpapers.
+- A new About screen showing the app version, with a link to support the
+  project and a link to get the latest version.
 
 ## [1.4.9] — 2026-06-24
 
