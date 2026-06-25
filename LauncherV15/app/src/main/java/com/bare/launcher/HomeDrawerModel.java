@@ -4,7 +4,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Pure-Java geometry / navigation / reorder logic for the Apple-TV style
+ * Pure-Java geometry / navigation / reorder logic for the TV-style
  * "home favourites row + pull-down app drawer" layout (v1.5.0).
  *
  * <p>The launcher keeps a single flat, ordered list of the apps that are
@@ -44,7 +44,7 @@ final class HomeDrawerModel {
 
     /** Apps per drawer row, and the hard cap on the home-row size. v1.5.0
      *  uses 6 (down from 8) for larger, TV-friendly rounded-square tiles in
-     *  the Apple-TV / Fire-TV idiom. */
+     *  the modern TV idiom. */
     static final int COLS = 6;
 
     /** Sentinel returned by {@link #navUp(int, int, int)} when UP is pressed

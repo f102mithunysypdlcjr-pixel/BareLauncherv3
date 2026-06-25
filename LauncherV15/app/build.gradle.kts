@@ -406,51 +406,23 @@ android {
         // bigger plate-less clock + day/date line, minimal floating Wi-Fi/gear
         // icons, and a touch more spacing between app tiles.
         //
-        // Bumped 27 → 28: 1.5.0 is the "home favourites row + pull-down app
-        // drawer" release — the largest UX change since the launcher's first
-        // cut, and a SemVer MINOR bump (additive feature, no breaking changes,
-        // existing installs migrate transparently).
+        // Bumped 27 → 28: 2.0.0 — the first public release of the redesigned
+        // launcher. SemVer MAJOR bump: the home screen is now a TV-style
+        // banner-tile favourites row with a pull-down app drawer (the legacy
+        // single-row icon shelf is gone), which is a large enough UX change to
+        // warrant a major version even though the upgrade is transparent
+        // (favourites seed from the user's existing order and KEY_APP_ORDER
+        // stays the single source of truth).
         //
-        //   • Apple-TV / Fire-TV banner tiles. The home shelf and the new
-        //     drawer render landscape 5:3 rounded-rectangle banner tiles
-        //     (real android:banner art when an app ships one, else a
-        //     generated icon-on-dark-plate tile) sized dynamically so exactly
-        //     6 fit per row on ANY panel width (see computeTileDims). New
-        //     in-memory bannerCache / bannerInflight pipeline mirrors the icon
-        //     pipeline; lazy per-cell load (visible rows only) keeps cold
-        //     start cheap. The round chip icons stay for the keymap / hidden-
-        //     apps surfaces (view-level circular clip, shared iconCache).
-        //
-        //   • Pull-down app drawer. DPAD_DOWN on a home cell opens a vertical
-        //     recycling grid showing every (non-hidden) app; DPAD_UP from the
-        //     top row (or BACK) closes it. Frosted-glass backdrop via
-        //     RenderEffect blur on Android 12+ (near-opaque grey fallback
-        //     below). Drawer teardown is deferred to onResume so launching an
-        //     app from the drawer animates from the drawer instead of flashing
-        //     the home screen.
-        //
-        //   • One continuous home/drawer space ("Option A"). A single flat
-        //     ordered list plus one homeCount integer (persisted under the new
-        //     KEY_HOME_COUNT) records where the home/drawer boundary sits. The
-        //     bottom home favourites row IS the first homeCount apps of the
-        //     drawer order. All index math, focus navigation, and the
-        //     promote/demote Move rules live in the Android-free, JVM-tested
-        //     HomeDrawerModel (COLS = 6).
-        //
-        //   • Unified, minimal Move flow on both surfaces. Long-press → menu;
-        //     OK on Move → D-pad reorders (LEFT/RIGHT on the shelf; any
-        //     direction in the drawer, crossing the home boundary to
-        //     promote/demote); OK or BACK commits. The shared context menu and
-        //     its highlight logic drive whichever surface is reordering via the
-        //     new ReorderHost interface; the single icon-delivery pipeline
-        //     feeds both grids via the new IconTarget interface.
-        //
-        //   • Migration: KEY_HOME_COUNT is absent on upgrade and resolves to
-        //     the first COLS of the user's EXISTING stored order, so favourites
-        //     are never reset. KEY_APP_ORDER stays the single source of truth
-        //     for ordering. New unit tests: HomeDrawerModelTest.
+        // Rolls up every unreleased increment since the last public tag
+        // (v1.4.7): 1.4.8 (drawer UX pass), 1.4.9 (About card + 3-state clock
+        // + floating Wi-Fi/gear icons), and the 1.5.x drawer/banner overhaul
+        // (home favourites row + pull-down drawer + banner tiles + unified
+        // Move flow), plus the About browser-link / Wi-Fi-cleanup / post-
+        // update banner-refresh pass. See CHANGELOG.md [2.0.0] for the
+        // user-facing summary.
         versionCode   = 28
-        versionName   = "1.5.0"
+        versionName   = "2.0.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

@@ -5,64 +5,26 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] — 2026-06-24
+## [2.0.0] — 2026-06-25
 
-The "home favourites row + pull-down app drawer" release — the biggest UX
-change since the launcher's first cut. Apple-TV / Fire-TV style banner tiles
-replace the round home-shelf icons, and a pull-down drawer holds the full app
-list. Still zero-dependency. Existing installs migrate transparently —
-favourites are seeded from the current order and ordering is unchanged.
+A brand-new look. BareLauncher gets a fresh home screen and a pull-down
+app drawer — and it's still the same fast, lightweight launcher with no
+ads and no tracking.
 
-### Added
+### What's new
 
-- **Apple-TV / Fire-TV banner tiles.** The home shelf and the new drawer
-  render landscape 5:3 rounded-rectangle banner tiles — real `android:banner`
-  art when an app ships one, otherwise a generated icon-on-dark-plate tile —
-  sized dynamically so exactly **6 tiles fit per row on any panel width**
-  (`computeTileDims`). A new in-memory `bannerCache` / `bannerInflight`
-  pipeline mirrors the icon pipeline; tiles load lazily per visible cell so
-  cold start stays cheap (no eager decode of the whole list). The small round
-  chip icons remain on the keymap / hidden-apps surfaces (a view-level
-  circular clip over the shared `iconCache`).
-- **Pull-down app drawer.** `DPAD_DOWN` on a home cell opens a vertical
-  recycling grid of every non-hidden app; `DPAD_UP` from the top row (or
-  `BACK`) closes it. Frosted-glass backdrop via `RenderEffect` blur on
-  Android 12+, with a near-opaque grey fallback below. Drawer teardown is
-  deferred to `onResume` so launching an app from the drawer animates from the
-  drawer instead of briefly flashing the home screen.
-- **One continuous home/drawer space ("Option A").** A single flat ordered
-  list plus one `homeCount` integer (persisted under the new `home_count`
-  pref) records where the home/drawer boundary sits — the bottom favourites
-  row IS the first `homeCount` apps of the drawer order. All index math, focus
-  navigation, and the promote/demote Move rules live in the Android-free,
-  JVM-tested `HomeDrawerModel` (`COLS = 6`).
-- **`HomeDrawerModelTest`** — JVM unit tests for the drawer geometry,
-  navigation, and Option-A promote/demote Move rules.
-
-### Changed
-
-- **Unified, minimal Move flow on both surfaces.** Long-press opens the menu;
-  OK on **Move** starts moving; the D-pad then reorders (left/right on the
-  shelf; any direction in the drawer, crossing the home boundary to
-  promote/demote a favourite); OK or Back commits. The shared context menu and
-  its highlight logic now drive whichever surface is reordering through the
-  new `ReorderHost` interface, and the single icon-delivery pipeline feeds both
-  grids through the new `IconTarget` interface.
-- **Selection ring is now a rounded-rectangle halo** that hugs the banner
-  tile's corner (concentric stroke), replacing the circular ring.
-
-### Migration
-
-- `home_count` is absent on upgrade and resolves to the first `COLS` of the
-  user's **existing** stored order, so favourites are never reset.
-  `app_order` stays the single source of truth for ordering — the new key only
-  records the home/drawer split.
-
-### Housekeeping
-
-- Refreshed stale inline comments left over from the 8→6 column change and the
-  1.4.2 icon-sampling rewrite; corrected the documented focus-bounce tension.
-  No behavioural change.
+- A redesigned home screen with bigger, cleaner app tiles.
+- A new app drawer — press down to see all your apps, and press up or Back
+  to close it.
+- Move, hide, or uninstall any app straight from the home screen or the
+  drawer: just hold OK and choose.
+- Hide apps you don't use from the drawer, and unhide them later from the
+  menu.
+- A new clock you can set to show the time with day and date, the time
+  only, or turn off completely.
+- Sharper, higher-quality wallpapers.
+- A new About screen showing the app version, with a link to support the
+  project and a link to get the latest version.
 
 ## [1.4.9] — 2026-06-24
 
@@ -830,7 +792,7 @@ across every hot-path scan we have.
   pill size — the teeth filled most of the angular budget, leaving
   little visible gap between them. The v1.3.4 6-tooth gear has a
   60° step instead of 45°, opening up wider angular gaps that read
-  as the canonical Material / iOS / tvOS settings gear at TV viewing
+  as the canonical Material settings gear at TV viewing
   distance. Per-tooth corner radius bumped from 30 % to 45 % of the
   tooth width so each tooth reads as visibly rounded rather than
   rectangular (the user's "rounded teeth" feedback). Tooth length
@@ -1087,7 +1049,7 @@ plus an audit pass that tidies a couple of small things.
 ### Audit
 
 - Removed a dead `toothW` constant inside
-  `AppleStyle.drawGearGlyph` that v1.3.0 declared "kept for design
+  `ToolbarStyle.drawGearGlyph` that v1.3.0 declared "kept for design
   intent" but didn't actually use. The unreachable
   `if (toothW < 0f)` line that prevented the unused-local-variable
   warning is gone with it.
@@ -1181,7 +1143,7 @@ and every config surface lives in one discoverable place.
   "remap remote buttons" entry — it's the unified settings entry —
   so the visual symbol updates to match. The gear is drawn entirely
   with `Canvas` primitives via the new
-  `AppleStyle.drawGearGlyph(canvas, cx, cy, r, color, stroke)`
+  `ToolbarStyle.drawGearGlyph(canvas, cx, cy, r, color, stroke)`
   helper: 8 teeth, body ring, inner hole, all proportional to the
   pill radius. No new vector or raster resources.
 - **WiFi pill long-press is now unbound.** The system-Settings
@@ -1690,7 +1652,7 @@ buffer alive for both `ImageView`s.
   first-tier WiFi shortcut. Discoverable via the standard
   press-and-hold gesture; falls back to a toast on stripped ROMs
   that have no Settings activity.
-- **`AppleStyle.makePillBackground(density)`** factory added so the
+- **`ToolbarStyle.makePillBackground(density)`** factory added so the
   clock pill and the toolbar plates draw with the same code (one
   paint set, one rounded-rect path). Each call produces a fresh
   `Drawable` because `Drawable` state (bounds / alpha / level) is
@@ -1745,7 +1707,7 @@ now converge cleanly instead of silently freezing those code paths.
   three button factories share — replaces three identical 1.06f
   literals). Color philosophy is identical: dark-glass idle plate,
   frosted-white focused plate, hairline white rim, glyph inverts on
-  focus. Every paint factory in `AppleStyle` is untouched.
+  focus. Every paint factory in `ToolbarStyle` is untouched.
 - **Mapper "sliders" glyph rebalanced for the smaller plate.** Bar
   length scales from 1.30× → 1.12× of the icon container so the bars
   no longer skim the rim, with a slightly thinner stroke (0.18 →
@@ -1904,8 +1866,8 @@ sink, and a hardened release pipeline.
     rasterisation, transparent-background detection, white-plate
     application, circle clipping). Owns its `ThreadLocal` scratch
     buffers and `Paint` instances. Allocation hygiene unchanged.
-  - `AppleStyle` — static helpers for the toolbar pill button style
-    (`applyApplePillStyle`, paint factories for stroke / fill / idle /
+  - `ToolbarStyle` — static helpers for the toolbar pill button style
+    (`applyPillStyle`, paint factories for stroke / fill / idle /
     focused / rim).
   - `KeymapStore` — pure-Java parse / serialise helpers for the
     persisted keymap and hidden-apps strings, exposed via a visitor /
