@@ -405,8 +405,24 @@ android {
         // release QR + credit), 3-state clock (full → time-only → off) with a
         // bigger plate-less clock + day/date line, minimal floating Wi-Fi/gear
         // icons, and a touch more spacing between app tiles.
-        versionCode   = 27
-        versionName   = "1.4.9"
+        //
+        // Bumped 27 → 28: 2.0.0 — the first public release of the redesigned
+        // launcher. SemVer MAJOR bump: the home screen is now an Apple-TV /
+        // Fire-TV style banner-tile favourites row with a pull-down app
+        // drawer (the legacy single-row icon shelf is gone), which is a large
+        // enough UX change to warrant a major version even though the upgrade
+        // is transparent (favourites seed from the user's existing order and
+        // KEY_APP_ORDER stays the single source of truth).
+        //
+        // Rolls up every unreleased increment since the last public tag
+        // (v1.4.7): 1.4.8 (drawer UX pass), 1.4.9 (About card + 3-state clock
+        // + floating Wi-Fi/gear icons), and the 1.5.x drawer/banner overhaul
+        // (home favourites row + pull-down drawer + banner tiles + unified
+        // Move flow), plus the About browser-link / Wi-Fi-cleanup / post-
+        // update banner-refresh pass. See CHANGELOG.md [2.0.0] for the
+        // user-facing summary.
+        versionCode   = 28
+        versionName   = "2.0.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

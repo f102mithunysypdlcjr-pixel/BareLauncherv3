@@ -21,7 +21,7 @@ import java.util.List;
  *       per row, showing the <em>entire</em> visible list. Its first row is
  *       the home row (the first {@code homeCount} apps, rendered centred to
  *       mirror the bottom row); the remaining apps fill rows 1+ left-aligned,
- *       8 per row, with the last (incomplete) row left-aligned.</li>
+ *       {@link #COLS} per row, with the last (incomplete) row left-aligned.</li>
  * </ul>
  *
  * <p><b>"Option A" — one continuous space.</b> Home membership is purely
@@ -68,8 +68,8 @@ final class HomeDrawerModel {
     /** Default home-row size for a brand-new install (or the first run after
      *  an upgrade where no {@code home_count} pref exists yet): the first
      *  {@link #COLS} apps, or all of them when fewer than {@link #COLS} are
-     *  installed. Mirrors the legacy "first 8 of the stored order" behaviour
-     *  so an upgrade never resets the user to alphabetical. */
+     *  installed. Mirrors the legacy "first {@link #COLS} of the stored order"
+     *  behaviour so an upgrade never resets the user to alphabetical. */
     static int defaultHomeCount(int size) {
         return Math.min(COLS, Math.max(0, size));
     }
@@ -248,7 +248,7 @@ final class HomeDrawerModel {
      *       slot the moved app just vacated. {@code homeCount} stays at
      *       {@link #COLS}.</li>
      *   <li><b>Any lower row</b>: ordinary vertical swap with the cell one row
-     *       up (8 positions earlier).</li>
+     *       up ({@link #COLS} positions earlier).</li>
      * </ul>
      */
     static <T> MoveResult moveUp(List<T> order, int index, int homeCount) {
@@ -299,7 +299,7 @@ final class HomeDrawerModel {
      *       {@code homeCount--}. (It stays in the drawer — only its home
      *       membership changes.)</li>
      *   <li><b>Any other row</b>: ordinary vertical swap with the cell one row
-     *       down (8 positions later), snapping to the nearest existing cell
+     *       down ({@link #COLS} positions later), snapping to the nearest existing cell
      *       when the row below is shorter. No-op on the last row.</li>
      * </ul>
      */
