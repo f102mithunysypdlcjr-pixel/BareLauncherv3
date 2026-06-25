@@ -73,7 +73,7 @@ public class LauncherActivity extends Activity {
 
     private static final int    ICON_DP        = 80;   // round chip/list icon cache size
     private static final int    RING_STROKE_DP = 3;
-    // v1.5.0 Apple-TV style 5:3 banner tiles, sized dynamically from the
+    // v1.5.0 TV-style 5:3 banner tiles, sized dynamically from the
     // screen width so exactly 6 fit per row on ANY TV (see computeTileDims()).
     // Volatile: written on the UI thread (onCreate / config change), read on
     // the icon executor inside loadBannerBlocking.
@@ -332,7 +332,7 @@ public class LauncherActivity extends Activity {
     // executors remain here; their hot paths live inside this activity.
     private volatile ExecutorService          appExecutor;
     private volatile LruCache<String, Bitmap> iconCache;
-    /** In-memory cache of Apple-TV style banner tiles for the home / drawer
+    /** In-memory cache of TV-style banner tiles for the home / drawer
      *  cells. Separate from {@link #iconCache} (which holds the small round
      *  chip icons): tiles are a different shape, size, and source. No disk
      *  cache — tiles regenerate per process (cheap: only the visible cells
@@ -352,7 +352,7 @@ public class LauncherActivity extends Activity {
     // drawer cells. See {@link IconTarget}.
     private final ArrayMap<String, List<IconTarget>> iconInflight = new ArrayMap<>();
     /** In-flight banner-tile loads keyed by package. The home / drawer cells
-     *  display Apple-TV style banner tiles (see {@link #bannerCache}); this is
+     *  display TV-style banner tiles (see {@link #bannerCache}); this is
      *  the banner counterpart of {@link #iconInflight}. Delivers to the same
      *  {@link IconTarget} cells (their display bitmap is the banner). */
     private final ArrayMap<String, List<IconTarget>> bannerInflight = new ArrayMap<>();
@@ -1846,7 +1846,7 @@ public class LauncherActivity extends Activity {
         //
         // Color philosophy is unchanged: dark glass idle plate, frosted
         // near-white focused plate, hairline white rim, glyph inverts on
-        // focus. See AppleStyle.makeBgIdlePaint / makeBgFocusPaint /
+        // focus. See ToolbarStyle.makeBgIdlePaint / makeBgFocusPaint /
         // makeRimPaint — every paint factory remains untouched, so the
         // visual vocabulary is identical, just smaller.
         final int BTN_SZ      = dp(28);
@@ -1940,7 +1940,7 @@ public class LauncherActivity extends Activity {
         root.addView(drawer);
 
         int strokePx = dp(RING_STROKE_DP);
-        // Selection ring wraps the Apple-TV banner tile (landscape rounded
+        // Selection ring wraps the banner tile (landscape rounded
         // rect). Box = banner + headroom for the focus scale-up.
         int bw = tileWpx, bh = bannerHpx;
         int ringBoxW = bw + dp(12), ringBoxH = bh + dp(12);
@@ -2004,7 +2004,7 @@ public class LauncherActivity extends Activity {
         android.widget.LinearLayout menuCol = new android.widget.LinearLayout(this);
         menuCol.setOrientation(android.widget.LinearLayout.VERTICAL);
         menuCol.setGravity(Gravity.CENTER_HORIZONTAL);
-        // Apple-TV plate matches the keymap card exactly: deep slate with a
+        // Dark glass plate matches the keymap card exactly: deep slate with a
         // hairline rim. Dropping the previous opaque-black plate gives the
         // app context menu the same visual vocabulary as the rest of the UI.
         android.graphics.drawable.GradientDrawable menuBg =
@@ -2109,7 +2109,7 @@ public class LauncherActivity extends Activity {
 
         // Dividers removed — the rounded-pill selection state is enough to
         // separate items visually, and removing them gives a cleaner
-        // Apple-TV-style menu with no horizontal noise.
+        // menu with no horizontal noise.
         android.widget.LinearLayout.LayoutParams itemLp =
                 new android.widget.LinearLayout.LayoutParams(dp(140), WRAP);
         itemLp.bottomMargin = dp(2);
@@ -2363,7 +2363,7 @@ public class LauncherActivity extends Activity {
                 }
             }
         };
-        applyApplePillStyle(v);
+        applyPillStyle(v);
         v.setOnClickListener(view -> openNetSettings());
         // Short-press → WiFi / network settings. (The long-press → Bluetooth
         // shortcut was removed in v1.5.x: it was unreliable across TV ROMs —
@@ -2450,21 +2450,21 @@ public class LauncherActivity extends Activity {
                 if (focused) {
                     c.drawCircle(cx, cy, r, bgFocus);
                     c.drawCircle(cx, cy, r - rim.getStrokeWidth() / 2f, rim);
-                    AppleStyle.drawGearGlyph(c, cx, cy, r,
-                            AppleStyle.SYMBOL_FOCUSED, bgFocus.getColor(), fill);
+                    ToolbarStyle.drawGearGlyph(c, cx, cy, r,
+                            ToolbarStyle.SYMBOL_FOCUSED, bgFocus.getColor(), fill);
                 } else {
                     // Idle: a soft dark shadow first so the white cog stays
                     // visible on light / white wallpapers, then the white cog
                     // with a real punched-through centre (CLEAR).
                     float sh = Math.max(1f, density) * 1.5f;
-                    AppleStyle.drawGearGlyph(c, cx, cy + sh, r,
+                    ToolbarStyle.drawGearGlyph(c, cx, cy + sh, r,
                             0x59000000, 0x59000000, fill);
-                    AppleStyle.drawGearGlyph(c, cx, cy, r,
-                            AppleStyle.SYMBOL_IDLE, 0x00000000, fill);
+                    ToolbarStyle.drawGearGlyph(c, cx, cy, r,
+                            ToolbarStyle.SYMBOL_IDLE, 0x00000000, fill);
                 }
             }
         };
-        applyApplePillStyle(v);
+        applyPillStyle(v);
         v.setOnClickListener(view -> {
             view.playSoundEffect(SoundEffectConstants.CLICK);
             showSettingsPanel();
@@ -2523,37 +2523,37 @@ public class LauncherActivity extends Activity {
         return v;
     }
 
-    /** Common Apple-TV pill setup is now centralised in {@link AppleStyle}.
-     *  This wrapper exists only so unchanged button-construction call sites
-     *  (which call {@code applyApplePillStyle(v)} unqualified) keep
-     *  compiling. The body is a one-liner forwarding to the shared helper. */
-    private void applyApplePillStyle(View v) {
-        AppleStyle.applyApplePillStyle(v);
+    /** Common toolbar-pill setup is centralised in {@link ToolbarStyle}.
+     *  This wrapper exists only so the button-construction call sites
+     *  (which call {@code applyPillStyle(v)} unqualified) stay tidy. The
+     *  body is a one-liner forwarding to the shared helper. */
+    private void applyPillStyle(View v) {
+        ToolbarStyle.applyPillStyle(v);
     }
 
     private Paint makeBtnPaint(boolean fill) {
-        return AppleStyle.makeBtnPaint(fill);
+        return ToolbarStyle.makeBtnPaint(fill);
     }
 
     private Paint makeBtnStrokePaint() {
-        return AppleStyle.makeBtnStrokePaint();
+        return ToolbarStyle.makeBtnStrokePaint();
     }
 
     /** Idle button background — dark glass that reads on any wallpaper. */
     private Paint makeBgIdlePaint() {
-        return AppleStyle.makeBgIdlePaint();
+        return ToolbarStyle.makeBgIdlePaint();
     }
 
     /** Focused button background — frosted near-white that lifts the symbol
-     *  via inversion. This is the Apple-TV "selected pill" effect. */
+     *  via inversion. This is the "selected pill" effect. */
     private Paint makeBgFocusPaint() {
-        return AppleStyle.makeBgFocusPaint();
+        return ToolbarStyle.makeBgFocusPaint();
     }
 
     /** Hairline inner rim that defines the glass plate edge in any state.
      *  Stroke width is 1 dp scaled by the activity's cached density. */
     private Paint makeRimPaint() {
-        return AppleStyle.makeRimPaint(density);
+        return ToolbarStyle.makeRimPaint(density);
     }
 
     private void openNetSettings() {
@@ -3647,7 +3647,7 @@ public class LauncherActivity extends Activity {
                             View nb = netBtn; if (nb != null) nb.requestFocus(); return true;
                         case KeyEvent.KEYCODE_DPAD_DOWN:
                             // v1.5.0: DOWN on a home cell pulls down the app
-                            // drawer (Apple-TV style). The drawer mirrors the
+                            // drawer (TV style). The drawer mirrors the
                             // current order and lands focus on the same app.
                             // If there are no apps to show, openDrawer no-ops
                             // and we still consume so focus stays put (avoids
@@ -3981,7 +3981,7 @@ public class LauncherActivity extends Activity {
         }
 
         /** Content-space Y of row 0. When the whole grid fits on screen (few
-         *  apps) the block is centred vertically for an Apple-TV look;
+         *  apps) the block is centred vertically for a balanced look;
          *  otherwise it starts at {@code topPad} and scrolls. */
         private int firstRowTop() {
             int rows = HomeDrawerModel.rowCount(displayed.size(), hc());
@@ -6560,7 +6560,7 @@ public class LauncherActivity extends Activity {
      *  and avoids the inflate cost on every reopen.
      *
      *  Visual style: compact dropdown anchored just below the mapper button
-     *  (top-right toolbar). Apple-TV-inspired palette: deep slate plate with
+     *  (top-right toolbar). Dark frosted palette: deep slate plate with
      *  a hairline rim, idle rows transparent + light-grey text, focused row
      *  becomes a bright frosted-white pill with dark text — exactly the same
      *  language as the toolbar buttons (idle dark / focused white-frosted),
@@ -6602,7 +6602,7 @@ public class LauncherActivity extends Activity {
         ov.setFocusableInTouchMode(true);
         ov.setVisibility(View.GONE);
 
-        // Apple-TV style card: deep slate plate, soft 14 dp corners, 1 px
+        // Frosted card: deep slate plate, soft 14 dp corners, 1 px
         // hairline rim, subtle elevation. Slot list and picker swap
         // visibility inside the same card — no second card needed.
         android.widget.LinearLayout card = new android.widget.LinearLayout(this);
@@ -7096,7 +7096,7 @@ public class LauncherActivity extends Activity {
                 }
             }
 
-            // Apple-TV inversion: selected row becomes a bright plate with
+            // Inverted highlight: selected row becomes a bright plate with
             // dark text; idle rows are transparent with light text. The
             // same colour ramp as the toolbar buttons (idle 0xCCFFFFFF,
             // focused 0xFF111114).
@@ -7487,7 +7487,7 @@ public class LauncherActivity extends Activity {
 
     private void paintPickerChip(View chip, boolean sel, boolean animate) {
         if (chip == null) return;
-        // Apple-TV inverted pill: selected chip is bright frosted-white with
+        // Inverted pill: selected chip is bright frosted-white with
         // dark text; idle chips are transparent with light text. Same
         // language as the slot rows and the toolbar buttons.
         android.graphics.drawable.Drawable bgd = chip.getBackground();
@@ -8151,7 +8151,7 @@ public class LauncherActivity extends Activity {
 
     // ── Banner-tile pipeline (v1.5.0) ────────────────────────────────────
     // Mirrors the icon pipeline (preWarmIcon / loadIconAsync) but produces
-    // the Apple-TV style banner tiles the home / drawer cells display, into
+    // the TV-style banner tiles the home / drawer cells display, into
     // {@link #bannerCache} / {@link #bannerInflight}. Delivers to the same
     // {@link IconTarget} cells (their display bitmap is the banner). Does NOT
     // fire {@link #onIconLoaded} — that hook is for the round chip icons.
@@ -8706,10 +8706,10 @@ public class LauncherActivity extends Activity {
 
     private int dp(int v) { return Math.round(v * density); }
 
-    /** Compute the Apple-TV banner-tile pixel dimensions from the current
+    /** Compute the banner-tile pixel dimensions from the current
      *  screen width so exactly 6 tiles fit per row on any TV. Called at
      *  startup (before {@link #buildLayout}) and on configuration change.
-     *  The tile is 5:3 (like tvOS 400x240); the corner is ~20% of the height
+     *  The tile is 5:3 (landscape 400x240-ish); the corner is ~20% of the height
      *  (slightly more rounded per user request), capped so tiles don't get
      *  huge on very wide panels. */
     private void computeTileDims() {

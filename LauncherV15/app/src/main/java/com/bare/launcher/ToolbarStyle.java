@@ -15,7 +15,7 @@ import android.view.View;
 import android.view.ViewOutlineProvider;
 
 /**
- * Static helpers for the launcher's "Apple-TV pill" toolbar buttons.
+ * Static helpers for the launcher's glass-pill toolbar buttons.
  *
  * <p>Every glyph button in the top toolbar (network, mapper, wallpaper)
  * shares the same circular plate visual language:
@@ -34,7 +34,7 @@ import android.view.ViewOutlineProvider;
  * the visual contract explicit and lets future buttons opt into the same
  * vocabulary by calling these factories instead of re-deriving them.
  *
- * <p>{@link #applyApplePillStyle(View)} is the focus-side counterpart:
+ * <p>{@link #applyPillStyle(View)} is the focus-side counterpart:
  * round outline clipping, no platform focus rectangle, hardware layer,
  * sound effects on. Every toolbar button calls it once at construction.
  *
@@ -43,9 +43,9 @@ import android.view.ViewOutlineProvider;
  * {@code LauncherActivity}; pulling them out drops ~70 lines from the
  * activity and makes the visual contract reusable.
  */
-final class AppleStyle {
+final class ToolbarStyle {
 
-    private AppleStyle() { /* no instances */ }
+    private ToolbarStyle() { /* no instances */ }
 
     /** Shared CLEAR-mode xfermode used by {@link #drawGearGlyph} to punch
      *  the cog's centre hole when it floats plate-less over the wallpaper.
@@ -63,7 +63,7 @@ final class AppleStyle {
      * <p>Idempotent: calling twice on the same view leaves it in the same
      * state as one call. Safe to call after the view is attached.
      */
-    static void applyApplePillStyle(View v) {
+    static void applyPillStyle(View v) {
         v.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         v.setBackground(null);
         v.setForeground(null);
@@ -119,7 +119,7 @@ final class AppleStyle {
     }
 
     /** Focused plate paint — frosted near-white that lifts the symbol
-     *  via inversion. The Apple-TV "selected pill" look. */
+     *  via inversion. The "selected pill" look. */
     static Paint makeBgFocusPaint() {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         p.setStyle(Paint.Style.FILL);

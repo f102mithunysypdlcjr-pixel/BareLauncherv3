@@ -95,7 +95,7 @@ final class IconRenderer {
 
     /** Corner-radius fraction for the TV-friendly rounded-square icon mask.
      *  ~0.22 of the side length approximates the continuous-corner
-     *  "squircle" look of Apple TV / Fire TV app tiles without the cost of a
+     *  "squircle" look of modern TV app tiles without the cost of a
      *  real superellipse path. Exposed so {@link RingView} and the cell
      *  placeholders can match the exact same corner so the focus ring hugs
      *  the icon edge. */
@@ -138,12 +138,12 @@ final class IconRenderer {
         sTilePaint.setStyle(Paint.Style.FILL);
     }
 
-    // ── Banner tiles (v1.5.0 — Apple-TV style 5:3 rounded-rect tiles) ─────
+    // ── Banner tiles (v1.5.0 — TV-style 5:3 rounded-rect tiles) ─────
 
     /** Render a real app banner ({@code android:banner}) to a {@code w × h}
      *  rounded-rectangle tile, scaled to COVER (center-crop) so the art fills
      *  the tile with no letterboxing. {@code corner} is the corner radius in
-     *  px (kept small/subtle to match Apple-TV app tiles). */
+     *  px (kept small/subtle to match the tile look). */
     static Bitmap processBannerArt(Drawable d, int w, int h, int corner) {
         if (d == null || w <= 0 || h <= 0) return null;
         int iw = d.getIntrinsicWidth(), ih = d.getIntrinsicHeight();

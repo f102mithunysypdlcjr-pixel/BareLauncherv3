@@ -792,7 +792,7 @@ across every hot-path scan we have.
   pill size — the teeth filled most of the angular budget, leaving
   little visible gap between them. The v1.3.4 6-tooth gear has a
   60° step instead of 45°, opening up wider angular gaps that read
-  as the canonical Material / iOS / tvOS settings gear at TV viewing
+  as the canonical Material settings gear at TV viewing
   distance. Per-tooth corner radius bumped from 30 % to 45 % of the
   tooth width so each tooth reads as visibly rounded rather than
   rectangular (the user's "rounded teeth" feedback). Tooth length
@@ -1049,7 +1049,7 @@ plus an audit pass that tidies a couple of small things.
 ### Audit
 
 - Removed a dead `toothW` constant inside
-  `AppleStyle.drawGearGlyph` that v1.3.0 declared "kept for design
+  `ToolbarStyle.drawGearGlyph` that v1.3.0 declared "kept for design
   intent" but didn't actually use. The unreachable
   `if (toothW < 0f)` line that prevented the unused-local-variable
   warning is gone with it.
@@ -1143,7 +1143,7 @@ and every config surface lives in one discoverable place.
   "remap remote buttons" entry — it's the unified settings entry —
   so the visual symbol updates to match. The gear is drawn entirely
   with `Canvas` primitives via the new
-  `AppleStyle.drawGearGlyph(canvas, cx, cy, r, color, stroke)`
+  `ToolbarStyle.drawGearGlyph(canvas, cx, cy, r, color, stroke)`
   helper: 8 teeth, body ring, inner hole, all proportional to the
   pill radius. No new vector or raster resources.
 - **WiFi pill long-press is now unbound.** The system-Settings
@@ -1652,7 +1652,7 @@ buffer alive for both `ImageView`s.
   first-tier WiFi shortcut. Discoverable via the standard
   press-and-hold gesture; falls back to a toast on stripped ROMs
   that have no Settings activity.
-- **`AppleStyle.makePillBackground(density)`** factory added so the
+- **`ToolbarStyle.makePillBackground(density)`** factory added so the
   clock pill and the toolbar plates draw with the same code (one
   paint set, one rounded-rect path). Each call produces a fresh
   `Drawable` because `Drawable` state (bounds / alpha / level) is
@@ -1707,7 +1707,7 @@ now converge cleanly instead of silently freezing those code paths.
   three button factories share — replaces three identical 1.06f
   literals). Color philosophy is identical: dark-glass idle plate,
   frosted-white focused plate, hairline white rim, glyph inverts on
-  focus. Every paint factory in `AppleStyle` is untouched.
+  focus. Every paint factory in `ToolbarStyle` is untouched.
 - **Mapper "sliders" glyph rebalanced for the smaller plate.** Bar
   length scales from 1.30× → 1.12× of the icon container so the bars
   no longer skim the rim, with a slightly thinner stroke (0.18 →
@@ -1866,8 +1866,8 @@ sink, and a hardened release pipeline.
     rasterisation, transparent-background detection, white-plate
     application, circle clipping). Owns its `ThreadLocal` scratch
     buffers and `Paint` instances. Allocation hygiene unchanged.
-  - `AppleStyle` — static helpers for the toolbar pill button style
-    (`applyApplePillStyle`, paint factories for stroke / fill / idle /
+  - `ToolbarStyle` — static helpers for the toolbar pill button style
+    (`applyPillStyle`, paint factories for stroke / fill / idle /
     focused / rim).
   - `KeymapStore` — pure-Java parse / serialise helpers for the
     persisted keymap and hidden-apps strings, exposed via a visitor /

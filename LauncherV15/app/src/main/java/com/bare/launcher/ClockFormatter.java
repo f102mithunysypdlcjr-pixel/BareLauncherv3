@@ -15,7 +15,7 @@ import java.util.Locale;
  * Encapsulates the home-screen clock's text formatting.
  *
  * <p>Visual brief: system-aware wall clock — 12-hour with a small "AM/PM"
- * suffix rendered at ~42% size in {@code sans-serif-thin} (Apple-TV / iOS
+ * suffix rendered at ~42% size in {@code sans-serif-thin} (modern
  * lock-screen style) when the device is in 12-hour mode; plain "HH:MM"
  * with no suffix when the device is in 24-hour mode.  The caller obtains
  * the current preference via
@@ -131,7 +131,7 @@ final class ClockFormatter {
      *
      * <p>When {@code use24h} is {@code false} (12-hour mode): renders
      * "h:mm AM" or "h:mm PM" with the AM/PM suffix at ~42% size in
-     * {@code sans-serif-thin} — Apple-TV / iOS lock-screen style.
+     * {@code sans-serif-thin} — modern lock-screen style.
      *
      * <p>When {@code use24h} is {@code true} (24-hour mode): renders
      * "HH:MM" always two digits for the hour (00–23), no AM/PM suffix.
