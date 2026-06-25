@@ -1139,27 +1139,41 @@ public class LauncherActivity extends Activity {
         fadeViewIn(shelf, true);
         if (showClock) fadeViewIn(clockView, false);
         fadeViewIn(ringView, false);
+        // Toolbar pills fade in to their dim idle alpha (0.6 — the rest value
+        // their own focus listeners use), so an unfocused pill lands correctly
+        // and the corner cluster no longer pops while the centre cross-fades.
+        // No hardware layer: they're tiny leaf views, a plain alpha tween is
+        // already free.
+        fadeViewIn(netBtn, 0.6f, false);
+        fadeViewIn(mapperBtnView, 0.6f, false);
     }
 
     private void fadeViewIn(View v, boolean withLayer) {
+        fadeViewIn(v, 1f, withLayer);
+    }
+
+    private void fadeViewIn(View v, float to, boolean withLayer) {
         if (v == null) return;
         v.animate().cancel();
         v.setAlpha(0f);
         android.view.ViewPropertyAnimator a = v.animate()
-                .alpha(1f).setDuration(DRAWER_ANIM_MS).setInterpolator(SCROLL_EASE);
+                .alpha(to).setDuration(DRAWER_ANIM_MS).setInterpolator(SCROLL_EASE);
         if (withLayer) a.withLayer();
         a.start();
     }
 
-    /** Snap the home surface (shelf, clock, ring) back to full opacity and
-     *  cancel any in-flight fade. Guards against an interrupted close-fade —
-     *  the drawer reopened, or an app launched, mid-fade — leaving any of
-     *  them stuck semi-transparent. Cheap; called on drawer-open and on the
-     *  resume-time drawer teardown. */
+    /** Snap the home surface (shelf, clock, ring, toolbar pills) back to its
+     *  resting opacity and cancel any in-flight fade. Guards against an
+     *  interrupted close-fade — the drawer reopened, or an app launched,
+     *  mid-fade — leaving any of them stuck semi-transparent. Pills reset to
+     *  their dim idle alpha (0.6); the others to fully opaque. Cheap; called
+     *  on drawer-open and on the resume-time drawer teardown. */
     private void resetHomeAlpha() {
         RecyclingShelfView s = shelf; if (s != null) { s.animate().cancel(); s.setAlpha(1f); }
         TextView cv = clockView;      if (cv != null) { cv.animate().cancel(); cv.setAlpha(1f); }
         RingView rv = ringView;       if (rv != null) { rv.animate().cancel(); rv.setAlpha(1f); }
+        View nb = netBtn;             if (nb != null) { nb.animate().cancel(); nb.setAlpha(0.6f); }
+        View mb = mapperBtnView;      if (mb != null) { mb.animate().cancel(); mb.setAlpha(0.6f); }
     }
 
     /** Frosted-glass backdrop for the drawer: GPU-blur the (static) wallpaper
