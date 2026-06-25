@@ -3057,6 +3057,24 @@ public class LauncherActivity extends Activity {
                     resolveSize(cellH, hSpec));
         }
 
+        /** The home row is a single line of spaced tiles that never overlap
+         *  one another, so the group does not need offscreen compositing to
+         *  apply alpha correctly. Returning {@code false} is what actually
+         *  fixes the return-from-drawer clip: a ViewGroup with overlapping
+         *  rendering (the default) renders into an offscreen buffer the moment
+         *  its alpha drops below 1 — and that buffer is sized to the shelf's
+         *  bounds. Since the shelf is exactly one cell tall and the focused
+         *  tile is scaled to FOCUS_SCALE, the tile's banner overflows the top
+         *  edge and the buffer shaves a thin black sliver off it for the whole
+         *  close cross-fade (the HOME button doesn't hit this because its
+         *  teardown restores alpha to 1 instantly, never an intermediate
+         *  value). With overlapping rendering off, the alpha is distributed to
+         *  each cell and composited straight into the (clipChildren=false)
+         *  root, so the scaled tile draws un-clipped. Non-overlapping children
+         *  mean the per-child alpha is visually identical to the buffered
+         *  path. */
+        @Override public boolean hasOverlappingRendering() { return false; }
+
         void setApps(List<AppInfo> apps) {
             if (reorderMode) exitReorderMode(false); // guard: don't corrupt dragIndex on list refresh
             hideContextMenu();
