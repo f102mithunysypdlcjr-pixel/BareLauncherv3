@@ -59,9 +59,13 @@
     <!-- %1$s is the Downloader app code for the latest release APK. -->
     <string name="about_downloader_code">Downloader code:  %1$s</string>
     <string name="about_check_github">Check latest version on GitHub</string>
-    <string name="about_made_by">Made by Mithun</string>
+    <string name="about_made_by">Made with care by Mithun</string>
     <string name="about_qr_kofi_caption">Scan to open my Ko-fi page</string>
     <string name="about_qr_github_caption">If you find a newer version on the GitHub page, just use the Downloader code above to download and install it.</string>
+    <!-- Clickable link shown beneath the QR code so a user on a device with a
+         browser can open the link directly instead of scanning. The Ko-fi QR
+         shows the raw URL; the GitHub QR shows this short button label. -->
+    <string name="about_github_link_button">BareLauncher latest version</string>
 
     <!-- Remote key shortcut labels. Order must match SHORTCUT_KEYCODES. -->
     <string name="key_red">Red</string>
@@ -74,10 +78,10 @@
     <!-- Toasts -->
     <string name="toast_no_network_settings">Cannot open network settings</string>
     <string name="toast_no_settings">Cannot open settings</string>
-    <string name="toast_no_bluetooth">Bluetooth / accessories settings unavailable on this device</string>
     <string name="toast_no_app_info">Cannot open app info</string>
     <string name="toast_app_unavailable">App not available</string>
     <string name="toast_no_file_picker">No file picker available</string>
+    <string name="toast_no_browser">No browser available to open the link</string>
     <string name="toast_wallpaper_load_failed">Could not load wallpaper</string>
     <string name="toast_wallpaper_no_permission">Could not get permission for this image</string>
     <!-- %1$s is the user-visible label of the app being uninstalled. -->
