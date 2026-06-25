@@ -14,6 +14,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   one to switch straight to that input, and move, place, or hide it
   anywhere just like an app. (Only appears on TVs that actually have these
   inputs.)
+- A cleaner return from the app drawer to the home screen — the selected
+  app tile no longer looks slightly cut off at the top.
 
 ## [2.0.0] — 2026-06-25
 

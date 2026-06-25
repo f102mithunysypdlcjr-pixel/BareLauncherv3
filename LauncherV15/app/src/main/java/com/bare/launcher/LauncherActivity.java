@@ -1133,10 +1133,21 @@ public class LauncherActivity extends Activity {
      *  downward fade in {@link #closeDrawer}. The small corner toolbar pills
      *  are left to their own idle alpha (they reappear at the screen edge
      *  where an instant restore isn't perceptible); fading the central
-     *  content is what removes the "snap". Cheap — a handful of alpha tweens,
-     *  the shelf flattened to one GPU layer for the duration via withLayer. */
+     *  content is what removes the "snap". Cheap — a handful of alpha tweens.
+     *
+     *  The shelf fades WITHOUT a hardware layer. A withLayer() fade flattens
+     *  the shelf to a GPU texture sized to the shelf's bounds — but the shelf
+     *  is only one cell tall (its height == cellHpx) and the focused tile is
+     *  scaled to FOCUS_SCALE, so its banner overflows the shelf's top edge by
+     *  ~3 %. The layer clipped that overflow, leaving a thin slice shaved off
+     *  the top of the selected icon for the whole return fade. The shelf has
+     *  clipChildren=false, so fading without a layer lets the scaled tile draw
+     *  past the shelf bounds (into the root) un-clipped. The home row is a
+     *  single row of non-overlapping tiles, so a per-child alpha fade is
+     *  visually identical to a layered one — and marginally cheaper (no layer
+     *  alloc / save-restore). */
     private void beginHomeFadeIn() {
-        fadeViewIn(shelf, true);
+        fadeViewIn(shelf, false);
         if (showClock) fadeViewIn(clockView, false);
         fadeViewIn(ringView, false);
         // Toolbar pills fade in to their dim idle alpha (0.6 — the rest value
