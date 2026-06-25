@@ -5,6 +5,16 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-06-25
+
+### What's new
+
+- **TV inputs as tiles.** Your TV's HDMI, AV and other inputs now show up
+  as their own tiles (HDMI 1, HDMI 2, …) right alongside your apps. Open
+  one to switch straight to that input, and move, place, or hide it
+  anywhere just like an app. (Only appears on TVs that actually have these
+  inputs.)
+
 ## [2.0.0] — 2026-06-25
 
 A brand-new look. BareLauncher gets a fresh home screen and a pull-down

@@ -80,6 +80,7 @@
     <string name="toast_no_settings">Cannot open settings</string>
     <string name="toast_no_app_info">Cannot open app info</string>
     <string name="toast_app_unavailable">App not available</string>
+    <string name="toast_input_unavailable">Can\'t switch to this input</string>
     <string name="toast_no_file_picker">No file picker available</string>
     <string name="toast_no_browser">No browser available to open the link</string>
     <string name="toast_wallpaper_load_failed">Could not load wallpaper</string>

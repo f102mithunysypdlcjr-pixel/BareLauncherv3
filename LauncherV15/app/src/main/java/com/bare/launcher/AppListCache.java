@@ -296,6 +296,12 @@ final class AppListCache {
      *  serialisation path the JVM tests exercise. */
     static Entry from(final AppInfo a) {
         if (a == null) return null;
+        // TV-input entries are not persisted to the cold-start cache — they
+        // carry no serialisable package/activity and are re-enumerated fresh
+        // from the TV Input Framework on every {@code loadApps} scan. Skipping
+        // them here keeps the cache to real apps; the live order (KEY_APP_ORDER)
+        // still records their position so they reappear where the user put them.
+        if (a.tvInputId != null) return null;
         final String cls = a.component != null ? a.component.getClassName() : null;
         return new Entry() {
             @Override public String pkg()           { return a.packageName; }

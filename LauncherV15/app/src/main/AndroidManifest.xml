@@ -37,6 +37,14 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
+    <!-- TV Input Framework: lets the launcher surface hardware inputs
+         (HDMI / AV / component) as tiles and switch to them. Declared NOT
+         required so the APK still installs on devices without TV inputs;
+         enumeration/launch need no runtime permission (see TvInputs). -->
+    <uses-feature
+        android:name="android.software.live_tv"
+        android:required="false" />
+
     <!-- PACKAGE VISIBILITY (Android 11+) -->
     <queries>
 

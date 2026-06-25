@@ -421,8 +421,15 @@ android {
         // Move flow), plus the About browser-link / Wi-Fi-cleanup / post-
         // update banner-refresh pass. See CHANGELOG.md [2.0.0] for the
         // user-facing summary.
-        versionCode   = 28
-        versionName   = "2.0.0"
+        //
+        // Bumped 28 → 29: 2.1.0 adds hardware TV inputs (HDMI / AV /
+        // component) as first-class app-like tiles via the platform TV Input
+        // Framework — they sort, place, move, hide, and bind exactly like
+        // apps, launch by switching to the passthrough source, and need NO
+        // special permission. A pure no-op on devices without TV inputs
+        // (streaming sticks, most boxes). SemVer MINOR — additive feature.
+        versionCode   = 29
+        versionName   = "2.1.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest

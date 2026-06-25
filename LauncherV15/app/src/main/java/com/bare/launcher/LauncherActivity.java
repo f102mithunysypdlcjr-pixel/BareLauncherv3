@@ -487,6 +487,10 @@ public class LauncherActivity extends Activity {
      *  entry to reorder mode by whichever of the home shelf / app drawer is
      *  reordering. See {@link ReorderHost}. */
     private ReorderHost        menuHost      = null;
+    /** True while the context menu is acting on a TV-input tile, so the
+     *  Uninstall / App-info rows are hidden and {@link #menuNavSel} skips
+     *  them. Set in {@link #showContextMenu(View)}. */
+    private boolean            menuRowsInputMode = false;
     private       TextView    menuHide      = null;
     private       TextView    menuUninstall = null;
     private       TextView    menuAppInfo   = null;
@@ -1194,7 +1198,7 @@ public class LauncherActivity extends Activity {
      *  manages its reorder teardown). Mirrors the shelf's ACTION_DELETE →
      *  ACTION_UNINSTALL_PACKAGE fallback chain. */
     private void doUninstall(AppInfo app) {
-        if (app == null) return;
+        if (app == null || app.tvInputId != null) return;   // inputs aren't uninstallable
         Uri pkgUri = Uri.fromParts("package", app.packageName, null);
         Intent primary = new Intent(Intent.ACTION_DELETE, pkgUri)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -1209,7 +1213,7 @@ public class LauncherActivity extends Activity {
     /** Open the system "App info" page for {@code app}. Shared by the drawer
      *  cell's reorder menu. */
     private void doAppInfo(AppInfo app) {
-        if (app == null) return;
+        if (app == null || app.tvInputId != null) return;   // inputs have no App-info page
         Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.fromParts("package", app.packageName, null))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -2195,6 +2199,15 @@ public class LauncherActivity extends Activity {
 
     void showContextMenu(View cell) {
         if (menuOverlay == null || menuHide == null || menuUninstall == null || menuAppInfo == null || menuMove == null) return;
+        // TV-input tiles can't be uninstalled or have an App-info page — hide
+        // those two rows so the menu shows only Hide + Move. Set BEFORE the
+        // measure below so the overlay sizes to the shorter list. menuNavSel
+        // then skips the hidden rows during D-pad navigation.
+        ReorderHost host = menuHost;
+        menuRowsInputMode = (host != null && host.menuAppIsInput());
+        int extraVis = menuRowsInputMode ? View.GONE : View.VISIBLE;
+        menuUninstall.setVisibility(extraVis);
+        menuAppInfo.setVisibility(extraVis);
         cell.getLocationOnScreen(menuCellLoc);
         FrameLayout r = root; if (r == null) return;
         r.getLocationOnScreen(menuRootLoc);
@@ -2307,6 +2320,30 @@ public class LauncherActivity extends Activity {
                     fm.setScaleY(1f);
                 })
                 .start();
+    }
+
+    /** Context-menu rows in top→bottom visual order. {@link #menuNavSel} walks
+     *  these so UP/DOWN navigation and the input-mode row-skipping live in one
+     *  place instead of being duplicated (and drifting) across the two cell
+     *  key handlers. */
+    private static final int[] MENU_ROWS_FULL = {
+            RecyclingShelfView.MENU_HIDE, RecyclingShelfView.MENU_UNINSTALL,
+            RecyclingShelfView.MENU_APP_INFO, RecyclingShelfView.MENU_MOVE };
+    /** Input tiles expose only Hide + Move (no Uninstall / App-info). */
+    private static final int[] MENU_ROWS_INPUT = {
+            RecyclingShelfView.MENU_HIDE, RecyclingShelfView.MENU_MOVE };
+
+    /** Next menu selection when navigating from {@code cur} by {@code dir}
+     *  ({@code -1} = UP toward Hide, {@code +1} = DOWN toward Move), clamped
+     *  at the ends and skipping the rows hidden in {@link #menuRowsInputMode}.
+     *  For a normal app this reproduces the previous hard-coded chain exactly
+     *  (Hide ↔ Uninstall ↔ App info ↔ Move). */
+    private int menuNavSel(int cur, int dir) {
+        int[] order = menuRowsInputMode ? MENU_ROWS_INPUT : MENU_ROWS_FULL;
+        int idx = 0;
+        for (int i = 0; i < order.length; i++) if (order[i] == cur) { idx = i; break; }
+        idx = Math.max(0, Math.min(order.length - 1, idx + dir));
+        return order[idx];
     }
 
     void updateMenuHighlight() {
@@ -2788,6 +2825,10 @@ public class LauncherActivity extends Activity {
 
         // ── ReorderHost (shared context menu) ────────────────────────────
         @Override public int menuSelection() { return menuSelection; }
+        @Override public boolean menuAppIsInput() {
+            return dragIndex >= 0 && dragIndex < displayed.size()
+                    && displayed.get(dragIndex).tvInputId != null;
+        }
         @Override public void onMenuHide() {
             if (!reorderMode) return;
             menuSelection = MENU_HIDE;
@@ -3637,15 +3678,9 @@ public class LauncherActivity extends Activity {
                             case KeyEvent.KEYCODE_DPAD_RIGHT:
                                 return true;   // no move until "Move" is confirmed
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                if      (menuSelection == MENU_MOVE)     { menuSelection = MENU_APP_INFO;  updateMenuHighlight(); }
-                                else if (menuSelection == MENU_APP_INFO) { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_UNINSTALL){ menuSelection = MENU_HIDE;      updateMenuHighlight(); }
-                                return true;
+                                menuSelection = menuNavSel(menuSelection, -1); updateMenuHighlight(); return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                if      (menuSelection == MENU_HIDE)      { menuSelection = MENU_UNINSTALL; updateMenuHighlight(); }
-                                else if (menuSelection == MENU_UNINSTALL) { menuSelection = MENU_APP_INFO;  updateMenuHighlight(); }
-                                else if (menuSelection == MENU_APP_INFO)  { menuSelection = MENU_MOVE;      updateMenuHighlight(); }
-                                return true;
+                                menuSelection = menuNavSel(menuSelection, +1); updateMenuHighlight(); return true;
                             case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER:
                             case KeyEvent.KEYCODE_BUTTON_A:
                                 if      (menuSelection == MENU_UNINSTALL) triggerUninstall();
@@ -3726,6 +3761,7 @@ public class LauncherActivity extends Activity {
 
             void triggerUninstall() {
                 if (boundApp == null) return;
+                if (boundApp.tvInputId != null) { exitReorderMode(false); return; }   // not for inputs
                 final AppInfo appToUninstall = boundApp;
                 final Uri pkgUri = Uri.fromParts("package", appToUninstall.packageName, null);
 
@@ -3762,6 +3798,7 @@ public class LauncherActivity extends Activity {
              *  path is well-supported but cheap-TV ROMs occasionally strip it. */
             void triggerAppInfo() {
                 if (boundApp == null) return;
+                if (boundApp.tvInputId != null) { exitReorderMode(false); return; }   // not for inputs
                 final String pkg = boundApp.packageName;
                 exitReorderMode(false);
                 Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -3977,6 +4014,10 @@ public class LauncherActivity extends Activity {
 
         // ── ReorderHost (shared context menu) ────────────────────────────
         @Override public int menuSelection() { return menuSelection; }
+        @Override public boolean menuAppIsInput() {
+            return dragIndex >= 0 && dragIndex < displayed.size()
+                    && displayed.get(dragIndex).tvInputId != null;
+        }
         @Override public void onMenuHide() {
             if (!reorderMode) return;
             menuSelection = RecyclingShelfView.MENU_HIDE;
@@ -4679,15 +4720,9 @@ public class LauncherActivity extends Activity {
                         // Stage 1 — menu shown: UP/DOWN navigate, OK selects.
                         switch (kc) {
                             case KeyEvent.KEYCODE_DPAD_UP:
-                                if      (menuSelection == RecyclingShelfView.MENU_MOVE)     { menuSelection = RecyclingShelfView.MENU_APP_INFO;  updateMenuHighlight(); }
-                                else if (menuSelection == RecyclingShelfView.MENU_APP_INFO) { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
-                                else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL){ menuSelection = RecyclingShelfView.MENU_HIDE;     updateMenuHighlight(); }
-                                return true;
+                                menuSelection = menuNavSel(menuSelection, -1); updateMenuHighlight(); return true;
                             case KeyEvent.KEYCODE_DPAD_DOWN:
-                                if      (menuSelection == RecyclingShelfView.MENU_HIDE)      { menuSelection = RecyclingShelfView.MENU_UNINSTALL; updateMenuHighlight(); }
-                                else if (menuSelection == RecyclingShelfView.MENU_UNINSTALL) { menuSelection = RecyclingShelfView.MENU_APP_INFO; updateMenuHighlight(); }
-                                else if (menuSelection == RecyclingShelfView.MENU_APP_INFO)  { menuSelection = RecyclingShelfView.MENU_MOVE;     updateMenuHighlight(); }
-                                return true;
+                                menuSelection = menuNavSel(menuSelection, +1); updateMenuHighlight(); return true;
                             case KeyEvent.KEYCODE_DPAD_LEFT:
                             case KeyEvent.KEYCODE_DPAD_RIGHT:
                                 return true; // no move until "Move" is confirmed (stage 2)
@@ -5224,6 +5259,12 @@ public class LauncherActivity extends Activity {
             //noinspection deprecation
             addApps(pm.queryIntentActivities(second, 0), self, seen, out);
         }
+        // Append hardware TV inputs (HDMI / AV / component …) as app-like
+        // entries so they sort, place, move, hide, and bind exactly like
+        // apps. Empty on devices without TIF inputs — a clean no-op. Done
+        // here (on the app executor) so the one binder query never touches
+        // the UI thread. See {@link TvInputs}.
+        out.addAll(TvInputs.enumerate(this));
         Collections.sort(out, (a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label));
         return out;
     }
@@ -5308,6 +5349,16 @@ public class LauncherActivity extends Activity {
      *  animations, so there is no performance cost or compatibility risk. */
     private void launchApp(AppInfo app, View source) {
         final android.os.Bundle anim = launchAnimBundle(source);
+        // TV-input entry: switch to the passthrough source (HDMI/AV/…) via
+        // the system Live-TV app instead of starting an activity. Scale-up
+        // animation from the tile is reused. Toast if no app can switch
+        // inputs (e.g. a box with TIF inputs but no Live-TV handler).
+        if (app.tvInputId != null) {
+            if (!TvInputs.launch(this, app.tvInputId, anim)) {
+                showToast(getString(R.string.toast_input_unavailable));
+            }
+            return;
+        }
         // Direct-intent fast path. PackageManager.getLaunchIntentForPackage
         // does TWO synchronous binder calls internally
         // (queryIntentActivities for CATEGORY_INFO, fall back to
@@ -8288,6 +8339,11 @@ public class LauncherActivity extends Activity {
     private Bitmap loadBannerBlocking(AppInfo app) {
         if (app == null) return null;
         final int w = tileWpx, h = bannerHpx, corner = tileCornerPx;
+        // TV-input tile: a generated glyph + label (there is no app banner or
+        // icon to resolve). Distinct, self-identifying at rest.
+        if (app.tvInputId != null) {
+            return IconRenderer.generateInputTile(w, h, corner, app.label, density);
+        }
         Drawable banner = resolveBannerDrawable(app);
         if (banner != null) {
             Bitmap b = IconRenderer.processBannerArt(banner, w, h, corner);

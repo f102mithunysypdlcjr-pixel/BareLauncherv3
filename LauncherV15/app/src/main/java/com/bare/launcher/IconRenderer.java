@@ -8,6 +8,7 @@ import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
@@ -181,6 +182,60 @@ final class IconRenderer {
             int ix = (w - isz) / 2, iy = (h - isz) / 2;
             icon.setBounds(ix, iy, ix + isz, iy + isz);
             icon.draw(c);
+        }
+        return out;
+    }
+
+    /** Generate a {@code w × h} rounded-rectangle tile for a hardware TV
+     *  input (HDMI / AV / …): a dark slate plate with a centred display glyph
+     *  and the input's label drawn beneath it, so each input tile is
+     *  self-identifying at rest (there is no per-input artwork). {@code corner}
+     *  px corner radius; {@code density} scales the stroke floors.
+     *
+     *  <p>Uses locally-allocated {@link Paint}s (not the shared static ones)
+     *  because it mutates colour / text-size and may run concurrently with
+     *  app-tile generation on the icon-executor pool. Input tiles are few and
+     *  generated once each (then cached), so the per-call allocation is
+     *  negligible — correctness over the micro-optimisation here. */
+    static Bitmap generateInputTile(int w, int h, int corner, String label, float density) {
+        if (w <= 0 || h <= 0) return null;
+        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out);
+        Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
+        bg.setStyle(Paint.Style.FILL);
+        bg.setColor(0xFF1E2A38);                             // slate-blue: distinct from app tiles
+        c.drawRoundRect(new RectF(0, 0, w, h), corner, corner, bg);
+
+        // Display/monitor glyph (screen + stand), centred in the upper area.
+        Paint glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
+        glyph.setStyle(Paint.Style.STROKE);
+        glyph.setStrokeWidth(Math.max(density, h * 0.035f));
+        glyph.setStrokeJoin(Paint.Join.ROUND);
+        glyph.setStrokeCap(Paint.Cap.ROUND);
+        glyph.setColor(0xFFE6F0FF);
+        float cx = w / 2f;
+        float screenW = w * 0.30f, screenH = h * 0.26f;
+        float top = h * 0.20f;
+        RectF screen = new RectF(cx - screenW / 2f, top, cx + screenW / 2f, top + screenH);
+        float sc = Math.min(screenW, screenH) * 0.18f;
+        c.drawRoundRect(screen, sc, sc, glyph);
+        float standY = top + screenH + h * 0.06f;
+        c.drawLine(cx, top + screenH, cx, standY, glyph);            // neck
+        c.drawLine(cx - screenW * 0.24f, standY, cx + screenW * 0.24f, standY, glyph); // base
+
+        // Label beneath the glyph, shrunk to fit the tile width.
+        if (label != null && !label.isEmpty()) {
+            Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+            tp.setColor(0xFFFFFFFF);
+            tp.setTextAlign(Paint.Align.CENTER);
+            tp.setFakeBoldText(true);
+            tp.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            tp.setTextSize(h * 0.17f);
+            float maxW = w * 0.86f;
+            while (tp.measureText(label) > maxW && tp.getTextSize() > 8f) {
+                tp.setTextSize(tp.getTextSize() - 1f);
+            }
+            c.drawText(label, cx, h * 0.86f, tp);
         }
         return out;
     }
