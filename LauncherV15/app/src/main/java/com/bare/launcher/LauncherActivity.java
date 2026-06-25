@@ -487,10 +487,6 @@ public class LauncherActivity extends Activity {
      *  entry to reorder mode by whichever of the home shelf / app drawer is
      *  reordering. See {@link ReorderHost}. */
     private ReorderHost        menuHost      = null;
-    /** True while the context menu is acting on a TV-input tile, so the
-     *  Uninstall / App-info rows are hidden and {@link #menuNavSel} skips
-     *  them. Set in {@link #showContextMenu(View)}. */
-    private boolean            menuRowsInputMode = false;
     private       TextView    menuHide      = null;
     private       TextView    menuUninstall = null;
     private       TextView    menuAppInfo   = null;
@@ -2204,8 +2200,8 @@ public class LauncherActivity extends Activity {
         // measure below so the overlay sizes to the shorter list. menuNavSel
         // then skips the hidden rows during D-pad navigation.
         ReorderHost host = menuHost;
-        menuRowsInputMode = (host != null && host.menuAppIsInput());
-        int extraVis = menuRowsInputMode ? View.GONE : View.VISIBLE;
+        boolean inputMode = (host != null && host.menuAppIsInput());
+        int extraVis = inputMode ? View.GONE : View.VISIBLE;
         menuUninstall.setVisibility(extraVis);
         menuAppInfo.setVisibility(extraVis);
         cell.getLocationOnScreen(menuCellLoc);
@@ -2335,11 +2331,15 @@ public class LauncherActivity extends Activity {
 
     /** Next menu selection when navigating from {@code cur} by {@code dir}
      *  ({@code -1} = UP toward Hide, {@code +1} = DOWN toward Move), clamped
-     *  at the ends and skipping the rows hidden in {@link #menuRowsInputMode}.
-     *  For a normal app this reproduces the previous hard-coded chain exactly
-     *  (Hide ↔ Uninstall ↔ App info ↔ Move). */
+     *  at the ends and skipping the Uninstall / App-info rows when the menu is
+     *  acting on a TV input. Input-mode is read LIVE from the active host (not
+     *  a cached flag) so navigation can never run against a stale mode — the
+     *  dragged item is fixed while the menu is open, so this is O(1) and
+     *  stable. For a normal app this reproduces the previous hard-coded chain
+     *  exactly (Hide ↔ Uninstall ↔ App info ↔ Move). */
     private int menuNavSel(int cur, int dir) {
-        int[] order = menuRowsInputMode ? MENU_ROWS_INPUT : MENU_ROWS_FULL;
+        boolean input = (menuHost != null && menuHost.menuAppIsInput());
+        int[] order = input ? MENU_ROWS_INPUT : MENU_ROWS_FULL;
         int idx = 0;
         for (int i = 0; i < order.length; i++) if (order[i] == cur) { idx = i; break; }
         idx = Math.max(0, Math.min(order.length - 1, idx + dir));
