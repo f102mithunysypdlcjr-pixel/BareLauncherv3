@@ -432,6 +432,17 @@ public class LauncherActivity extends Activity {
      *  acted-on app occupied so focus lands sensibly on return. */
     private boolean keepDrawerOpenOnResume = false;
     private int     pendingDrawerFocusIdx  = 0;
+    /** Drawer index to re-focus after the post-uninstall reconcile rebuilds the
+     *  drawer list (so the selector stays on the uninstalled app's slot — the
+     *  app that slid into it — instead of being clamped to the last cell). -1
+     *  when idle. Mirrors the in-place refocus the Hide path does directly. */
+    private int     pendingDrawerRefocus   = -1;
+    /** Package being uninstalled from the drawer, and whether it was a home-row
+     *  app, so the reconcile can shrink the home row by one ONLY when the
+     *  uninstall actually went through (a cancelled dialog leaves the package
+     *  installed → no change). {@code null} when idle. */
+    private String  pendingUninstallPkg     = null;
+    private boolean pendingUninstallWasHome = false;
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
@@ -1087,6 +1098,10 @@ public class LauncherActivity extends Activity {
      *  back to the toolbar so focus is never lost. */
     private void closeDrawer() {
         AppDrawer d = drawer;
+        // Leaving the drawer cancels any pending post-uninstall refocus / home
+        // shrink so they can't apply to a later, unrelated reconcile.
+        pendingDrawerRefocus = -1;
+        pendingUninstallPkg  = null;
         if (d == null || d.getVisibility() != View.VISIBLE) return;
         if (d.closing) return;   // a close is already animating — ignore re-triggers (held DPAD-UP)
         final int drawerFocus = d.focusedIndex;
@@ -1268,8 +1283,18 @@ public class LauncherActivity extends Activity {
      *                    sensible neighbouring cell to refocus. */
     private void hideApp(AppInfo app, boolean fromDrawer, int focusHint) {
         if (app == null) return;
+        // Was the hidden app sitting in the home row? Capture BEFORE mutating
+        // the hidden set (focusHint is the app's index on its surface: a shelf
+        // index is always a home slot; a drawer index is a home slot when it's
+        // below the home boundary).
+        int oldHc = effectiveHomeCount(countVisible(appList));
+        boolean wasHome = focusHint >= 0 && focusHint < oldHc;
         if (!hiddenApps.add(app.packageName)) return;   // already hidden — no-op
         saveHiddenApps();
+        // Shrink the home row by one when a home favourite is hidden, so its
+        // slot simply disappears instead of the first drawer app being pulled
+        // up to keep the row at its old size. (Drawer apps don't affect it.)
+        if (wasHome && homeCount > 1) { homeCount--; saveHomeCount(); }
         // The Manage-hidden-apps list is rebuilt lazily; this app must now
         // appear there. (buildHideChips rebuilds from hiddenApps on open.)
         keymapHideBuiltSize = -1;
@@ -1463,6 +1488,8 @@ public class LauncherActivity extends Activity {
                 });
             } else {
                 keepDrawerOpenOnResume = false;
+                pendingDrawerRefocus = -1;
+                pendingUninstallPkg  = null;
                 if (d2 != null) d2.forceHide();
                 RecyclingShelfView sh = shelf;
                 if (sh != null) {
@@ -4656,6 +4683,7 @@ public class LauncherActivity extends Activity {
         void triggerUninstall() {
             AppInfo app = (dragIndex >= 0 && dragIndex < displayed.size()) ? displayed.get(dragIndex) : null;
             int idx = dragIndex;
+            boolean wasHome = idx >= 0 && idx < hc();
             exitReorderMode(false);   // dismiss the context menu, but keep the drawer open
             if (app == null) return;
             // Stay in the drawer on return (mirrors Hide). The uninstall dialog
@@ -4664,7 +4692,16 @@ public class LauncherActivity extends Activity {
             // flag if the system dialog actually launches (else we'd never
             // pause/resume to clear it).
             LauncherActivity.this.pendingDrawerFocusIdx = Math.max(0, idx);
-            LauncherActivity.this.keepDrawerOpenOnResume = LauncherActivity.this.doUninstall(app);
+            boolean launched = LauncherActivity.this.doUninstall(app);
+            LauncherActivity.this.keepDrawerOpenOnResume = launched;
+            if (launched) {
+                // Keep the selector on this slot after the reconcile, and shrink
+                // the home row if a home app was removed — but only once the
+                // reconcile confirms the package is actually gone (cancel-safe).
+                LauncherActivity.this.pendingDrawerRefocus    = Math.max(0, idx);
+                LauncherActivity.this.pendingUninstallPkg      = app.packageName;
+                LauncherActivity.this.pendingUninstallWasHome  = wasHome;
+            }
         }
         void triggerHide() {
             int idx = dragIndex;
@@ -5090,6 +5127,18 @@ public class LauncherActivity extends Activity {
                                 AppInfo a = freshFinal.get(i);
                                 appByPackage.put(a.packageName, a);
                             }
+                            // Cancel-safe home-row shrink: if an app uninstalled
+                            // from the drawer was a home favourite AND is now
+                            // actually gone, drop the home count by one so the
+                            // home row loses that slot instead of pulling the
+                            // first drawer app up. Done BEFORE applyShelfApps so
+                            // the rebuild uses the new count.
+                            if (pendingUninstallPkg != null && !freshPkgs.contains(pendingUninstallPkg)) {
+                                if (pendingUninstallWasHome && homeCount > 1) {
+                                    homeCount--; saveHomeCount();
+                                }
+                                pendingUninstallPkg = null;
+                            }
                             RecyclingShelfView s = shelf;
                             if (s != null) {
                                 // A6 fix: the saved scroll index is a
@@ -5113,6 +5162,25 @@ public class LauncherActivity extends Activity {
                                     pendingScrollIdx = -1;
                                 }
                                 applyShelfApps(s);
+                            }
+                            // Task: after an uninstall from the open drawer, put
+                            // the selector back on the slot the removed app left
+                            // (the app that slid into it), not the last cell.
+                            // Posted after applyShelfApps' setApps focus post, so
+                            // this one wins. Mirrors the Hide path's in-place
+                            // refocus.
+                            if (pendingDrawerRefocus >= 0) {
+                                final int h = pendingDrawerRefocus;
+                                pendingDrawerRefocus = -1;
+                                final AppDrawer dd = drawer;
+                                if (dd != null && dd.getVisibility() == View.VISIBLE) {
+                                    dd.post(() -> {
+                                        if (dd.getVisibility() != View.VISIBLE) return;
+                                        int n = countVisible(appList);
+                                        if (n > 0) dd.requestFocusOnIndex(
+                                                Math.max(0, Math.min(h, n - 1)), true);
+                                    });
+                                }
                             }
                             // A2 fix: when a package broadcast fires
                             // while the user is INSIDE the keymap card's
@@ -6711,10 +6779,12 @@ public class LauncherActivity extends Activity {
                     : R.string.about_qr_github_caption);
         }
         if (aboutQrLink != null) {
-            // Ko-fi shows the raw URL (the user asked for the full link text);
-            // GitHub shows the short "BareLauncher latest version" label.
+            // Ko-fi shows the link without the "https://" scheme (cleaner, and
+            // a browser fills the scheme in anyway); GitHub shows the short
+            // "BareLauncher latest version" label. aboutQrUrl keeps the full
+            // URL for the actual open.
             aboutQrLink.setText(which == ABOUT_ROW_KOFI
-                    ? url
+                    ? url.replaceFirst("^https?://", "")
                     : getString(R.string.about_github_link_button));
         }
         aboutShowingQr = true;
