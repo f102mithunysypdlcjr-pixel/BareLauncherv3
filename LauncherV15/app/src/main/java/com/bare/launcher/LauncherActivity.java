@@ -151,6 +151,11 @@ public class LauncherActivity extends Activity {
      *  Off, 30s, 45s, 1m, 1.5m, 2m, 3m, 5m, 10m. */
     private static final int[]  SLIDESHOW_STEPS_SEC =
             { 0, 30, 45, 60, 90, 120, 180, 300, 600 };
+    /** Interval auto-enabled when a folder is picked while the slideshow is
+     *  completely off, so choosing a folder visibly starts the rotation
+     *  without the user also having to set a duration. Must be a member of
+     *  {@link #SLIDESHOW_STEPS_SEC}. */
+    private static final int    SLIDESHOW_DEFAULT_SEC = 60;
 
     // Subtle focus pop — animations toned down for performance / stability.
     // No vertical lift (saves a frame of layout work and removes a class of
@@ -9185,13 +9190,20 @@ public class LauncherActivity extends Activity {
         else                         applyCurrentSlideshowImage();
     }
 
-    /** Enumerate the folder's images on the app executor, then run
-     *  {@code onReady} on the UI thread. No-op if no folder is set. */
+    /** Enumerate the folder's images on a dedicated one-shot thread, then run
+     *  {@code onReady} on the UI thread. No-op if no folder is set.
+     *  <p>Deliberately NOT on {@link #appExecutor}: that single-thread executor
+     *  has a 1-deep queue and a {@code DiscardPolicy}, so a slideshow scan
+     *  submitted during the cold-start app scan would be silently dropped —
+     *  leaving {@code slideshowImages} null forever and the rotation / each-
+     *  restart change dead until a manual folder re-pick. A short-lived thread
+     *  (the same pattern as the folder-picker scan) always runs, costs nothing
+     *  once it exits, and never contends with the app scan. */
     private void enumerateSlideshowAsync(Runnable onReady) {
         final String folder = slideshowFolderUri;
         if (folder == null) return;
         try {
-            appExecutor.execute(() -> {
+            new Thread(() -> {
                 final String[] imgs = listSlideshowImages(folder);
                 uiHandler.post(() -> {
                     if (destroyed) return;
@@ -9203,8 +9215,8 @@ public class LauncherActivity extends Activity {
                     slideshowImages = (imgs != null) ? imgs : new String[0];
                     if (onReady != null) onReady.run();
                 });
-            });
-        } catch (Exception ignored) { /* executor saturated/shut down */ }
+            }, "wp-slideshow-scan").start();
+        } catch (Exception ignored) { /* thread create failed — extremely rare */ }
     }
 
     /** List the images in the chosen MediaStore folder (bucket), sorted by
@@ -9492,20 +9504,28 @@ public class LauncherActivity extends Activity {
         return true;
     }
 
-    /** Commit the chosen folder: store its bucket id, start the slideshow. */
+    /** Commit the chosen folder: store its bucket id, start the slideshow.
+     *  If the slideshow was completely off (no interval, no each-restart),
+     *  auto-enable a sensible default interval so picking a folder visibly
+     *  starts the rotation — the user shouldn't have to set a duration too. */
     private void selectFolder(int index) {
         if (index < 0 || index >= folderPickerData.size()) return;
         String bucketId = folderPickerData.get(index)[0];
         slideshowFolderUri = bucketId;
         slideshowIndex     = 0;
         slideshowImages    = null;
-        prefs.edit()
+        android.content.SharedPreferences.Editor ed = prefs.edit()
                 .putString(KEY_SLIDESHOW_FOLDER, bucketId)
-                .putInt(KEY_SLIDESHOW_INDEX, 0)
-                .apply();
+                .putInt(KEY_SLIDESHOW_INDEX, 0);
+        if (slideshowDurationSec == 0 && !slideshowRestart) {
+            slideshowDurationSec = SLIDESHOW_DEFAULT_SEC;
+            ed.putInt(KEY_SLIDESHOW_DURATION, slideshowDurationSec);
+        }
+        ed.apply();
         hideFolderPicker();
-        final boolean showNow = slideshowActive();
-        enumerateSlideshowAsync(() -> { if (showNow) applyCurrentSlideshowImage(); });
+        refreshSettingsRows();   // reflect a duration we may have just auto-set
+        // Show the first image now and arm the interval timer.
+        enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
         restartSlideshowTimer();
         showToast(getString(R.string.toast_slideshow_folder_set));
     }
