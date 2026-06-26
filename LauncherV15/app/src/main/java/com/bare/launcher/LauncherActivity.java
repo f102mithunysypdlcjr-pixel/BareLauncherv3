@@ -9366,13 +9366,21 @@ public class LauncherActivity extends Activity {
         title.setPadding(dp(6), 0, dp(6), dp(8));
         card.addView(title);
 
-        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        // Height caps at maxH so a long folder list scrolls, but a short one
+        // wraps to its rows (no tall empty card / dead space below the rows).
+        final int maxH = Math.max(dp(120), Math.min(dp(368), screenH - dp(140)));
+        android.widget.ScrollView sv = new android.widget.ScrollView(this) {
+            @Override protected void onMeasure(int wSpec, int hSpec) {
+                super.onMeasure(wSpec,
+                        View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST));
+            }
+        };
+        sv.setVerticalScrollBarEnabled(false);
         sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         android.widget.LinearLayout colL = new android.widget.LinearLayout(this);
         colL.setOrientation(android.widget.LinearLayout.VERTICAL);
-        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
-        int maxH = Math.max(dp(120), Math.min(dp(368), screenH - dp(140)));
-        card.addView(sv, new android.widget.LinearLayout.LayoutParams(dp(308), maxH));
+        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
+        card.addView(sv, new android.widget.LinearLayout.LayoutParams(dp(300), WRAP));
 
         FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
         cardLp.gravity = Gravity.CENTER;
@@ -9425,7 +9433,7 @@ public class LauncherActivity extends Activity {
                 selectFolder(idx);
             });
             android.widget.LinearLayout.LayoutParams rowLp =
-                    new android.widget.LinearLayout.LayoutParams(dp(280), WRAP);
+                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
             rowLp.bottomMargin = dp(2);
             col.addView(row, rowLp);
         }
