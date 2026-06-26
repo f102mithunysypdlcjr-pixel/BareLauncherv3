@@ -420,6 +420,18 @@ public class LauncherActivity extends Activity {
      *  drawer (correct context), while a genuine return to the launcher still
      *  lands on a freshly-built home screen. */
     private boolean drawerWasOpenAtPause = false;
+
+    /** Set when Uninstall / App-info is invoked from the OPEN drawer. Both
+     *  launch a system screen (so the activity pauses), but unlike an app
+     *  launch we want to come back INTO the drawer — mirroring Hide, which
+     *  stays in the drawer. When this is true on {@link #onResume} the
+     *  deferred teardown keeps the drawer open and re-asserts its focus /
+     *  backdrop instead of restoring the home screen. The package-removed
+     *  reconcile (loadApps → applyShelfApps → setApps) refreshes the drawer's
+     *  list in place. {@link #pendingDrawerFocusIdx} carries the slot the
+     *  acted-on app occupied so focus lands sensibly on return. */
+    private boolean keepDrawerOpenOnResume = false;
+    private int     pendingDrawerFocusIdx  = 0;
     private ViewTreeObserver.OnGlobalLayoutListener focusRestoreListener;
     private final int[]    ringCellLoc      = new int[2];
     private final int[]    ringRootLoc      = new int[2];
@@ -1213,28 +1225,30 @@ public class LauncherActivity extends Activity {
      *  cell's reorder menu; the shelf cell keeps its own copy (which also
      *  manages its reorder teardown). Mirrors the shelf's ACTION_DELETE →
      *  ACTION_UNINSTALL_PACKAGE fallback chain. */
-    private void doUninstall(AppInfo app) {
-        if (app == null || app.tvInputId != null) return;   // inputs aren't uninstallable
+    private boolean doUninstall(AppInfo app) {
+        if (app == null || app.tvInputId != null) return false;   // inputs aren't uninstallable
         Uri pkgUri = Uri.fromParts("package", app.packageName, null);
         Intent primary = new Intent(Intent.ACTION_DELETE, pkgUri)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (tryStartActivityResolved(primary)) return;
+        if (tryStartActivityResolved(primary)) return true;
         @SuppressWarnings("deprecation")
         Intent fallback = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (tryStartActivityResolved(fallback)) return;
+        if (tryStartActivityResolved(fallback)) return true;
         showToast(getString(R.string.toast_cannot_uninstall, app.label));
+        return false;
     }
 
     /** Open the system "App info" page for {@code app}. Shared by the drawer
-     *  cell's reorder menu. */
-    private void doAppInfo(AppInfo app) {
-        if (app == null || app.tvInputId != null) return;   // inputs have no App-info page
+     *  cell's reorder menu. Returns whether the system screen was launched. */
+    private boolean doAppInfo(AppInfo app) {
+        if (app == null || app.tvInputId != null) return false;   // inputs have no App-info page
         Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.fromParts("package", app.packageName, null))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (tryStartActivityResolved(i)) return;
+        if (tryStartActivityResolved(i)) return true;
         showToast(getString(R.string.toast_no_app_info));
+        return false;
     }
 
     /** Hide {@code app} from the home shelf and drawer. The app stays
@@ -1420,20 +1434,53 @@ public class LauncherActivity extends Activity {
         // transition animates from the drawer instead of a flashed home
         // screen. forceHide also clears the wallpaper blur and restores the
         // toolbar/clock chrome.
+        boolean drawerKeptOpen = false;
         if (drawerWasOpenAtPause) {
             drawerWasOpenAtPause = false;
             AppDrawer d2 = drawer;
-            if (d2 != null) d2.forceHide();
-            RecyclingShelfView sh = shelf;
-            if (sh != null) {
-                resetHomeAlpha();   // app may have launched mid close-fade — clear leftover alpha
-                sh.setVisibility(View.VISIBLE);
-                List<AppInfo> vis = buildVisibleList();
-                pushHomeRow(sh, vis, effectiveHomeCount(vis.size()));
+            if (keepDrawerOpenOnResume && d2 != null && d2.getVisibility() == View.VISIBLE) {
+                // Uninstall / App-info was launched from the drawer — keep the
+                // drawer open on return (mirrors Hide). Snap it to its resting
+                // open state (a close/open tween may have been cancelled mid-
+                // flight at pause), re-assert the frosted backdrop, and land
+                // focus back on the slot the acted-on app occupied. The
+                // package-removed reconcile refreshes the list in place.
+                keepDrawerOpenOnResume = false;
+                drawerKeptOpen = true;
+                d2.animate().cancel();
+                d2.setAlpha(1f);
+                d2.setTranslationY(0f);
+                applyDrawerBlur(true);
+                setHomeChromeVisible(false);
+                RecyclingShelfView sh = shelf;
+                if (sh != null) sh.setVisibility(View.INVISIBLE);
+                final AppDrawer fd = d2;
+                final int hint = pendingDrawerFocusIdx;
+                fd.post(() -> {
+                    if (fd.getVisibility() != View.VISIBLE) return;
+                    int n = countVisible(appList);
+                    if (n > 0) fd.requestFocusOnIndex(Math.max(0, Math.min(hint, n - 1)), true);
+                });
+            } else {
+                keepDrawerOpenOnResume = false;
+                if (d2 != null) d2.forceHide();
+                RecyclingShelfView sh = shelf;
+                if (sh != null) {
+                    resetHomeAlpha();   // app may have launched mid close-fade — clear leftover alpha
+                    sh.setVisibility(View.VISIBLE);
+                    List<AppInfo> vis = buildVisibleList();
+                    pushHomeRow(sh, vis, effectiveHomeCount(vis.size()));
+                }
             }
         }
+        // Defensive: the flag is consumed inside the block above whenever the
+        // drawer was open at pause (the only way it gets set). Clear it
+        // unconditionally so an unpaired set (e.g. the rare ROM where the
+        // system dialog never actually paused us) can never carry into a
+        // later, unrelated resume and wrongly keep the drawer open.
+        keepDrawerOpenOnResume = false;
         RecyclingShelfView s = shelf;
-        if (s != null) {
+        if (s != null && !drawerKeptOpen) {
             int saved = prefs.getInt(KEY_SCROLL_IDX, 0);
             if (!appList.isEmpty()) {
                 // Clamp against the shelf's currently-displayed size so a
@@ -4608,9 +4655,16 @@ public class LauncherActivity extends Activity {
 
         void triggerUninstall() {
             AppInfo app = (dragIndex >= 0 && dragIndex < displayed.size()) ? displayed.get(dragIndex) : null;
-            exitReorderMode(false);
-            LauncherActivity.this.closeDrawer();   // return to home before the system dialog
-            if (app != null) LauncherActivity.this.doUninstall(app);
+            int idx = dragIndex;
+            exitReorderMode(false);   // dismiss the context menu, but keep the drawer open
+            if (app == null) return;
+            // Stay in the drawer on return (mirrors Hide). The uninstall dialog
+            // pauses us; onResume keeps the drawer open and the package-removed
+            // reconcile re-filters its list in place. Only arm the keep-open
+            // flag if the system dialog actually launches (else we'd never
+            // pause/resume to clear it).
+            LauncherActivity.this.pendingDrawerFocusIdx = Math.max(0, idx);
+            LauncherActivity.this.keepDrawerOpenOnResume = LauncherActivity.this.doUninstall(app);
         }
         void triggerHide() {
             int idx = dragIndex;
@@ -4622,9 +4676,13 @@ public class LauncherActivity extends Activity {
         }
         void triggerAppInfo() {
             AppInfo app = (dragIndex >= 0 && dragIndex < displayed.size()) ? displayed.get(dragIndex) : null;
-            exitReorderMode(false);
-            LauncherActivity.this.closeDrawer();
-            if (app != null) LauncherActivity.this.doAppInfo(app);
+            int idx = dragIndex;
+            exitReorderMode(false);   // dismiss the context menu, but keep the drawer open
+            if (app == null) return;
+            // App-info opens the system details screen (pauses us); come back
+            // into the drawer rather than the home screen, same as Uninstall.
+            LauncherActivity.this.pendingDrawerFocusIdx = Math.max(0, idx);
+            LauncherActivity.this.keepDrawerOpenOnResume = LauncherActivity.this.doAppInfo(app);
         }
 
         // ── DrawerCell ─────────────────────────────────────────────────────
@@ -6414,9 +6472,9 @@ public class LauncherActivity extends Activity {
         android.graphics.drawable.GradientDrawable qrPlate =
                 new android.graphics.drawable.GradientDrawable();
         qrPlate.setColor(0xFFFFFFFF);
-        qrPlate.setCornerRadius(dp(8));
+        qrPlate.setCornerRadius(dp(16));
         qrImg.setBackground(qrPlate);
-        qrImg.setPadding(dp(6), dp(6), dp(6), dp(6));
+        qrImg.setPadding(dp(10), dp(10), dp(10), dp(10));
         int qrSz = dp(216);
         qr.addView(qrImg, new android.widget.LinearLayout.LayoutParams(qrSz, qrSz));
 
@@ -6517,7 +6575,15 @@ public class LauncherActivity extends Activity {
 
     /** A small Ko-fi-style coffee cup, drawn into a bitmap (no asset). */
     private View makeKofiIcon() {
-        int s = Math.max(1, dp(22));
+        ImageView iv = new ImageView(this);
+        iv.setImageBitmap(kofiCupBitmap(Math.max(1, dp(22)), 0xCCFFFFFF));   // white steam over the dark row
+        return iv;
+    }
+
+    /** Draw the Ko-fi coffee cup into an {@code s × s} bitmap. {@code steam}
+     *  is the steam-line colour so the cup reads on both the dark About row
+     *  (light steam) and the white QR centre plate (red steam). */
+    private Bitmap kofiCupBitmap(int s, int steam) {
         Bitmap b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
         android.graphics.Canvas c = new android.graphics.Canvas(b);
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -6535,14 +6601,34 @@ public class LauncherActivity extends Activity {
                 new android.graphics.RectF(s * 0.58f, s * 0.48f, s * 0.84f, s * 0.78f);
         c.drawArc(handle, -70f, 140f, false, p);
         // Steam.
-        p.setColor(0xCCFFFFFF);
+        p.setColor(steam);
         p.setStrokeWidth(s * 0.05f);
         p.setStrokeCap(Paint.Cap.ROUND);
         c.drawLine(s * 0.30f, s * 0.34f, s * 0.30f, s * 0.14f, p);
         c.drawLine(s * 0.46f, s * 0.34f, s * 0.46f, s * 0.14f, p);
-        ImageView iv = new ImageView(this);
-        iv.setImageBitmap(b);
-        return iv;
+        return b;
+    }
+
+    /** Centre-logo bitmap for an About QR, or {@code null} (plain modern code)
+     *  when none is available. Ko-fi → the coffee cup; GitHub → the octicon
+     *  mark vector. Wrapped so a missing/garbled vector can never break the QR
+     *  — the code just renders without a logo. */
+    private Bitmap aboutQrLogo(int which) {
+        try {
+            int s = Math.max(1, dp(56));
+            if (which == ABOUT_ROW_KOFI) {
+                return kofiCupBitmap(s, 0xFFFF5E5B);   // red steam reads on the white plate
+            }
+            Drawable d = getDrawable(R.drawable.logo_github);
+            if (d == null) return null;
+            Bitmap b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
+            android.graphics.Canvas c = new android.graphics.Canvas(b);
+            d.setBounds(0, 0, s, s);
+            d.draw(c);
+            return b;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private void showAboutOverlay() {
@@ -6613,7 +6699,11 @@ public class LauncherActivity extends Activity {
     private void showAboutQr(int which) {
         String url = (which == ABOUT_ROW_KOFI) ? ABOUT_KOFI_URL : ABOUT_GITHUB_RELEASES;
         aboutQrUrl = url;
-        Bitmap bmp = QrCode.render(url, dp(204), 0xFF101014, 0xFFFFFFFF);
+        // Modern rounded code with the matching brand mark centred. Falls back
+        // to a plain modern code if the logo can't be built; renderStyled keeps
+        // level-M error correction, which recovers the small centre plate.
+        Bitmap bmp = QrCode.renderStyled(url, dp(204), 0xFF101014, 0xFFFFFFFF,
+                aboutQrLogo(which), 0.22f);
         if (aboutQrImage != null) aboutQrImage.setImageBitmap(bmp);
         if (aboutQrCaption != null) {
             aboutQrCaption.setText(which == ABOUT_ROW_KOFI
@@ -7479,7 +7569,11 @@ public class LauncherActivity extends Activity {
         addPickerChip(strip, getString(R.string.keymap_not_assigned), null, true);
         for (int i = 0; i < keymapPickerApps.size(); i++) {
             AppInfo a = keymapPickerApps.get(i);
-            Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
+            // TV inputs have no app icon in the cache — draw a small input
+            // glyph so the chip isn't blank. Apps use their cached round icon.
+            Bitmap b = (a.tvInputId != null)
+                    ? IconRenderer.generateInputGlyphIcon(dp(20), density)
+                    : ((iconCache != null) ? iconCache.get(a.packageName) : null);
             addPickerChip(strip, a.label, b, false);
         }
     }
@@ -7930,7 +8024,10 @@ public class LauncherActivity extends Activity {
                 (a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.label, b.label));
         for (int i = 0; i < hideListApps.size(); i++) {
             AppInfo a = hideListApps.get(i);
-            Bitmap b = (iconCache != null) ? iconCache.get(a.packageName) : null;
+            // TV inputs have no cached app icon — use a small input glyph.
+            Bitmap b = (a.tvInputId != null)
+                    ? IconRenderer.generateInputGlyphIcon(dp(22), density)
+                    : ((iconCache != null) ? iconCache.get(a.packageName) : null);
             addHideRow(strip, a.label, b);
         }
         if (hideListApps.isEmpty()) {
@@ -8099,8 +8196,14 @@ public class LauncherActivity extends Activity {
         int idx = keymapHideIdx;
         if (idx < 0 || idx >= hideListApps.size()) return;
         String pkg = hideListApps.get(idx).packageName;
+        AppInfo unhidden = hideListApps.get(idx);
         hiddenApps.remove(pkg);
         saveHiddenApps();
+        // Land the returning app at the FRONT of the drawer rather than letting
+        // it reclaim its old home-row slot (which would bump a current favourite
+        // down into the drawer). Keeps the user's visible home row exactly as it
+        // is and treats unhide as "bring it back into the drawer".
+        repositionUnhiddenIntoDrawer(unhidden);
         keymapHideDirty = true;
         // Rebuild the "hidden only" list (the unhidden app is now gone) and
         // clamp the cursor to the new, shorter list.
@@ -8109,6 +8212,35 @@ public class LauncherActivity extends Activity {
         keymapHideIdx     = n > 0 ? Math.min(idx, n - 1) : -1;
         keymapHideLastIdx = -1;   // force a full repaint
         refreshHideStrip();
+    }
+
+    /** Re-place a just-unhidden app at the FIRST drawer slot (immediately past
+     *  the home segment) instead of leaving it at its old index — which, if
+     *  that index fell inside the home row, would push a current favourite out
+     *  to the drawer. The home row keeps exactly the apps it shows now; the
+     *  returning app joins the top of the drawer.
+     *
+     *  <p>Positional model (see {@link HomeDrawerModel}): the home row is the
+     *  first {@code effectiveHomeCount} visible apps. We remove the app and
+     *  re-insert it at the {@link #appList} index whose visible rank equals
+     *  {@code hc}, so its new visible rank is exactly the first drawer slot.
+     *  When there aren't enough visible apps to fill the home row it simply
+     *  lands at the end (still in the home row — unavoidable, and correct).
+     *  The new order is persisted; the shelf/drawer rebuild on the hide-manager
+     *  close (keymapHideDirty) renders it. */
+    private void repositionUnhiddenIntoDrawer(AppInfo app) {
+        if (app == null) return;
+        int hc = effectiveHomeCount(countVisible(appList));   // app is already un-hidden here
+        if (!appList.remove(app)) return;
+        int seen = 0, insertAt = appList.size();
+        for (int i = 0, n = appList.size(); i < n; i++) {
+            if (!hiddenApps.contains(appList.get(i).packageName)) {
+                if (seen == hc) { insertAt = i; break; }
+                seen++;
+            }
+        }
+        appList.add(insertAt, app);
+        saveOrder();
     }
 
     /** Auto-scroll the vertical list so the selected row stays in view with

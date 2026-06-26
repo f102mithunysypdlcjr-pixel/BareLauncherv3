@@ -240,6 +240,44 @@ final class IconRenderer {
         return out;
     }
 
+    /** Small {@code sz × sz} input glyph for the compact chip strips (the
+     *  button-shortcut picker and the hide manager), where a TV input has no
+     *  app icon to show. Draws the same slate plate + display-monitor glyph as
+     *  {@link #generateInputTile} but square and label-free (the chip already
+     *  shows the input's name as its own text). The chip's ImageView clips it
+     *  to a circle, so the result reads as a little round "input" badge that
+     *  matches the round app icons beside it. {@code density} floors the
+     *  stroke width so the glyph stays crisp on low-density panels.
+     *
+     *  <p>Locally-allocated paints (like {@link #generateInputTile}); called
+     *  only when a chip strip is (re)built — never on a hot path. */
+    static Bitmap generateInputGlyphIcon(int sz, float density) {
+        if (sz <= 0) return null;
+        Bitmap out = Bitmap.createBitmap(sz, sz, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out);
+        Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
+        bg.setStyle(Paint.Style.FILL);
+        bg.setColor(0xFF1E2A38);                 // same slate-blue as the input tile
+        c.drawRect(0, 0, sz, sz, bg);            // full square; the chip clips to a circle
+
+        Paint glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
+        glyph.setStyle(Paint.Style.STROKE);
+        glyph.setStrokeWidth(Math.max(density, sz * 0.06f));
+        glyph.setStrokeJoin(Paint.Join.ROUND);
+        glyph.setStrokeCap(Paint.Cap.ROUND);
+        glyph.setColor(0xFFE6F0FF);
+        float cx = sz / 2f, cy = sz / 2f;
+        float scrW = sz * 0.46f, scrH = sz * 0.34f;
+        float top  = cy - scrH * 0.62f;
+        RectF screen = new RectF(cx - scrW / 2f, top, cx + scrW / 2f, top + scrH);
+        float r = Math.min(scrW, scrH) * 0.18f;
+        c.drawRoundRect(screen, r, r, glyph);
+        float standY = top + scrH + sz * 0.12f;
+        c.drawLine(cx, top + scrH, cx, standY, glyph);                       // neck
+        c.drawLine(cx - scrW * 0.26f, standY, cx + scrW * 0.26f, standY, glyph); // base
+        return out;
+    }
+
     /**
      * Convert any launcher {@link Drawable} into a TV-friendly rounded-square
      * {@code sz × sz} {@link Bitmap.Config#ARGB_8888} bitmap, ready for the

@@ -16,6 +16,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   inputs.)
 - A cleaner return from the app drawer to the home screen — the selected
   app tile no longer looks slightly cut off at the top.
+- Uninstalling an app from the drawer now keeps you in the drawer, so you
+  can tidy up several apps in a row without it closing each time.
+- Unhiding an app now puts it back in the app drawer instead of bumping
+  one of your home-screen favourites out of place.
+- A fresh, rounded look for the support and latest-version QR codes, each
+  with its logo in the middle.
 
 ## [2.0.0] — 2026-06-25
 

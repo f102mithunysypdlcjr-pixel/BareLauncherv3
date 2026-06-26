@@ -1,7 +1,10 @@
 package com.bare.launcher;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 
 import java.nio.charset.StandardCharsets;
 
@@ -84,6 +87,105 @@ final class QrCode {
     /** Convenience: black-on-white render. */
     static Bitmap render(String text, int targetPx) {
         return render(text, targetPx, Color.BLACK, Color.WHITE);
+    }
+
+    /**
+     * Modern, rounded render of {@code text}: circular data dots and rounded
+     * finder "eyes" on a light background, with an optional logo centred in a
+     * rounded light plate. Anti-aliased via {@link Canvas} (the plain
+     * {@link #render} stays a fast per-pixel path for any non-decorative use).
+     *
+     * <p>The centre logo overlaps a few modules, but level-M error correction
+     * (~15 %) easily recovers a plate of this size ({@code logoFrac} ≈ 0.22 of
+     * the code width → ~5 % area), so the code still scans. Returns
+     * {@code null} if the text doesn't fit versions 1–10 at level M.
+     *
+     * @param logo      optional centre logo bitmap (already coloured); may be
+     *                  {@code null} for a plain modern code.
+     * @param logoFrac  logo-plate width as a fraction of the code (excluding
+     *                  the quiet zone); clamped to {@code [0, 0.28]}.
+     */
+    static Bitmap renderStyled(String text, int targetPx, int dark, int light,
+                               Bitmap logo, float logoFrac) {
+        boolean[][] modules = encode(text);
+        if (modules == null) return null;
+        int size = modules.length;
+        final int quiet = 4;
+        int total = size + quiet * 2;
+        int scale = Math.max(1, targetPx / total);
+        int dim = total * scale;
+
+        Bitmap bmp = Bitmap.createBitmap(dim, dim, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(bmp);
+        c.drawColor(light);
+
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(dark);
+        p.setStyle(Paint.Style.FILL);
+
+        final int off = quiet * scale;     // pixel origin of module (0,0)
+        final float r = scale * 0.5f;      // data-dot radius (inscribed → dots just touch)
+
+        // Data dots — every dark module except the three finder patterns,
+        // which are drawn as stylised rounded eyes below.
+        for (int my = 0; my < size; my++) {
+            for (int mx = 0; mx < size; mx++) {
+                if (!modules[my][mx] || inFinder(mx, my, size)) continue;
+                float cx = off + mx * scale + scale * 0.5f;
+                float cy = off + my * scale + scale * 0.5f;
+                c.drawCircle(cx, cy, r, p);
+            }
+        }
+
+        // Rounded finder eyes (top-left, top-right, bottom-left).
+        drawFinder(c, off,                    off,                    scale, dark, light);
+        drawFinder(c, off + (size - 7) * scale, off,                  scale, dark, light);
+        drawFinder(c, off,                    off + (size - 7) * scale, scale, dark, light);
+
+        // Centre logo on a rounded light plate.
+        if (logo != null && logoFrac > 0f && !logo.isRecycled()) {
+            float f = Math.min(0.28f, logoFrac);
+            float codePx = size * scale;
+            float plate  = codePx * f;
+            float pad    = plate * 0.16f;
+            float cxp = off + codePx / 2f, cyp = off + codePx / 2f;
+            RectF pr = new RectF(cxp - plate / 2f, cyp - plate / 2f,
+                                 cxp + plate / 2f, cyp + plate / 2f);
+            Paint pp = new Paint(Paint.ANTI_ALIAS_FLAG);
+            pp.setColor(light); pp.setStyle(Paint.Style.FILL);
+            float rad = plate * 0.26f;
+            c.drawRoundRect(pr, rad, rad, pp);
+            RectF lr = new RectF(pr.left + pad, pr.top + pad, pr.right - pad, pr.bottom - pad);
+            Paint ip = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            c.drawBitmap(logo, null, lr, ip);
+        }
+        return bmp;
+    }
+
+    /** True when module ({@code mx},{@code my}) lies inside one of the three
+     *  7×7 finder patterns (drawn as stylised eyes, not data dots). */
+    private static boolean inFinder(int mx, int my, int size) {
+        return (mx < 7 && my < 7)
+            || (mx >= size - 7 && my < 7)
+            || (mx < 7 && my >= size - 7);
+    }
+
+    /** Draw one rounded finder eye at pixel origin ({@code ox},{@code oy}):
+     *  a 7-module dark rounded square, a 5-module light gap, and a 3-module
+     *  dark rounded centre — the modern "rounded eye" look. */
+    private static void drawFinder(Canvas c, float ox, float oy, int scale, int dark, int light) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.FILL);
+        float m = scale;
+        p.setColor(dark);
+        RectF outer = new RectF(ox, oy, ox + 7 * m, oy + 7 * m);
+        c.drawRoundRect(outer, m * 1.6f, m * 1.6f, p);
+        p.setColor(light);
+        RectF gap = new RectF(ox + m, oy + m, ox + 6 * m, oy + 6 * m);
+        c.drawRoundRect(gap, m * 1.2f, m * 1.2f, p);
+        p.setColor(dark);
+        RectF ctr = new RectF(ox + 2 * m, oy + 2 * m, ox + 5 * m, oy + 5 * m);
+        c.drawRoundRect(ctr, m * 0.9f, m * 0.9f, p);
     }
 
     // ── Error-correction tables (level M only, versions 1–10) ────────────
