@@ -9084,7 +9084,12 @@ public class LauncherActivity extends Activity {
                 final String[] imgs = listSlideshowImages(folder);
                 uiHandler.post(() -> {
                     if (destroyed) return;
-                    slideshowImages = imgs;
+                    // Treat a failed enumeration (null — revoked permission /
+                    // unmounted storage) as an empty list, NOT "not yet loaded".
+                    // Otherwise advanceSlideshow's onReady=advance would see
+                    // null and re-enumerate forever. Empty stops cleanly; a
+                    // folder re-pick resets this back to null to retry.
+                    slideshowImages = (imgs != null) ? imgs : new String[0];
                     if (onReady != null) onReady.run();
                 });
             });
