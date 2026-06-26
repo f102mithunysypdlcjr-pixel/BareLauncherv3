@@ -10,6 +10,13 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- Wallpaper SLIDESHOW only: browse image folders via MediaStore and read
+         the chosen folder's images. Runtime-granted (a one-time "allow photos"
+         prompt) and requested lazily — only when the user opens the slideshow
+         folder picker. The launcher never touches media otherwise. On Android
+         12 and below the READ_EXTERNAL_STORAGE above covers it. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
     <!-- Set system wallpaper -->
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
 

@@ -145,7 +145,7 @@ public class LauncherActivity extends Activity {
     private static final int    REQ_PICK_WP    = 42;
     private static final int    REQ_BACKUP_EXPORT = 43;
     private static final int    REQ_BACKUP_IMPORT = 44;
-    private static final int    REQ_PICK_SLIDESHOW_FOLDER = 45;
+    private static final int    REQ_PERM_MEDIA = 71;   // runtime media-read permission
     private static final String BACKUP_FILENAME   = "barelauncher-settings.txt";
     /** Slideshow duration steps (seconds) cycled by the duration stepper:
      *  Off, 30s, 45s, 1m, 1.5m, 2m, 3m, 5m, 10m. */
@@ -336,6 +336,14 @@ public class LauncherActivity extends Activity {
             }
         }
     };
+
+    // ── Slideshow folder picker (custom TV-native, MediaStore-backed) ────
+    private FrameLayout                 folderPickerOverlay = null;
+    private android.widget.LinearLayout folderPickerCol     = null;
+    private android.widget.ScrollView   folderPickerScroll  = null;
+    /** Rows shown in the picker: each = {bucketId, displayName, count}. */
+    private final java.util.List<String[]> folderPickerData = new ArrayList<>();
+    private int folderPickerSel = 0;
 
 
     private final Runnable clockTick = new Runnable() {
@@ -1504,7 +1512,13 @@ public class LauncherActivity extends Activity {
             // user-visible behaviour stays identical regardless of which
             // delivery path the platform chose.
             backInvokedCallback = () -> {
-                // 0. About overlay open → its own Back (QR → list, list → settings).
+                // 0. Slideshow folder picker open → close it (top-most modal).
+                FrameLayout fp = folderPickerOverlay;
+                if (fp != null && fp.getVisibility() == View.VISIBLE) {
+                    hideFolderPicker();
+                    return;
+                }
+                // 0b. About overlay open → its own Back (QR → list, list → settings).
                 FrameLayout ab = aboutOverlay;
                 if (ab != null && ab.getVisibility() == View.VISIBLE) {
                     handleAboutKey(KeyEvent.KEYCODE_BACK);
@@ -1804,6 +1818,7 @@ public class LauncherActivity extends Activity {
         netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
         settingsOverlay = null; settingsCard = null; settingsColumn = null;
+        folderPickerOverlay = null; folderPickerCol = null; folderPickerScroll = null;
         aboutOverlay = null; aboutCard = null; aboutListView = null;
         aboutQrView = null; aboutQrImage = null; aboutQrCaption = null;
         aboutQrLink = null; aboutQrUrl = null;
@@ -1924,6 +1939,10 @@ public class LauncherActivity extends Activity {
 
     @Override @SuppressWarnings("deprecation")
     public void onBackPressed() {
+        FrameLayout fp = folderPickerOverlay;
+        if (fp != null && fp.getVisibility() == View.VISIBLE) {
+            hideFolderPicker(); return;
+        }
         FrameLayout ao = aboutOverlay;
         if (ao != null && ao.getVisibility() == View.VISIBLE) {
             handleAboutKey(KeyEvent.KEYCODE_BACK); return;
@@ -5969,6 +5988,15 @@ public class LauncherActivity extends Activity {
             if (isLetThroughKey(event.getKeyCode())) return super.dispatchKeyEvent(event);
             return true;
         }
+        FrameLayout fp = folderPickerOverlay;
+        if (fp != null && fp.getVisibility() == View.VISIBLE) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (handleFolderPickerKey(event.getKeyCode())) return true;
+                return super.dispatchKeyEvent(event);
+            }
+            if (isLetThroughKey(event.getKeyCode())) return super.dispatchKeyEvent(event);
+            return true;
+        }
         FrameLayout ko = keymapOverlay;
         if (ko != null && ko.getVisibility() == View.VISIBLE) {
             if (handleKeymapOverlayKey(event)) return true;
@@ -6076,6 +6104,8 @@ public class LauncherActivity extends Activity {
     private boolean anyOverlayLogicallyOpen() {
         if (keymapOpenedFromSettings) return true;
         if (aboutOpenedFromSettings) return true;
+        FrameLayout fp = folderPickerOverlay;
+        if (fp != null && fp.getVisibility() == View.VISIBLE) return true;
         FrameLayout ao = aboutOverlay;
         if (ao != null && ao.getVisibility() == View.VISIBLE) return true;
         FrameLayout sp = settingsOverlay;
@@ -9070,12 +9100,48 @@ public class LauncherActivity extends Activity {
         return s + "s";
     }
 
-    @SuppressWarnings("deprecation")
+    /** Whether the media-read permission needed to browse image folders is
+     *  granted. READ_MEDIA_IMAGES on Android 13+, READ_EXTERNAL_STORAGE below. */
+    private boolean hasMediaReadPermission() {
+        String p = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                ? android.Manifest.permission.READ_MEDIA_IMAGES
+                : android.Manifest.permission.READ_EXTERNAL_STORAGE;
+        return checkSelfPermission(p) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Open the slideshow folder picker: a custom, TV-native list of image
+     *  folders from MediaStore (no SAF folder picker, which Google TV lacks).
+     *  Requests the media-read permission first if needed. */
     private void pickSlideshowFolder() {
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        try { startActivityForResult(i, REQ_PICK_SLIDESHOW_FOLDER); }
-        catch (Exception e) { showToast(getString(R.string.toast_no_file_picker)); }
+        if (hasMediaReadPermission()) { scanAndShowFolderPicker(); return; }
+        String p = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                ? android.Manifest.permission.READ_MEDIA_IMAGES
+                : android.Manifest.permission.READ_EXTERNAL_STORAGE;
+        try { requestPermissions(new String[]{ p }, REQ_PERM_MEDIA); }
+        catch (Exception e) { showToast(getString(R.string.toast_slideshow_need_permission)); }
+    }
+
+    /** Scan image folders off the UI thread, then show the picker. Uses a
+     *  dedicated one-shot thread (not the bounded app executor) so this
+     *  user-initiated action is never silently dropped. */
+    private void scanAndShowFolderPicker() {
+        new Thread(() -> {
+            final java.util.List<String[]> folders = scanImageFolders();
+            uiHandler.post(() -> { if (!destroyed) showFolderPicker(folders); });
+        }, "wp-folder-scan").start();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(req, perms, results);
+        if (req == REQ_PERM_MEDIA) {
+            if (results != null && results.length > 0
+                    && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                scanAndShowFolderPicker();
+            } else {
+                showToast(getString(R.string.toast_slideshow_need_permission));
+            }
+        }
     }
 
     /** Step the duration through {@link #SLIDESHOW_STEPS_SEC}. Persists,
@@ -9141,38 +9207,62 @@ public class LauncherActivity extends Activity {
         } catch (Exception ignored) { /* executor saturated/shut down */ }
     }
 
-    /** List image child documents of a SAF tree, sorted by document id for a
-     *  stable sequential order. Runs on a background thread. Returns
-     *  {@code null} on any failure (revoked permission, unmounted storage). */
-    private String[] listSlideshowImages(String treeUriStr) {
-        try {
-            Uri tree = Uri.parse(treeUriStr);
-            String docId = android.provider.DocumentsContract.getTreeDocumentId(tree);
-            Uri childrenUri =
-                    android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
-            ArrayList<String> out = new ArrayList<>();
-            try (android.database.Cursor cur = getContentResolver().query(
-                    childrenUri,
-                    new String[]{
-                            android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                            android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE },
-                    null, null, null)) {
-                if (cur != null) {
-                    while (cur.moveToNext()) {
-                        String id   = cur.getString(0);
-                        String mime = cur.getString(1);
-                        if (id != null && mime != null && mime.startsWith("image/")) {
-                            out.add(android.provider.DocumentsContract
-                                    .buildDocumentUriUsingTree(tree, id).toString());
-                        }
-                    }
+    /** List the images in the chosen MediaStore folder (bucket), sorted by
+     *  display name for a stable sequential order. Runs on a background
+     *  thread. {@code bucketId} is the {@code bucket_id} stored when the user
+     *  picked the folder. Returns {@code null} on any failure (e.g. the media
+     *  permission was revoked) so the caller treats it as "no images". */
+    private String[] listSlideshowImages(String bucketId) {
+        if (bucketId == null || bucketId.isEmpty()) return new String[0];
+        Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        ArrayList<String> out = new ArrayList<>();
+        try (android.database.Cursor cur = getContentResolver().query(
+                base,
+                new String[]{ android.provider.MediaStore.Images.Media._ID },
+                "bucket_id = ?",
+                new String[]{ bucketId },
+                android.provider.MediaStore.Images.Media.DISPLAY_NAME + " ASC")) {
+            if (cur != null) {
+                int idCol = cur.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media._ID);
+                while (cur.moveToNext()) {
+                    long id = cur.getLong(idCol);
+                    out.add(android.content.ContentUris.withAppendedId(base, id).toString());
                 }
             }
-            Collections.sort(out);
-            return out.toArray(new String[0]);
         } catch (Exception e) {
             return null;
         }
+        return out.toArray(new String[0]);
+    }
+
+    /** Scan MediaStore for image folders (buckets). Returns a list of
+     *  {@code {bucketId, displayName, count}} rows, sorted by name. Background
+     *  thread; one query. Returns an empty list on failure. */
+    private java.util.List<String[]> scanImageFolders() {
+        java.util.LinkedHashMap<String, String[]> byId = new java.util.LinkedHashMap<>();
+        Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        try (android.database.Cursor cur = getContentResolver().query(
+                base,
+                new String[]{ "bucket_id", "bucket_display_name" },
+                null, null,
+                "bucket_display_name ASC")) {
+            if (cur != null) {
+                int idCol = cur.getColumnIndex("bucket_id");
+                int nmCol = cur.getColumnIndex("bucket_display_name");
+                if (idCol >= 0 && nmCol >= 0) {
+                    while (cur.moveToNext()) {
+                        String id = cur.getString(idCol);
+                        if (id == null) continue;
+                        String nm = cur.getString(nmCol);
+                        if (nm == null || nm.isEmpty()) nm = "(unnamed)";
+                        String[] row = byId.get(id);
+                        if (row == null) byId.put(id, new String[]{ id, nm, "1" });
+                        else row[2] = Integer.toString(Integer.parseInt(row[2]) + 1);
+                    }
+                }
+            }
+        } catch (Exception ignored) { /* return whatever we gathered */ }
+        return new ArrayList<>(byId.values());
     }
 
     /** Apply the image at the current index via the existing wallpaper
@@ -9217,6 +9307,216 @@ public class LauncherActivity extends Activity {
         advanceSlideshow();   // self-enumerates if needed
     }
 
+    // ── Slideshow folder picker overlay ──────────────────────────────────
+
+    /** Show the custom folder picker for the scanned {@code folders}. */
+    private void showFolderPicker(java.util.List<String[]> folders) {
+        if (folders == null || folders.isEmpty()) {
+            showToast(getString(R.string.toast_slideshow_no_folders));
+            return;
+        }
+        folderPickerData.clear();
+        folderPickerData.addAll(folders);
+        if (folderPickerOverlay == null) buildFolderPickerOverlay();
+        if (folderPickerOverlay == null) return;
+        populateFolderPicker();
+        // Land on the currently-chosen folder if it's still present.
+        folderPickerSel = 0;
+        if (slideshowFolderUri != null) {
+            for (int i = 0; i < folderPickerData.size(); i++) {
+                if (slideshowFolderUri.equals(folderPickerData.get(i)[0])) { folderPickerSel = i; break; }
+            }
+        }
+        refreshFolderPickerRows();
+        ensureOverlayBackdropVisible();
+        folderPickerOverlay.setVisibility(View.VISIBLE);
+        folderPickerOverlay.bringToFront();
+        folderPickerOverlay.requestFocus();
+        scrollFolderPickerToSelection();
+    }
+
+    private void buildFolderPickerOverlay() {
+        FrameLayout r = root; if (r == null) return;
+        FrameLayout ov = new FrameLayout(this) {
+            @Override public boolean onTouchEvent(MotionEvent ev) {
+                if (ev.getAction() == MotionEvent.ACTION_DOWN) { hideFolderPicker(); return true; }
+                return super.onTouchEvent(ev);
+            }
+        };
+        ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
+        ov.setVisibility(View.GONE);
+        ov.setClickable(true);
+        ov.setFocusable(true);
+
+        android.widget.LinearLayout card = new android.widget.LinearLayout(this);
+        card.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xF21A1A1F);
+        bg.setStroke(Math.max(1, dp(1) / 2), 0x1AFFFFFF);
+        bg.setCornerRadius(dp(18));
+        card.setBackground(bg);
+        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+        TextView title = new TextView(this);
+        title.setText(R.string.folder_picker_title);
+        title.setTextColor(0xF2FFFFFF);
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setPadding(dp(6), 0, dp(6), dp(8));
+        card.addView(title);
+
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        android.widget.LinearLayout colL = new android.widget.LinearLayout(this);
+        colL.setOrientation(android.widget.LinearLayout.VERTICAL);
+        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
+        int maxH = Math.max(dp(120), Math.min(dp(368), screenH - dp(140)));
+        card.addView(sv, new android.widget.LinearLayout.LayoutParams(dp(308), maxH));
+
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        cardLp.gravity = Gravity.CENTER;
+        card.setLayoutParams(cardLp);
+        ov.addView(card);
+        r.addView(ov);
+        folderPickerOverlay = ov;
+        folderPickerScroll  = sv;
+        folderPickerCol     = colL;
+    }
+
+    private void populateFolderPicker() {
+        android.widget.LinearLayout col = folderPickerCol;
+        if (col == null) return;
+        col.removeAllViews();
+        for (int i = 0; i < folderPickerData.size(); i++) {
+            String[] f = folderPickerData.get(i);
+            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(12), dp(9), dp(12), dp(9));
+            android.graphics.drawable.GradientDrawable rb =
+                    new android.graphics.drawable.GradientDrawable();
+            rb.setCornerRadius(dp(9));
+            rb.setColor(Color.TRANSPARENT);
+            row.setBackground(rb);
+
+            TextView name = new TextView(this);
+            name.setText(f[1]);
+            name.setTextColor(0xCCFFFFFF);
+            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+            name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            row.addView(name, new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f));
+
+            TextView count = new TextView(this);
+            count.setText(f[2]);
+            count.setTextColor(0x88FFFFFF);
+            count.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+            count.setPadding(dp(10), 0, 0, 0);
+            row.addView(count, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+
+            final int idx = i;
+            row.setClickable(true);
+            row.setOnClickListener(v -> {
+                v.playSoundEffect(SoundEffectConstants.CLICK);
+                folderPickerSel = idx;
+                refreshFolderPickerRows();
+                selectFolder(idx);
+            });
+            android.widget.LinearLayout.LayoutParams rowLp =
+                    new android.widget.LinearLayout.LayoutParams(dp(280), WRAP);
+            rowLp.bottomMargin = dp(2);
+            col.addView(row, rowLp);
+        }
+    }
+
+    private void refreshFolderPickerRows() {
+        android.widget.LinearLayout col = folderPickerCol;
+        if (col == null) return;
+        for (int i = 0; i < col.getChildCount(); i++) {
+            View child = col.getChildAt(i);
+            if (!(child instanceof android.widget.LinearLayout)) continue;
+            boolean sel = (i == folderPickerSel);
+            android.graphics.drawable.Drawable d = child.getBackground();
+            if (d instanceof android.graphics.drawable.GradientDrawable)
+                ((android.graphics.drawable.GradientDrawable) d).setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
+            android.widget.LinearLayout row = (android.widget.LinearLayout) child;
+            View nm = row.getChildAt(0), ct = row.getChildAt(1);
+            if (nm instanceof TextView) ((TextView) nm).setTextColor(sel ? 0xFF111114 : 0xCCFFFFFF);
+            if (ct instanceof TextView) ((TextView) ct).setTextColor(sel ? 0xCC111114 : 0x88FFFFFF);
+        }
+    }
+
+    private void scrollFolderPickerToSelection() {
+        final android.widget.ScrollView sv = folderPickerScroll;
+        final android.widget.LinearLayout col = folderPickerCol;
+        if (sv == null || col == null) return;
+        if (folderPickerSel < 0 || folderPickerSel >= col.getChildCount()) return;
+        final View row = col.getChildAt(folderPickerSel);
+        sv.post(() -> {
+            if (row.getHeight() == 0) return;
+            int top = row.getTop(), bottom = row.getBottom();
+            int vt = sv.getScrollY(), vb = vt + sv.getHeight();
+            if (top < vt)        sv.smoothScrollTo(0, top);
+            else if (bottom > vb) sv.smoothScrollTo(0, bottom - sv.getHeight());
+        });
+    }
+
+    private boolean handleFolderPickerKey(int kc) {
+        int n = folderPickerData.size();
+        switch (kc) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (n > 0) folderPickerSel = (folderPickerSel - 1 + n) % n;
+                refreshFolderPickerRows(); scrollFolderPickerToSelection(); return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (n > 0) folderPickerSel = (folderPickerSel + 1) % n;
+                refreshFolderPickerRows(); scrollFolderPickerToSelection(); return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_BUTTON_A:
+                selectFolder(folderPickerSel); return true;
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_ESCAPE:
+                hideFolderPicker(); return true;
+        }
+        if (isLetThroughKey(kc)) return false;
+        return true;
+    }
+
+    /** Commit the chosen folder: store its bucket id, start the slideshow. */
+    private void selectFolder(int index) {
+        if (index < 0 || index >= folderPickerData.size()) return;
+        String bucketId = folderPickerData.get(index)[0];
+        slideshowFolderUri = bucketId;
+        slideshowIndex     = 0;
+        slideshowImages    = null;
+        prefs.edit()
+                .putString(KEY_SLIDESHOW_FOLDER, bucketId)
+                .putInt(KEY_SLIDESHOW_INDEX, 0)
+                .apply();
+        hideFolderPicker();
+        final boolean showNow = slideshowActive();
+        enumerateSlideshowAsync(() -> { if (showNow) applyCurrentSlideshowImage(); });
+        restartSlideshowTimer();
+        showToast(getString(R.string.toast_slideshow_folder_set));
+    }
+
+    private void hideFolderPicker() {
+        FrameLayout ov = folderPickerOverlay;
+        if (ov == null) return;
+        ov.setVisibility(View.GONE);
+        dismissOverlayBackdropIfIdle();
+        // Return focus to the home shelf.
+        RecyclingShelfView s = shelf;
+        if (s != null && s.getVisibility() == View.VISIBLE && !appList.isEmpty()) {
+            s.requestFocusOnIndex(Math.max(0, Math.min(s.focusedIndex, s.lastIndex())));
+        } else {
+            View nb = netBtn; if (nb != null) nb.requestFocus();
+        }
+    }
+
+
     @Override @SuppressWarnings("deprecation")
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
@@ -9228,25 +9528,6 @@ public class LauncherActivity extends Activity {
         if (req == REQ_BACKUP_IMPORT && res == RESULT_OK && data != null) {
             Uri uri = data.getData();
             if (uri != null) readBackup(uri);
-            return;
-        }
-        if (req == REQ_PICK_SLIDESHOW_FOLDER && res == RESULT_OK && data != null) {
-            Uri tree = data.getData();
-            if (tree != null) {
-                try { getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
-                catch (SecurityException e) { showToast(getString(R.string.toast_wallpaper_no_permission)); return; }
-                slideshowFolderUri = tree.toString();
-                slideshowIndex     = 0;
-                slideshowImages    = null;   // force re-enumeration of the new folder
-                prefs.edit()
-                        .putString(KEY_SLIDESHOW_FOLDER, slideshowFolderUri)
-                        .putInt(KEY_SLIDESHOW_INDEX, 0)
-                        .apply();
-                final boolean showNow = slideshowActive();
-                enumerateSlideshowAsync(() -> { if (showNow) applyCurrentSlideshowImage(); });
-                restartSlideshowTimer();
-                showToast(getString(R.string.toast_slideshow_folder_set));
-            }
             return;
         }
         if (req == REQ_PICK_WP && res == RESULT_OK && data != null) {

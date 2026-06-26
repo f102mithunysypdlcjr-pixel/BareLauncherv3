@@ -105,4 +105,7 @@
     <!-- Wallpaper slideshow. -->
     <string name="toast_slideshow_folder_set">Slideshow folder set</string>
     <string name="toast_slideshow_pick_folder">Pick a slideshow folder first</string>
+    <string name="toast_slideshow_need_permission">Photo access is needed to choose a folder</string>
+    <string name="toast_slideshow_no_folders">No image folders found</string>
+    <string name="folder_picker_title">Choose a slideshow folder</string>
 </resources>

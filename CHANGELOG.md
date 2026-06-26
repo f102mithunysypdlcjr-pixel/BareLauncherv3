@@ -16,10 +16,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **Wallpaper slideshow.** Under Settings → Wallpaper / Slideshow, pick a
   folder of images and have your wallpaper change on its own — every 30
   seconds up to 10 minutes, and/or a fresh one each time the TV starts.
-  Picking a single wallpaper turns the slideshow off again. It only runs
-  while you're on the home screen, so it never slows anything down or
-  drains power in the background, and your home screen still appears
-  instantly on startup.
+  Picking a single wallpaper turns the slideshow off again. (Choosing a
+  folder asks once for permission to read your photos.) It only runs while
+  you're on the home screen, so it never slows anything down or drains
+  power in the background, and your home screen still appears instantly on
+  startup.
 
 ## [2.1.0] — 2026-06-25
 
