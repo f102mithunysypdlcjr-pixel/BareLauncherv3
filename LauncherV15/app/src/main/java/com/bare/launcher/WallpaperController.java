@@ -364,6 +364,26 @@ final class WallpaperController {
      * surfaces a toast.
      */
     void applyFromUri(Uri uri) {
+        decodeAndCrossfade(uri, true);
+    }
+
+    /**
+     * Decode and cross-fade exactly like {@link #applyFromUri}, but
+     * skip the snapshot write and the prefs update. Used by the
+     * slideshow rotation: writing a screen-sized WebP on every tick
+     * wastes I/O and encoder memory (the snapshot's only purpose is
+     * instant cold-start paint, and the last manually-picked wallpaper
+     * is already persisted). The user-pick path still calls
+     * {@link #applyFromUri} so the snapshot stays current.
+     */
+    void crossfadeUri(Uri uri) {
+        decodeAndCrossfade(uri, false);
+    }
+
+    /** Shared implementation for {@link #applyFromUri} and
+     *  {@link #crossfadeUri}. {@code persist} controls whether the URI
+     *  is saved to prefs and the snapshot file is written. */
+    private void decodeAndCrossfade(Uri uri, boolean persist) {
         if (!userLoading.compareAndSet(false, true)) return;
         executor.execute(() -> {
             Bitmap argb = null;
@@ -379,7 +399,7 @@ final class WallpaperController {
                 }
                 opts.inSampleSize       = calcSampleSize(opts.outWidth, opts.outHeight);
                 opts.inJustDecodeBounds = false;
-                // Decode as ARGB_8888 first (NOT HARDWARE) because we need
+                // Decode as ARGB_8888 first (NOT HARDWARE) because we may need
                 // to compress() the bitmap to write the snapshot, and
                 // Bitmap.compress returns false on HARDWARE config. After
                 // the snapshot is on disk we promote to HARDWARE for
@@ -393,26 +413,19 @@ final class WallpaperController {
                 argb = null;
             }
             // High-quality downscale + center-crop to the exact panel size.
-            // The decode above (computeSampleSizeAtLeast) guarantees argb is
-            // at or above the screen on both axes, so this only ever shrinks
-            // — bilinear-filtered and baked, so the displayed wallpaper is
-            // pixel-exact to the panel (no ImageView upscale → no blur) and
-            // screen-sized (smallest snapshot + graphics-memory footprint).
             if (argb != null) argb = scaleToScreenCrop(argb);
-            // Snapshot write happens BEFORE HARDWARE conversion. Best-
-            // effort: a write failure does not block the user's wallpaper
-            // change — it just means the next cold start does a full
-            // URI decode instead of an instant snapshot render.
-            if (argb != null && !destroyed) writeSnapshotBestEffort(argb);
-            // Promote to HARDWARE for display. Recycles the ARGB on
-            // success; falls through with the ARGB unchanged if the
-            // platform fails the conversion (rare GPU driver issue).
+            // Snapshot write only on user-picks, not slideshow rotation.
+            // Slideshow rotation would write a screen-sized WebP on every
+            // tick — wasted I/O and encoder heap. The snapshot's only job
+            // is instant cold-start paint of the last user-chosen image.
+            if (persist && argb != null && !destroyed) writeSnapshotBestEffort(argb);
+            // Promote to HARDWARE for display.
             final Bitmap fb = toHardwareOrSelf(argb);
             userLoading.set(false);
             if (!destroyed) host.runOnUiThread(() -> {
                 if (fb != null) {
                     crossfade(fb);
-                    prefs.edit().putString(prefKeyUri, uri.toString()).apply();
+                    if (persist) prefs.edit().putString(prefKeyUri, uri.toString()).apply();
                 } else {
                     if (toastFn != null) toastFn.show(host.getString(R.string.toast_wallpaper_load_failed));
                     loadSystem();

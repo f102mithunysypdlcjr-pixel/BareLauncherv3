@@ -9277,8 +9277,10 @@ public class LauncherActivity extends Activity {
         return new ArrayList<>(byId.values());
     }
 
-    /** Apply the image at the current index via the existing wallpaper
-     *  pipeline (background decode + cross-fade + snapshot write). */
+    /** Apply the image at the current index via the wallpaper cross-fade
+     *  pipeline. Uses {@code crossfadeUri} (not {@code applyFromUri}) so
+     *  the slideshow rotation never writes a snapshot or updates prefs —
+     *  that work is for user-picks only. */
     private void applyCurrentSlideshowImage() {
         String[] imgs = slideshowImages;
         if (imgs == null || imgs.length == 0 || wallpaperCtl == null) return;
@@ -9286,7 +9288,7 @@ public class LauncherActivity extends Activity {
         try {
             Uri u = Uri.parse(imgs[idx]);
             wallpaperCtl.resetUserLoadingGuard();
-            wallpaperCtl.applyFromUri(u);
+            wallpaperCtl.crossfadeUri(u);
         } catch (Exception ignored) { /* bad uri — skip */ }
     }
 
