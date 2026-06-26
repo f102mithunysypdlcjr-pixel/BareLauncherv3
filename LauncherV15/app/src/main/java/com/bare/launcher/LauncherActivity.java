@@ -344,6 +344,7 @@ public class LauncherActivity extends Activity {
 
     // ── Slideshow folder picker (custom TV-native, MediaStore-backed) ────
     private FrameLayout                 folderPickerOverlay = null;
+    private android.widget.LinearLayout folderPickerCard    = null;
     private android.widget.LinearLayout folderPickerCol     = null;
     private android.widget.ScrollView   folderPickerScroll  = null;
     /** Rows shown in the picker: each = {bucketId, displayName, count}. */
@@ -1823,7 +1824,7 @@ public class LauncherActivity extends Activity {
         netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
         settingsOverlay = null; settingsCard = null; settingsColumn = null;
-        folderPickerOverlay = null; folderPickerCol = null; folderPickerScroll = null;
+        folderPickerOverlay = null; folderPickerCard = null; folderPickerCol = null; folderPickerScroll = null;
         aboutOverlay = null; aboutCard = null; aboutListView = null;
         aboutQrView = null; aboutQrImage = null; aboutQrCaption = null;
         aboutQrLink = null; aboutQrUrl = null;
@@ -9369,6 +9370,7 @@ public class LauncherActivity extends Activity {
         folderPickerData.addAll(folders);
         if (folderPickerOverlay == null) buildFolderPickerOverlay();
         if (folderPickerOverlay == null) return;
+        final android.widget.LinearLayout card = folderPickerCard;
         populateFolderPicker();
         // Land on the currently-chosen folder if it's still present.
         folderPickerSel = 0;
@@ -9383,41 +9385,80 @@ public class LauncherActivity extends Activity {
         folderPickerOverlay.bringToFront();
         folderPickerOverlay.requestFocus();
         scrollFolderPickerToSelection();
+
+        // Anchor below the gear button — same math as the keymap card.
+        if (card != null) anchorCardUnderGear(card, dp(78), dp(20));
+
+        // Drop-down animation: same as keymap / settings card.
+        if (card != null) {
+            card.animate().cancel();
+            card.setAlpha(0f);
+            card.setScaleX(0.94f); card.setScaleY(0.86f);
+            card.setTranslationY(-dp(6));
+            card.post(() -> {
+                if (card != folderPickerCard) return;
+                card.setPivotX(card.getWidth());
+                card.setPivotY(0f);
+                card.animate()
+                        .alpha(1f)
+                        .scaleX(1f).scaleY(1f)
+                        .translationY(0f)
+                        .setDuration(160)
+                        .setInterpolator(MENU_IN)
+                        .withLayer()
+                        .start();
+            });
+        }
     }
 
     private void buildFolderPickerOverlay() {
         FrameLayout r = root; if (r == null) return;
         FrameLayout ov = new FrameLayout(this) {
             @Override public boolean onTouchEvent(MotionEvent ev) {
-                if (ev.getAction() == MotionEvent.ACTION_DOWN) { hideFolderPicker(); return true; }
-                return super.onTouchEvent(ev);
+                if (ev.getAction() == MotionEvent.ACTION_DOWN) {
+                    android.widget.LinearLayout c = folderPickerCard;
+                    if (c != null) {
+                        float x = ev.getX(), y = ev.getY();
+                        float l = c.getX(), t = c.getY();
+                        float rt = l + c.getWidth(), b = t + c.getHeight();
+                        if (x < l || x > rt || y < t || y > b) {
+                            hideFolderPicker(); return true;
+                        }
+                    }
+                }
+                return true;
             }
         };
         ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
         ov.setVisibility(View.GONE);
         ov.setClickable(true);
         ov.setFocusable(true);
+        ov.setFocusableInTouchMode(true);
 
+        // Match the keymap card exactly: deep slate, 14 dp corners, 1 px rim,
+        // dp(8) padding, dp(10) elevation, dp(8) inner padding.
         android.widget.LinearLayout card = new android.widget.LinearLayout(this);
         card.setOrientation(android.widget.LinearLayout.VERTICAL);
-        android.graphics.drawable.GradientDrawable bg =
+        android.graphics.drawable.GradientDrawable cardBg =
                 new android.graphics.drawable.GradientDrawable();
-        bg.setColor(0xF21A1A1F);
-        bg.setStroke(Math.max(1, dp(1) / 2), 0x1AFFFFFF);
-        bg.setCornerRadius(dp(18));
-        card.setBackground(bg);
-        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+        cardBg.setColor(0xF21A1A1F);
+        cardBg.setCornerRadius(dp(14));
+        cardBg.setStroke(1, 0x1AFFFFFF);
+        card.setBackground(cardBg);
+        card.setPadding(dp(8), dp(8), dp(8), dp(8));
+        card.setElevation(dp(10));
 
+        // Title — same style as keymap / hide-manager title.
         TextView title = new TextView(this);
         title.setText(R.string.folder_picker_title);
-        title.setTextColor(0xF2FFFFFF);
-        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
+        title.setTextColor(0xFFEFEFEF);
+        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setPadding(dp(6), 0, dp(6), dp(8));
+        title.setLetterSpacing(0.04f);
+        title.setPadding(dp(4), dp(2), dp(4), dp(8));
         card.addView(title);
 
-        // Height caps at maxH so a long folder list scrolls, but a short one
-        // wraps to its rows (no tall empty card / dead space below the rows).
+        // Capped ScrollView: wraps short lists, scrolls long ones.
         final int maxH = Math.max(dp(120), Math.min(dp(368), screenH - dp(140)));
         android.widget.ScrollView sv = new android.widget.ScrollView(this) {
             @Override protected void onMeasure(int wSpec, int hSpec) {
@@ -9429,15 +9470,17 @@ public class LauncherActivity extends Activity {
         sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         android.widget.LinearLayout colL = new android.widget.LinearLayout(this);
         colL.setOrientation(android.widget.LinearLayout.VERTICAL);
-        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
-        card.addView(sv, new android.widget.LinearLayout.LayoutParams(dp(300), WRAP));
+        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
+        card.addView(sv, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
 
+        // Anchor top-right (same as keymap / settings card).
         FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
-        cardLp.gravity = Gravity.CENTER;
+        cardLp.gravity = Gravity.TOP | Gravity.END;
         card.setLayoutParams(cardLp);
         ov.addView(card);
         r.addView(ov);
         folderPickerOverlay = ov;
+        folderPickerCard    = card;
         folderPickerScroll  = sv;
         folderPickerCol     = colL;
     }
@@ -9451,7 +9494,7 @@ public class LauncherActivity extends Activity {
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
             row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(12), dp(8), dp(12), dp(8));
+            row.setPadding(dp(10), dp(7), dp(10), dp(7));
             android.graphics.drawable.GradientDrawable rb =
                     new android.graphics.drawable.GradientDrawable();
             rb.setCornerRadius(dp(9));
