@@ -3892,14 +3892,26 @@ public class LauncherActivity extends Activity {
                 // uninstall on several TV ROMs, which masked the success.
                 Intent primary = new Intent(Intent.ACTION_DELETE, pkgUri)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                if (tryUninstall(primary)) return;
+                if (tryUninstall(primary)) { armHomeUninstall(appToUninstall); return; }
 
                 @SuppressWarnings("deprecation")
                 Intent fallback = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, pkgUri)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                if (tryUninstall(fallback)) return;
+                if (tryUninstall(fallback)) { armHomeUninstall(appToUninstall); return; }
 
                 showToast(getString(R.string.toast_cannot_uninstall, appToUninstall.label));
+            }
+
+            /** Record that a HOME-row app is being uninstalled so the
+             *  package-removed reconcile shrinks the home row by one (the
+             *  shelf only ever shows home apps, so this is always a home
+             *  uninstall). Cancel-safe: the reconcile only acts once the
+             *  package is confirmed gone. No drawer refocus — the drawer is
+             *  closed when uninstalling from the home screen. */
+            private void armHomeUninstall(AppInfo app) {
+                LauncherActivity.this.pendingUninstallPkg     = app.packageName;
+                LauncherActivity.this.pendingUninstallWasHome = true;
+                LauncherActivity.this.pendingDrawerRefocus    = -1;
             }
 
             /** Open the system "App info" page for the focused app.
