@@ -136,6 +136,9 @@ public class LauncherActivity extends Activity {
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
+    private static final int    REQ_BACKUP_EXPORT = 43;
+    private static final int    REQ_BACKUP_IMPORT = 44;
+    private static final String BACKUP_FILENAME   = "barelauncher-settings.txt";
 
     // Subtle focus pop — animations toned down for performance / stability.
     // No vertical lift (saves a frame of layout work and removes a class of
@@ -757,9 +760,11 @@ public class LauncherActivity extends Activity {
     private static final int SETTINGS_ROW_KEYMAP          = 1;
     private static final int SETTINGS_ROW_WALLPAPER       = 2;
     private static final int SETTINGS_ROW_SHOW_CLOCK      = 3;
-    private static final int SETTINGS_ROW_SYSTEM_SETTINGS = 4;
-    private static final int SETTINGS_ROW_ABOUT           = 5;
-    private static final int SETTINGS_ROW_COUNT           = 6;
+    private static final int SETTINGS_ROW_BACKUP          = 4;
+    private static final int SETTINGS_ROW_RESTORE         = 5;
+    private static final int SETTINGS_ROW_SYSTEM_SETTINGS = 6;
+    private static final int SETTINGS_ROW_ABOUT           = 7;
+    private static final int SETTINGS_ROW_COUNT           = 8;
 
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
      *  Single source of truth for "ring should not be visible right now".
@@ -6054,6 +6059,8 @@ public class LauncherActivity extends Activity {
                 R.string.settings_row_button_shortcuts,
                 R.string.settings_row_set_wallpaper,
                 R.string.settings_row_show_clock,
+                R.string.settings_row_backup,
+                R.string.settings_row_restore,
                 R.string.settings_row_system_settings,
                 R.string.settings_row_about,
         };
@@ -6408,6 +6415,17 @@ public class LauncherActivity extends Activity {
                     if (cv != null) cv.setVisibility(View.GONE);
                 }
                 refreshSettingsRows(); // repaint the state indicator
+                break;
+            case SETTINGS_ROW_BACKUP:
+                // Export the small settings file via SAF. Close the panel
+                // first so the system create-document UI isn't dimmed behind
+                // our backdrop.
+                hideSettingsPanel();
+                exportSettings();
+                break;
+            case SETTINGS_ROW_RESTORE:
+                hideSettingsPanel();
+                importSettings();
                 break;
             case SETTINGS_ROW_SYSTEM_SETTINGS:
                 hideSettingsPanel();
@@ -8779,9 +8797,142 @@ public class LauncherActivity extends Activity {
         catch (Exception e) { showToast(getString(R.string.toast_no_file_picker)); }
     }
 
+    // ── Settings backup / restore (SAF, dependency-free) ─────────────────
+
+    /** Launch the system "create document" UI to save the settings backup. */
+    @SuppressWarnings("deprecation")
+    private void exportSettings() {
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TITLE, BACKUP_FILENAME);
+        try { startActivityForResult(i, REQ_BACKUP_EXPORT); }
+        catch (Exception e) { showToast(getString(R.string.toast_no_file_picker)); }
+    }
+
+    /** Launch the system "open document" UI to pick a backup file to restore.
+     *  Accepts any type (some pickers over-filter text/plain); the content is
+     *  validated by its magic header, not its MIME. */
+    @SuppressWarnings("deprecation")
+    private void importSettings() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try { startActivityForResult(i, REQ_BACKUP_IMPORT); }
+        catch (Exception e) { showToast(getString(R.string.toast_no_file_picker)); }
+    }
+
+    /** Write the current settings to the chosen document URI. */
+    private void writeBackup(Uri uri) {
+        int hc = (homeCount >= 0) ? homeCount : prefs.getInt(KEY_HOME_COUNT, -1);
+        String text = SettingsBackup.serialize(
+                prefs.getString(KEY_APP_ORDER, ""),
+                hc,
+                prefs.getString(KEY_KEYMAP, ""),
+                prefs.getString(KEY_HIDDEN, ""),
+                clockMode);
+        try (java.io.OutputStream os = getContentResolver().openOutputStream(uri, "w")) {
+            if (os == null) { showToast(getString(R.string.toast_backup_failed)); return; }
+            os.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            os.flush();
+            showToast(getString(R.string.toast_backup_saved));
+        } catch (Exception e) {
+            showToast(getString(R.string.toast_backup_failed));
+        }
+    }
+
+    /** Read + validate a backup document, then apply it atomically. Reads at
+     *  most ~1 MB (a real backup is a few KB) so a wrong, huge file can't
+     *  stall the UI thread. */
+    private void readBackup(Uri uri) {
+        String raw;
+        try (java.io.InputStream is = getContentResolver().openInputStream(uri)) {
+            if (is == null) { showToast(getString(R.string.toast_restore_failed)); return; }
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream(8192);
+            byte[] buf = new byte[8192];
+            int n, total = 0;
+            while ((n = is.read(buf)) >= 0) {
+                total += n;
+                if (total > 1_000_000) { showToast(getString(R.string.toast_restore_invalid)); return; }
+                bos.write(buf, 0, n);
+            }
+            raw = new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            showToast(getString(R.string.toast_restore_failed));
+            return;
+        }
+        SettingsBackup.Parsed p = SettingsBackup.parse(raw);
+        if (p == null) { showToast(getString(R.string.toast_restore_invalid)); return; }
+        applyBackup(p);
+    }
+
+    /** Apply a validated backup: write the prefs in one commit, then reload
+     *  the in-memory state and re-render the shelf / drawer / clock. Atomic in
+     *  the sense that a malformed file never reaches here (parse rejected it),
+     *  and package names not installed on this device are silently skipped by
+     *  the existing order / hidden / keymap parsers. */
+    private void applyBackup(SettingsBackup.Parsed p) {
+        android.content.SharedPreferences.Editor ed = prefs.edit();
+        if (p.has(SettingsBackup.K_APP_ORDER)) ed.putString(KEY_APP_ORDER, p.str(SettingsBackup.K_APP_ORDER));
+        if (p.has(SettingsBackup.K_KEY_MAP))   ed.putString(KEY_KEYMAP,    p.str(SettingsBackup.K_KEY_MAP));
+        if (p.has(SettingsBackup.K_HIDDEN))    ed.putString(KEY_HIDDEN,    p.str(SettingsBackup.K_HIDDEN));
+        int hc = p.intVal(SettingsBackup.K_HOME_COUNT, -1);
+        if (hc >= 1) ed.putInt(KEY_HOME_COUNT, hc);
+        int cm = p.intVal(SettingsBackup.K_CLOCK_MODE, -1);
+        boolean applyClock = (cm >= CLOCK_FULL && cm <= CLOCK_OFF);
+        if (applyClock) {
+            ed.putInt(KEY_CLOCK_MODE, cm);
+            ed.putBoolean(KEY_SHOW_CLOCK, cm != CLOCK_OFF);   // keep legacy key in sync
+        }
+        ed.apply();
+
+        // Reload in-memory state from the freshly-written prefs.
+        loadKeyMap();
+        loadHiddenApps();
+        homeCount = (hc >= 1) ? hc : -1;   // -1 lets resolveHomeCount re-read / clamp
+
+        // Re-order the live app list by the restored order and rebuild both
+        // surfaces. applyStoredOrder leaves apps the backup didn't mention at
+        // the end (alphabetical); packages in the backup not installed here are
+        // simply never matched. appByPackage is order-independent — no rebuild.
+        applyStoredOrder(appList);
+        RecyclingShelfView s = shelf;
+        if (s != null) {
+            resolveHomeCount(countVisible(appList));
+            applyShelfApps(s);
+        }
+        // Converge the on-disk order cache with the restored order.
+        saveOrder();
+
+        if (applyClock) {
+            clockMode = cm;
+            showClock = (cm != CLOCK_OFF);
+            if (showClock) {
+                clockFmt.reset();
+                TextView cv = clockView; if (cv != null) cv.setVisibility(View.VISIBLE);
+                startClock();
+                tickClock(System.currentTimeMillis());
+            } else {
+                stopClock();
+                TextView cv = clockView; if (cv != null) cv.setVisibility(View.GONE);
+            }
+        }
+        showToast(getString(R.string.toast_restore_done));
+    }
+
     @Override @SuppressWarnings("deprecation")
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == REQ_BACKUP_EXPORT && res == RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null) writeBackup(uri);
+            return;
+        }
+        if (req == REQ_BACKUP_IMPORT && res == RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null) readBackup(uri);
+            return;
+        }
         if (req == REQ_PICK_WP && res == RESULT_OK && data != null) {
             Uri uri = data.getData();
             if (uri != null) {
