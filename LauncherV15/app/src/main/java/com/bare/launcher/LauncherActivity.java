@@ -100,7 +100,8 @@ public class LauncherActivity extends Activity {
      *  ({@code 0}=off, {@code 1}=each restart, {@code 5..60}=minutes), and the
      *  current sequential position. */
     private static final String KEY_SLIDESHOW_FOLDER = "slideshow_folder";
-    private static final String KEY_SLIDESHOW_VALUE  = "slideshow_value";
+    private static final String KEY_SLIDESHOW_DURATION = "slideshow_duration_sec";
+    private static final String KEY_SLIDESHOW_RESTART  = "slideshow_restart";
     private static final String KEY_SLIDESHOW_INDEX  = "slideshow_index";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
     private static final String KEY_APP_ORDER  = "app_order";
@@ -146,10 +147,10 @@ public class LauncherActivity extends Activity {
     private static final int    REQ_BACKUP_IMPORT = 44;
     private static final int    REQ_PICK_SLIDESHOW_FOLDER = 45;
     private static final String BACKUP_FILENAME   = "barelauncher-settings.txt";
-    /** Slideshow rotation steps cycled by the "Wallpaper slideshow" row:
-     *  Off, Each restart, then 5..60 minutes in 5-minute increments. */
-    private static final int[]  SLIDESHOW_STEPS =
-            { 0, 1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60 };
+    /** Slideshow duration steps (seconds) cycled by the duration stepper:
+     *  Off, 30s, 45s, 1m, 1.5m, 2m, 3m, 5m, 10m. */
+    private static final int[]  SLIDESHOW_STEPS_SEC =
+            { 0, 30, 45, 60, 90, 120, 180, 300, 600 };
 
     // Subtle focus pop — animations toned down for performance / stability.
     // No vertical lift (saves a frame of layout work and removes a class of
@@ -310,8 +311,10 @@ public class LauncherActivity extends Activity {
     // ── Wallpaper slideshow state (all UI-thread) ────────────────────────
     /** Picked folder tree-URI string, or {@code null} when no folder is set. */
     private String  slideshowFolderUri = null;
-    /** Rotation setting: 0 = off, 1 = each restart, 5..60 = minutes. */
-    private int     slideshowValue     = 0;
+    /** Rotation interval in SECONDS: 0 = off, else one of {@link #SLIDESHOW_STEPS_SEC}. */
+    private int     slideshowDurationSec = 0;
+    /** "Change wallpaper on each restart" toggle (independent of the timer). */
+    private boolean slideshowRestart   = false;
     /** Sequential position within {@link #slideshowImages}. */
     private int     slideshowIndex     = 0;
     /** Cached child image document-URI strings for the folder; {@code null}
@@ -328,11 +331,12 @@ public class LauncherActivity extends Activity {
         @Override public void run() {
             if (destroyed) return;
             advanceSlideshow();
-            if (slideshowValue >= 5 && !uiPaused) {
-                uiHandler.postDelayed(this, slideshowValue * 60_000L);
+            if (slideshowDurationSec > 0 && !uiPaused) {
+                uiHandler.postDelayed(this, slideshowDurationSec * 1000L);
             }
         }
     };
+
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -791,35 +795,91 @@ public class LauncherActivity extends Activity {
      *  constant across the entire modal flow. */
     private View                        overlayBackdrop = null;
 
-    /** Symbolic indices for the 5 rows in the settings panel. UP/DOWN
-     *  navigation is modulo SETTINGS_ROW_COUNT, OK dispatches via a
-     *  switch on these values. */
-    private static final int SETTINGS_ROW_HIDE_APPS       = 0;
-    private static final int SETTINGS_ROW_KEYMAP          = 1;
-    private static final int SETTINGS_ROW_WALLPAPER       = 2;
-    private static final int SETTINGS_ROW_SLIDESHOW_FOLDER = 3;
-    private static final int SETTINGS_ROW_SLIDESHOW       = 4;
-    private static final int SETTINGS_ROW_SHOW_CLOCK      = 5;
-    private static final int SETTINGS_ROW_BACKUP          = 6;
-    private static final int SETTINGS_ROW_RESTORE         = 7;
-    private static final int SETTINGS_ROW_SYSTEM_SETTINGS = 8;
-    private static final int SETTINGS_ROW_ABOUT           = 9;
-    private static final int SETTINGS_ROW_COUNT           = 10;
+    /** Settings panel "pages": the main list, plus the Wallpaper/Slideshow and
+     *  Backup/Restore sub-views. Navigating into a sub-page rebuilds the row
+     *  column; BACK returns to MAIN. */
+    private static final int SPAGE_MAIN = 0, SPAGE_WALLPAPER = 1, SPAGE_BACKUP = 2;
+    private int settingsPage = SPAGE_MAIN;
 
-    /** Settings rows that show a right-side state indicator (the rest are
-     *  plain action labels). */
-    private static boolean settingsRowHasIndicator(int i) {
-        return i == SETTINGS_ROW_SHOW_CLOCK
-            || i == SETTINGS_ROW_SLIDESHOW
-            || i == SETTINGS_ROW_SLIDESHOW_FOLDER;
+    // Stable settings-row identifiers (NOT list positions — the panel is now
+    // page-based, so identity must be position-independent).
+    private static final int SR_HIDE_APPS          = 0;
+    private static final int SR_KEYMAP             = 1;
+    private static final int SR_WALLPAPER_MENU     = 2;   // → SPAGE_WALLPAPER
+    private static final int SR_CLOCK              = 3;
+    private static final int SR_BACKUP_MENU        = 4;   // → SPAGE_BACKUP
+    private static final int SR_SYSTEM             = 5;
+    private static final int SR_ABOUT              = 6;
+    private static final int SR_SET_WALLPAPER      = 7;
+    private static final int SR_SLIDESHOW_FOLDER   = 8;
+    private static final int SR_SLIDESHOW_DURATION = 9;
+    private static final int SR_SLIDESHOW_RESTART  = 10;
+    private static final int SR_BACKUP             = 11;
+    private static final int SR_RESTORE            = 12;
+
+    private static final int[] SROWS_MAIN = {
+            SR_HIDE_APPS, SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK,
+            SR_BACKUP_MENU, SR_SYSTEM, SR_ABOUT };
+    private static final int[] SROWS_WALLPAPER = {
+            SR_SET_WALLPAPER, SR_SLIDESHOW_FOLDER, SR_SLIDESHOW_DURATION, SR_SLIDESHOW_RESTART };
+    private static final int[] SROWS_BACKUP = {
+            SR_BACKUP, SR_RESTORE };
+
+    /** Main-list row to re-select when returning from a sub-page. */
+    private int settingsReturnRowId = SR_WALLPAPER_MENU;
+
+    /** Row IDs of the page currently shown. */
+    private int[] settingsPageRows() {
+        switch (settingsPage) {
+            case SPAGE_WALLPAPER: return SROWS_WALLPAPER;
+            case SPAGE_BACKUP:    return SROWS_BACKUP;
+            default:              return SROWS_MAIN;
+        }
+    }
+
+    /** Label resource for a row id. */
+    private static int settingsRowLabelRes(int rowId) {
+        switch (rowId) {
+            case SR_HIDE_APPS:          return R.string.settings_row_manage_hidden;
+            case SR_KEYMAP:             return R.string.settings_row_button_shortcuts;
+            case SR_WALLPAPER_MENU:     return R.string.settings_row_wallpaper_menu;
+            case SR_CLOCK:              return R.string.settings_row_show_clock;
+            case SR_BACKUP_MENU:        return R.string.settings_row_backup_menu;
+            case SR_SYSTEM:             return R.string.settings_row_system_settings;
+            case SR_ABOUT:              return R.string.settings_row_about;
+            case SR_SET_WALLPAPER:      return R.string.settings_row_set_wallpaper;
+            case SR_SLIDESHOW_FOLDER:   return R.string.settings_row_slideshow_folder;
+            case SR_SLIDESHOW_DURATION: return R.string.settings_row_slideshow_duration;
+            case SR_SLIDESHOW_RESTART:  return R.string.settings_row_slideshow_restart;
+            case SR_BACKUP:             return R.string.settings_row_backup;
+            case SR_RESTORE:            return R.string.settings_row_restore;
+            default:                    return R.string.settings_row_about;
+        }
+    }
+
+    /** Settings rows that show a right-side state indicator. */
+    private static boolean settingsRowHasIndicator(int rowId) {
+        return rowId == SR_CLOCK
+            || rowId == SR_SLIDESHOW_FOLDER
+            || rowId == SR_SLIDESHOW_DURATION
+            || rowId == SR_SLIDESHOW_RESTART;
     }
 
     /** Widest state string an indicator row can show, used to reserve width at
      *  build time so the live value never clips the label. */
-    private static String settingsIndicatorWidestText(int i) {
-        if (i == SETTINGS_ROW_SLIDESHOW)        return "Restart";
-        if (i == SETTINGS_ROW_SLIDESHOW_FOLDER) return "Not set";
-        return "Full";   // SHOW_CLOCK
+    private static String settingsIndicatorWidestText(int rowId) {
+        switch (rowId) {
+            case SR_SLIDESHOW_FOLDER:   return "Not set";
+            case SR_SLIDESHOW_DURATION: return "1.5 min";
+            case SR_SLIDESHOW_RESTART:  return "Off";
+            default:                    return "Full";   // SR_CLOCK
+        }
+    }
+
+    /** Index of {@code rowId} within the MAIN page (0 if absent). */
+    private static int mainRowIndex(int rowId) {
+        for (int i = 0; i < SROWS_MAIN.length; i++) if (SROWS_MAIN[i] == rowId) return i;
+        return 0;
     }
 
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
@@ -6110,26 +6170,29 @@ public class LauncherActivity extends Activity {
         col.setClipChildren(false);
         col.setClipToPadding(false);
 
-        // Build each row. Row geometry mirrors the keymap card's slot
-        // rows so the focus pill aligns horizontally across both panels
-        // (a user who has the keymap card and the settings panel in
-        // muscle memory sees the same selection language in both).
-        // Row label string ids in the same order as SETTINGS_ROW_*
-        // constants. Indicator: "›" for drill-throughs, "✓" for the
-        // toggle (set on the actual selected state in refreshSettingsRows).
-        final int[] rowLabels = new int[] {
-                R.string.settings_row_manage_hidden,
-                R.string.settings_row_button_shortcuts,
-                R.string.settings_row_set_wallpaper,
-                R.string.settings_row_slideshow_folder,
-                R.string.settings_row_slideshow,
-                R.string.settings_row_show_clock,
-                R.string.settings_row_backup,
-                R.string.settings_row_restore,
-                R.string.settings_row_system_settings,
-                R.string.settings_row_about,
-        };
-        for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
+        card.addView(col, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
+        cardLp.gravity = Gravity.TOP | Gravity.END;
+        card.setLayoutParams(cardLp);
+        ov.addView(card);
+        r.addView(ov);
+        settingsOverlay = ov;
+        settingsCard    = card;
+        settingsColumn  = col;
+        settingsPage    = SPAGE_MAIN;
+        rebuildSettingsColumn();
+    }
+
+    /** (Re)build the row column for the current {@link #settingsPage}. Each row
+     *  is a label plus an optional right-side state indicator; click listeners
+     *  map the row's position to its page row-id. Width equalisation runs
+     *  post-layout so indicators line up and the card hugs the longest label.
+     *  Called on first build and whenever the page changes (main ↔ sub-view). */
+    private void rebuildSettingsColumn() {
+        final android.widget.LinearLayout col = settingsColumn;
+        if (col == null) return;
+        col.removeAllViews();
+        for (int rowId : settingsPageRows()) {
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
             row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
@@ -6140,13 +6203,8 @@ public class LauncherActivity extends Activity {
             rowBg.setColor(Color.TRANSPARENT);
             row.setBackground(rowBg);
 
-            // [0] label — WRAP_CONTENT with end-padding so the indicator
-            //     (when present) sits a small visual gap to its right.
-            //     Drill-through rows have no indicator in v1.3.2 — the
-            //     end-margin is dropped to 0 for them so the row hugs
-            //     the label tightly.
             TextView label = new TextView(this);
-            label.setText(rowLabels[i]);
+            label.setText(settingsRowLabelRes(rowId));
             label.setTextColor(0xCCFFFFFF);
             label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
             label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -6154,56 +6212,27 @@ public class LauncherActivity extends Activity {
             label.setEllipsize(TextUtils.TruncateAt.END);
             android.widget.LinearLayout.LayoutParams labelLp =
                     new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
-            // Only the toggle row needs an end-margin to gap from its
-            // checkmark indicator. Drill-through rows have nothing to
-            // their right, so end-margin = 0 lets the row's natural
-            // width = label width exactly. equalizeSettingsRowWidths
-            // then pads every row to the widest measured width so
-            // selection pills still align consistently.
-            labelLp.setMarginEnd(settingsRowHasIndicator(i) ? dp(14) : 0);
+            labelLp.setMarginEnd(settingsRowHasIndicator(rowId) ? dp(14) : 0);
             row.addView(label, labelLp);
 
-            // [1] right-side indicator — only on the Show clock toggle
-            //     row in v1.3.2. The four drill-through rows (Manage
-            //     hidden apps, Button shortcuts, Set wallpaper, System
-            //     Settings) render as label-only per the v1.3.2 design
-            //     pass. The chevron column is gone — the panel reads as
-            //     a clean list of action labels and shrinks tighter
-            //     around the longest one.
-            //
-            //     refreshSettingsRows is index-tolerant: it tests
-            //     row.getChildAt(1) for null before mutating, so the
-            //     missing-indicator rows skip the indicator paint cleanly.
-            if (settingsRowHasIndicator(i)) {
+            if (settingsRowHasIndicator(rowId)) {
                 TextView indicator = new TextView(this);
                 indicator.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
                 indicator.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
                 indicator.setSingleLine(true);
-                // Seed with the WIDEST state string for this row so the
-                // post-build width equalisation reserves enough room — the
-                // live text set in refreshSettingsRows is never wider, so the
-                // label can't get clipped when the indicator grows.
-                indicator.setText(settingsIndicatorWidestText(i));
+                // Seed with the widest state string so equalisation reserves
+                // room — the live text (refreshSettingsRows) is never wider.
+                indicator.setText(settingsIndicatorWidestText(rowId));
                 row.addView(indicator,
                         new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
             }
 
-            // Row uses WRAP_CONTENT initially so the natural width is
-            // (label + margin + indicator). equalizeSettingsRowWidths
-            // (called post-build) snaps every row to the widest measured
-            // width so all indicators line up vertically at the right
-            // edge while the card auto-fits to the longest label.
             android.widget.LinearLayout.LayoutParams rowLp =
                     new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
             rowLp.bottomMargin = dp(2);
             col.addView(row, rowLp);
         }
-
-        // Touch support: each row is independently clickable, so a TV
-        // remote user uses d-pad and a touchscreen / mouse user gets the
-        // same affordances. Click also moves the selection cursor to the
-        // tapped row before activating, so the focus pill highlight
-        // matches what was just pressed.
+        // Click support: tap moves the cursor to the row, then activates it.
         for (int i = 0; i < col.getChildCount(); i++) {
             final int idx = i;
             View row = col.getChildAt(i);
@@ -6212,28 +6241,10 @@ public class LauncherActivity extends Activity {
                 v.playSoundEffect(SoundEffectConstants.CLICK);
                 settingsSelectedRow = idx;
                 refreshSettingsRows();
-                activateSettingsRow(idx);
+                activateSettingsAt(idx);
             });
         }
-
-        card.addView(col, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
-        // Card width is now WRAP_CONTENT so it auto-fits the widest row's
-        // intrinsic width (no fixed 252 dp column). The card will hug the
-        // longest visible label + chevron with a small breathing-room
-        // padding, no right-side dead space.
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
-        cardLp.gravity = Gravity.TOP | Gravity.END;
-        card.setLayoutParams(cardLp);
-        ov.addView(card);
-
-        r.addView(ov);
-        settingsOverlay = ov;
-        settingsCard    = card;
-        settingsColumn  = col;
-
-        // Equalise row widths in a post() so each row's measure pass has
-        // run. Touching rowLp.width here directly would race with the
-        // first layout pass and produce zero widths.
+        // Equalise widths post-layout so each row's measure pass has run.
         col.post(() -> {
             if (col != settingsColumn) return;
             equalizeSettingsRowWidths(col);
@@ -6262,15 +6273,15 @@ public class LauncherActivity extends Activity {
         // no-op, so the dim level stays constant.
         ensureOverlayBackdropVisible();
 
-        // Land the cursor on the row a drill-through restores to (set by
-        // activateSettingsRow before it called hideSettingsPanel), then
-        // reset the pending cursor so the NEXT first-open from the gear
-        // pill starts at row 0 again. This makes the back-stack read
-        // naturally: gear → panel (row 0) → click "Button shortcuts" →
-        // keymap card → BACK → panel (row 1, where the user left off) →
-        // BACK → home → gear → panel (row 0 again, fresh open).
-        settingsSelectedRow = pendingSettingsCursor;
-        pendingSettingsCursor = 0;
+        // Always open on the MAIN page (the panel may have been closed while
+        // on a sub-view). Rebuild, then land the cursor on the row a
+        // drill-through restores to (set by the activation handler before it
+        // called hideSettingsPanel); reset the pending cursor so the NEXT
+        // fresh open from the gear starts at the top row.
+        settingsPage = SPAGE_MAIN;
+        rebuildSettingsColumn();
+        settingsSelectedRow = mainRowIndex(pendingSettingsCursor);
+        pendingSettingsCursor = SR_HIDE_APPS;
         refreshSettingsRows();
 
         // Anchor the card just below the gear toolbar pill — shared
@@ -6375,27 +6386,26 @@ public class LauncherActivity extends Activity {
             }
             if (indicatorView instanceof TextView) {
                 TextView ind = (TextView) indicatorView;
-                if (i == SETTINGS_ROW_SHOW_CLOCK) {
-                    // 3-state indicator (v1.4.9): show the current clock mode
-                    // as a short word so the row reads its own state at a
-                    // glance. OFF is dimmed; the active states use sky cyan.
+                int[] pageRows = settingsPageRows();
+                int rowId = (i < pageRows.length) ? pageRows[i] : -1;
+                if (rowId == SR_CLOCK) {
+                    // 3-state clock indicator: Full / Time / Off.
                     ind.setText(clockMode == CLOCK_FULL ? "Full"
                               : clockMode == CLOCK_TIME_ONLY ? "Time" : "Off");
-                    if (clockMode == CLOCK_OFF) {
-                        ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
-                    } else {
-                        ind.setTextColor(sel ? selTx : 0xFF7DD3FC); // sky cyan when on + idle
-                    }
-                } else if (i == SETTINGS_ROW_SLIDESHOW) {
-                    ind.setText(slideshowLabel());
-                    boolean on = slideshowValue != 0;
-                    if (!on) ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
-                    else     ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
-                } else if (i == SETTINGS_ROW_SLIDESHOW_FOLDER) {
+                    if (clockMode == CLOCK_OFF) ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
+                    else                        ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
+                } else if (rowId == SR_SLIDESHOW_DURATION) {
+                    ind.setText(slideshowDurationLabel());
+                    boolean on = slideshowDurationSec != 0;
+                    ind.setTextColor(on ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
+                } else if (rowId == SR_SLIDESHOW_RESTART) {
+                    ind.setText(slideshowRestart ? "On" : "Off");
+                    ind.setTextColor(slideshowRestart ? (sel ? selTx : 0xFF7DD3FC)
+                                                      : (sel ? 0x66111114 : 0x66FFFFFF));
+                } else if (rowId == SR_SLIDESHOW_FOLDER) {
                     boolean set = slideshowFolderUri != null;
                     ind.setText(set ? "Set" : "Not set");
-                    if (!set) ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
-                    else      ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
+                    ind.setTextColor(set ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
                 } else {
                     ind.setTextColor(sel ? selTx : idleTx);
                 }
@@ -6408,28 +6418,32 @@ public class LauncherActivity extends Activity {
      *  every other key to {@code super.dispatchKeyEvent} so volume /
      *  power / media keys reach the platform unchanged. */
     private boolean handleSettingsKey(int kc) {
+        int n = settingsPageRows().length;
         switch (kc) {
             case KeyEvent.KEYCODE_DPAD_UP:
-                settingsSelectedRow =
-                        (settingsSelectedRow - 1 + SETTINGS_ROW_COUNT) % SETTINGS_ROW_COUNT;
+                if (n > 0) settingsSelectedRow = (settingsSelectedRow - 1 + n) % n;
                 refreshSettingsRows(); return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
-                settingsSelectedRow = (settingsSelectedRow + 1) % SETTINGS_ROW_COUNT;
+                if (n > 0) settingsSelectedRow = (settingsSelectedRow + 1) % n;
                 refreshSettingsRows(); return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (settingsSelectedRow == SETTINGS_ROW_SLIDESHOW) stepSlideshow(-1);
+                if (currentSettingsRowId() == SR_SLIDESHOW_DURATION) stepSlideshowDuration(-1);
                 return true;   // swallow on other rows (panel is modal)
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (settingsSelectedRow == SETTINGS_ROW_SLIDESHOW) stepSlideshow(+1);
+                if (currentSettingsRowId() == SR_SLIDESHOW_DURATION) stepSlideshowDuration(+1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
-                activateSettingsRow(settingsSelectedRow);
+                activateSettingsAt(settingsSelectedRow);
                 return true;
             case KeyEvent.KEYCODE_BACK:
             case KeyEvent.KEYCODE_ESCAPE:
-                hideSettingsPanel(); return true;
+                // BACK on a sub-page returns to the main list; on the main
+                // list it closes the panel.
+                if (settingsPage != SPAGE_MAIN) returnToSettingsMain();
+                else                            hideSettingsPanel();
+                return true;
         }
         // Allow volume / power / media to pass through; swallow other
         // keys so they don't bleed to the shelf underneath.
@@ -6437,105 +6451,113 @@ public class LauncherActivity extends Activity {
         return true;
     }
 
-    /** Execute the action bound to the given panel row. */
-    private void activateSettingsRow(int row) {
-        switch (row) {
-            case SETTINGS_ROW_HIDE_APPS:
-                // Hand off to the keymap card's HIDE mode. Set both the
-                // re-open flag (so dismissing the keymap card returns to
-                // this panel) and the skip-slots flag (so Back from HIDE
-                // bypasses the SLOTS list and dismisses the keymap card
-                // immediately, since the user came in from settings, not
-                // from the slot list). hide-then-show keeps the dim
-                // constant via the shared backdrop.
-                pendingSettingsCursor       = SETTINGS_ROW_HIDE_APPS;
+    /** Row id under the cursor on the current page, or -1. */
+    private int currentSettingsRowId() {
+        int[] rows = settingsPageRows();
+        int i = settingsSelectedRow;
+        return (i >= 0 && i < rows.length) ? rows[i] : -1;
+    }
+
+    /** Open a sub-page, remembering the main-list row to return to. */
+    private void enterSettingsPage(int page, int returnRowId) {
+        settingsReturnRowId = returnRowId;
+        settingsPage = page;
+        settingsSelectedRow = 0;
+        rebuildSettingsColumn();
+        refreshSettingsRows();
+    }
+
+    /** Return from a sub-page to the main list, landing on the menu row. */
+    private void returnToSettingsMain() {
+        settingsPage = SPAGE_MAIN;
+        rebuildSettingsColumn();
+        settingsSelectedRow = mainRowIndex(settingsReturnRowId);
+        refreshSettingsRows();
+    }
+
+    /** Activate the row at {@code index} on the current page. */
+    private void activateSettingsAt(int index) {
+        int[] rows = settingsPageRows();
+        if (index < 0 || index >= rows.length) return;
+        activateSettingsRowId(rows[index]);
+    }
+
+    /** Execute the action bound to a settings row id. */
+    private void activateSettingsRowId(int rowId) {
+        switch (rowId) {
+            case SR_HIDE_APPS:
+                // Hand off to the keymap card's HIDE mode (returns here on Back).
+                pendingSettingsCursor       = SR_HIDE_APPS;
                 keymapOpenedFromSettings    = true;
                 hideManagerSkipSlotsOnExit  = true;
                 hideSettingsPanel();
                 showKeymapOverlay();
                 enterHideManager();
                 break;
-            case SETTINGS_ROW_KEYMAP:
-                // Hand off to the keymap card's SLOTS mode (default).
-                pendingSettingsCursor    = SETTINGS_ROW_KEYMAP;
+            case SR_KEYMAP:
+                pendingSettingsCursor    = SR_KEYMAP;
                 keymapOpenedFromSettings = true;
                 hideSettingsPanel();
                 showKeymapOverlay();
                 break;
-            case SETTINGS_ROW_WALLPAPER:
-                // Wallpaper picker is a system surface (SAF). Close the
-                // panel before launching so the dim backdrop doesn't
-                // sit behind the picker on slow ROMs.
-                hideSettingsPanel();
-                openStoragePicker();
+            case SR_WALLPAPER_MENU:
+                enterSettingsPage(SPAGE_WALLPAPER, SR_WALLPAPER_MENU);
                 break;
-            case SETTINGS_ROW_SHOW_CLOCK:
-                // 3-state cycle (v1.4.9): FULL (time + day/date) → TIME_ONLY
-                // (just the time) → OFF (hidden) → FULL. Persist + apply +
-                // repaint indicator. Panel stays open so the user can cycle
-                // through the states in sequence.
+            case SR_BACKUP_MENU:
+                enterSettingsPage(SPAGE_BACKUP, SR_BACKUP_MENU);
+                break;
+            case SR_CLOCK:
+                // 3-state cycle: FULL → TIME_ONLY → OFF → FULL.
                 clockMode = (clockMode + 1) % 3;
                 showClock = (clockMode != CLOCK_OFF);
                 prefs.edit()
                         .putInt(KEY_CLOCK_MODE, clockMode)
-                        .putBoolean(KEY_SHOW_CLOCK, showClock)   // keep the legacy key in sync
+                        .putBoolean(KEY_SHOW_CLOCK, showClock)
                         .apply();
                 if (showClock) {
-                    // Re-render unconditionally: reset the formatter's
-                    // per-minute idempotency guard so flipping FULL↔TIME_ONLY
-                    // repaints immediately even within the same minute.
                     clockFmt.reset();
                     TextView cvOn = clockView;
                     if (cvOn != null) cvOn.setVisibility(View.VISIBLE);
                     startClock();
-                    // startClock() only re-renders when it transitions from
-                    // not-running to running; a FULL↔TIME_ONLY switch leaves it
-                    // already running, so force the paint here too — otherwise
-                    // the day/date line wouldn't appear/disappear until the next
-                    // minute tick (or a relaunch).
                     tickClock(System.currentTimeMillis());
                 } else {
                     stopClock();
                     TextView cv = clockView;
                     if (cv != null) cv.setVisibility(View.GONE);
                 }
-                refreshSettingsRows(); // repaint the state indicator
+                refreshSettingsRows();
                 break;
-            case SETTINGS_ROW_SLIDESHOW_FOLDER:
-                // Folder picker is a system surface (SAF) — close the panel
-                // first so the dim backdrop doesn't sit behind it.
-                hideSettingsPanel();
-                pickSlideshowFolder();
-                break;
-            case SETTINGS_ROW_SLIDESHOW:
-                // OK advances the rotation setting (Off → Restart → 5..60 min);
-                // LEFT/RIGHT also step it. Panel stays open so the user sees
-                // the indicator change.
-                stepSlideshow(+1);
-                break;
-            case SETTINGS_ROW_BACKUP:
-                // Export the small settings file via SAF. Close the panel
-                // first so the system create-document UI isn't dimmed behind
-                // our backdrop.
-                hideSettingsPanel();
-                exportSettings();
-                break;
-            case SETTINGS_ROW_RESTORE:
-                hideSettingsPanel();
-                importSettings();
-                break;
-            case SETTINGS_ROW_SYSTEM_SETTINGS:
+            case SR_SYSTEM:
                 hideSettingsPanel();
                 openSystemSettings();
                 break;
-            case SETTINGS_ROW_ABOUT:
-                // Drill-through to the About card. Mark it as opened from the
-                // settings panel so Back returns here, mirroring the keymap
-                // card's keymapOpenedFromSettings contract.
-                pendingSettingsCursor = SETTINGS_ROW_ABOUT;
+            case SR_ABOUT:
+                pendingSettingsCursor = SR_ABOUT;
                 aboutOpenedFromSettings = true;
                 hideSettingsPanel();
                 showAboutOverlay();
+                break;
+            case SR_SET_WALLPAPER:
+                hideSettingsPanel();
+                openStoragePicker();
+                break;
+            case SR_SLIDESHOW_FOLDER:
+                hideSettingsPanel();
+                pickSlideshowFolder();
+                break;
+            case SR_SLIDESHOW_DURATION:
+                stepSlideshowDuration(+1);   // OK advances; LEFT/RIGHT also step
+                break;
+            case SR_SLIDESHOW_RESTART:
+                toggleSlideshowRestart();
+                break;
+            case SR_BACKUP:
+                hideSettingsPanel();
+                exportSettings();
+                break;
+            case SR_RESTORE:
+                hideSettingsPanel();
+                importSettings();
                 break;
             default:
                 break;
@@ -6873,7 +6895,7 @@ public class LauncherActivity extends Activity {
             if (returnToSettings) {
                 // Re-open the settings panel on the About row, mirroring the
                 // keymap → settings back-stack behaviour.
-                pendingSettingsCursor = SETTINGS_ROW_ABOUT;
+                pendingSettingsCursor = SR_ABOUT;
                 showSettingsPanel();
             } else {
                 dismissOverlayBackdropIfIdle();
@@ -9022,20 +9044,30 @@ public class LauncherActivity extends Activity {
     /** Load persisted slideshow state into the in-memory fields. Called once
      *  from {@link #initCaches}. */
     private void loadSlideshowPrefs() {
-        slideshowFolderUri = prefs.getString(KEY_SLIDESHOW_FOLDER, null);
-        slideshowValue     = prefs.getInt(KEY_SLIDESHOW_VALUE, 0);
-        slideshowIndex     = Math.max(0, prefs.getInt(KEY_SLIDESHOW_INDEX, 0));
-        // Sanitise an out-of-range stored value to the nearest legal state.
+        slideshowFolderUri   = prefs.getString(KEY_SLIDESHOW_FOLDER, null);
+        slideshowDurationSec = prefs.getInt(KEY_SLIDESHOW_DURATION, 0);
+        slideshowRestart     = prefs.getBoolean(KEY_SLIDESHOW_RESTART, false);
+        slideshowIndex       = Math.max(0, prefs.getInt(KEY_SLIDESHOW_INDEX, 0));
+        // Sanitise an out-of-range stored duration to Off.
         boolean legal = false;
-        for (int s : SLIDESHOW_STEPS) if (s == slideshowValue) { legal = true; break; }
-        if (!legal) slideshowValue = 0;
+        for (int s : SLIDESHOW_STEPS_SEC) if (s == slideshowDurationSec) { legal = true; break; }
+        if (!legal) slideshowDurationSec = 0;
     }
 
-    /** Human label for the current slideshow setting. */
-    private String slideshowLabel() {
-        if (slideshowValue == 0) return "Off";
-        if (slideshowValue == 1) return "Restart";
-        return slideshowValue + " min";
+    /** {@code true} when the slideshow controls the wallpaper: a folder is set
+     *  and at least one rotation trigger (timer or each-restart) is on. */
+    private boolean slideshowActive() {
+        return slideshowFolderUri != null && (slideshowDurationSec > 0 || slideshowRestart);
+    }
+
+    /** Human label for the current duration setting. */
+    private String slideshowDurationLabel() {
+        int s = slideshowDurationSec;
+        if (s <= 0)   return "Off";
+        if (s < 60)   return s + "s";
+        if (s == 90)  return "1.5 min";
+        if (s % 60 == 0) return (s / 60) + " min";
+        return s + "s";
     }
 
     @SuppressWarnings("deprecation")
@@ -9046,25 +9078,38 @@ public class LauncherActivity extends Activity {
         catch (Exception e) { showToast(getString(R.string.toast_no_file_picker)); }
     }
 
-    /** Step the rotation setting through {@link #SLIDESHOW_STEPS}. Persists,
+    /** Step the duration through {@link #SLIDESHOW_STEPS_SEC}. Persists,
      *  repaints the indicator, and (re)arms the timer. Turning ON from Off
      *  shows an image immediately; stepping between intervals only re-arms the
      *  timer (no flickery re-decode on every press). */
-    private void stepSlideshow(int dir) {
+    private void stepSlideshowDuration(int dir) {
         int idx = 0;
-        for (int i = 0; i < SLIDESHOW_STEPS.length; i++) {
-            if (SLIDESHOW_STEPS[i] == slideshowValue) { idx = i; break; }
+        for (int i = 0; i < SLIDESHOW_STEPS_SEC.length; i++) {
+            if (SLIDESHOW_STEPS_SEC[i] == slideshowDurationSec) { idx = i; break; }
         }
-        int prev = slideshowValue;
-        idx = (idx + dir + SLIDESHOW_STEPS.length) % SLIDESHOW_STEPS.length;
-        slideshowValue = SLIDESHOW_STEPS[idx];
-        prefs.edit().putInt(KEY_SLIDESHOW_VALUE, slideshowValue).apply();
+        int prev = slideshowDurationSec;
+        idx = (idx + dir + SLIDESHOW_STEPS_SEC.length) % SLIDESHOW_STEPS_SEC.length;
+        slideshowDurationSec = SLIDESHOW_STEPS_SEC[idx];
+        prefs.edit().putInt(KEY_SLIDESHOW_DURATION, slideshowDurationSec).apply();
         refreshSettingsRows();
-        if (slideshowValue != 0 && slideshowFolderUri == null) {
+        if (slideshowDurationSec != 0 && slideshowFolderUri == null) {
             showToast(getString(R.string.toast_slideshow_pick_folder));
         }
-        if (prev == 0 && slideshowValue != 0) kickSlideshowNow();
+        if (prev == 0 && slideshowDurationSec != 0) kickSlideshowNow();
         restartSlideshowTimer();
+    }
+
+    /** Toggle "change on each restart". Persists and repaints; when turned on
+     *  it also shows an image straight away so the user sees it take effect. */
+    private void toggleSlideshowRestart() {
+        slideshowRestart = !slideshowRestart;
+        prefs.edit().putBoolean(KEY_SLIDESHOW_RESTART, slideshowRestart).apply();
+        refreshSettingsRows();
+        if (slideshowRestart && slideshowFolderUri == null) {
+            showToast(getString(R.string.toast_slideshow_pick_folder));
+        }
+        // If the timer isn't already driving the wallpaper, surface an image now.
+        if (slideshowRestart && slideshowDurationSec == 0) kickSlideshowNow();
     }
 
     /** Show an image right away when the slideshow is first switched on. */
@@ -9158,16 +9203,16 @@ public class LauncherActivity extends Activity {
      *  it when off / paused / no folder. Cheap: one pending message at most. */
     private void restartSlideshowTimer() {
         uiHandler.removeCallbacks(slideshowTick);
-        if (uiPaused || slideshowFolderUri == null || slideshowValue < 5) return;
+        if (uiPaused || slideshowFolderUri == null || slideshowDurationSec <= 0) return;
         if (slideshowImages == null) enumerateSlideshowAsync(null);
-        uiHandler.postDelayed(slideshowTick, slideshowValue * 60_000L);
+        uiHandler.postDelayed(slideshowTick, slideshowDurationSec * 1000L);
     }
 
     /** Once per process: when in "each restart" mode, roll to the next image
      *  after the instant snapshot has already painted. */
     private void slideshowRestartAdvanceOnce() {
         if (slideshowRestartApplied) return;
-        if (slideshowValue != 1 || slideshowFolderUri == null) return;
+        if (!slideshowRestart || slideshowFolderUri == null) return;
         slideshowRestartApplied = true;
         advanceSlideshow();   // self-enumerates if needed
     }
@@ -9197,7 +9242,7 @@ public class LauncherActivity extends Activity {
                         .putString(KEY_SLIDESHOW_FOLDER, slideshowFolderUri)
                         .putInt(KEY_SLIDESHOW_INDEX, 0)
                         .apply();
-                final boolean showNow = (slideshowValue != 0);
+                final boolean showNow = slideshowActive();
                 enumerateSlideshowAsync(() -> { if (showNow) applyCurrentSlideshowImage(); });
                 restartSlideshowTimer();
                 showToast(getString(R.string.toast_slideshow_folder_set));
@@ -9209,6 +9254,16 @@ public class LauncherActivity extends Activity {
             if (uri != null) {
                 try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
                 catch (SecurityException e) { showToast(getString(R.string.toast_wallpaper_no_permission)); return; }
+                // Picking a single wallpaper means "I want exactly this" — turn
+                // the slideshow off so it can't override the chosen image. The
+                // folder selection is kept so it's easy to re-enable.
+                slideshowDurationSec = 0;
+                slideshowRestart     = false;
+                prefs.edit()
+                        .putInt(KEY_SLIDESHOW_DURATION, 0)
+                        .putBoolean(KEY_SLIDESHOW_RESTART, false)
+                        .apply();
+                uiHandler.removeCallbacks(slideshowTick);
                 if (wallpaperCtl != null) {
                     wallpaperCtl.resetUserLoadingGuard();
                     wallpaperCtl.applyFromUri(uri);

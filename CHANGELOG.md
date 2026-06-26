@@ -11,12 +11,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 - **Back up and restore your setup.** Save your layout — app order, home
   favourites, hidden apps, button shortcuts and clock style — to a file,
-  and load it back later or on another TV. Find both under Settings.
-- **Wallpaper slideshow.** Point it at a folder of images and your
-  wallpaper changes on its own — pick a new one on every restart, or
-  rotate every 5 to 60 minutes. It only runs while you're on the home
-  screen, so it never slows anything down or drains power in the
-  background, and your home screen still appears instantly on startup.
+  and load it back later or on another TV. Find it under Settings →
+  Backup & restore.
+- **Wallpaper slideshow.** Under Settings → Wallpaper / Slideshow, pick a
+  folder of images and have your wallpaper change on its own — every 30
+  seconds up to 10 minutes, and/or a fresh one each time the TV starts.
+  Picking a single wallpaper turns the slideshow off again. It only runs
+  while you're on the home screen, so it never slows anything down or
+  drains power in the background, and your home screen still appears
+  instantly on startup.
 
 ## [2.1.0] — 2026-06-25
 
