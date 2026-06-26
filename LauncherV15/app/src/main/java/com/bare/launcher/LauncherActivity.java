@@ -9099,10 +9099,10 @@ public class LauncherActivity extends Activity {
     private String slideshowDurationLabel() {
         int s = slideshowDurationSec;
         if (s <= 0)   return "Off";
-        if (s < 60)   return s + "s";
-        if (s == 90)  return "1.5 min";
-        if (s % 60 == 0) return (s / 60) + " min";
-        return s + "s";
+        if (s < 60)   return "< " + s + "s >";
+        if (s == 90)  return "< 1.5 min >";
+        if (s % 60 == 0) return "< " + (s / 60) + " min >";
+        return "< " + s + "s >";
     }
 
     /** Whether the media-read permission needed to browse image folders is
