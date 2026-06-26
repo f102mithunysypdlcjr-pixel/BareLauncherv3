@@ -5,6 +5,19 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-06-26
+
+### What's new
+
+- **Back up and restore your setup.** Save your layout — app order, home
+  favourites, hidden apps, button shortcuts and clock style — to a file,
+  and load it back later or on another TV. Find both under Settings.
+- **Wallpaper slideshow.** Point it at a folder of images and your
+  wallpaper changes on its own — pick a new one on every restart, or
+  rotate every 5 to 60 minutes. It only runs while you're on the home
+  screen, so it never slows anything down or drains power in the
+  background, and your home screen still appears instantly on startup.
+
 ## [2.1.0] — 2026-06-25
 
 ### What's new

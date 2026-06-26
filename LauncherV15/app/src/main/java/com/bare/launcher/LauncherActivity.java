@@ -96,6 +96,12 @@ public class LauncherActivity extends Activity {
     // finer would be 59 wakeups per minute of pure waste.
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
+    /** Slideshow: picked folder (SAF tree URI string), the rotation setting
+     *  ({@code 0}=off, {@code 1}=each restart, {@code 5..60}=minutes), and the
+     *  current sequential position. */
+    private static final String KEY_SLIDESHOW_FOLDER = "slideshow_folder";
+    private static final String KEY_SLIDESHOW_VALUE  = "slideshow_value";
+    private static final String KEY_SLIDESHOW_INDEX  = "slideshow_index";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
     private static final String KEY_APP_ORDER  = "app_order";
     /** v1.5.0: number of leading apps (in the visible / non-hidden order)
@@ -138,7 +144,12 @@ public class LauncherActivity extends Activity {
     private static final int    REQ_PICK_WP    = 42;
     private static final int    REQ_BACKUP_EXPORT = 43;
     private static final int    REQ_BACKUP_IMPORT = 44;
+    private static final int    REQ_PICK_SLIDESHOW_FOLDER = 45;
     private static final String BACKUP_FILENAME   = "barelauncher-settings.txt";
+    /** Slideshow rotation steps cycled by the "Wallpaper slideshow" row:
+     *  Off, Each restart, then 5..60 minutes in 5-minute increments. */
+    private static final int[]  SLIDESHOW_STEPS =
+            { 0, 1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60 };
 
     // Subtle focus pop — animations toned down for performance / stability.
     // No vertical lift (saves a frame of layout work and removes a class of
@@ -295,6 +306,33 @@ public class LauncherActivity extends Activity {
     // so a change in Settings → Date & time is picked up on the next
     // onResume without a ContentObserver.
     private boolean is24Hour   = false;
+
+    // ── Wallpaper slideshow state (all UI-thread) ────────────────────────
+    /** Picked folder tree-URI string, or {@code null} when no folder is set. */
+    private String  slideshowFolderUri = null;
+    /** Rotation setting: 0 = off, 1 = each restart, 5..60 = minutes. */
+    private int     slideshowValue     = 0;
+    /** Sequential position within {@link #slideshowImages}. */
+    private int     slideshowIndex     = 0;
+    /** Cached child image document-URI strings for the folder; {@code null}
+     *  until enumerated (off the UI thread). Volatile because it is written
+     *  on the app executor and read on the UI thread. */
+    private volatile String[] slideshowImages = null;
+    /** Guards the once-per-process "each restart" image change so returning
+     *  from another app doesn't re-roll the wallpaper. */
+    private boolean slideshowRestartApplied = false;
+    /** Foreground-only rotation tick. Re-posted by itself; cancelled in
+     *  {@link #onPause} so the slideshow never runs (or wakes the device) in
+     *  the background. */
+    private final Runnable slideshowTick = new Runnable() {
+        @Override public void run() {
+            if (destroyed) return;
+            advanceSlideshow();
+            if (slideshowValue >= 5 && !uiPaused) {
+                uiHandler.postDelayed(this, slideshowValue * 60_000L);
+            }
+        }
+    };
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -759,12 +797,30 @@ public class LauncherActivity extends Activity {
     private static final int SETTINGS_ROW_HIDE_APPS       = 0;
     private static final int SETTINGS_ROW_KEYMAP          = 1;
     private static final int SETTINGS_ROW_WALLPAPER       = 2;
-    private static final int SETTINGS_ROW_SHOW_CLOCK      = 3;
-    private static final int SETTINGS_ROW_BACKUP          = 4;
-    private static final int SETTINGS_ROW_RESTORE         = 5;
-    private static final int SETTINGS_ROW_SYSTEM_SETTINGS = 6;
-    private static final int SETTINGS_ROW_ABOUT           = 7;
-    private static final int SETTINGS_ROW_COUNT           = 8;
+    private static final int SETTINGS_ROW_SLIDESHOW_FOLDER = 3;
+    private static final int SETTINGS_ROW_SLIDESHOW       = 4;
+    private static final int SETTINGS_ROW_SHOW_CLOCK      = 5;
+    private static final int SETTINGS_ROW_BACKUP          = 6;
+    private static final int SETTINGS_ROW_RESTORE         = 7;
+    private static final int SETTINGS_ROW_SYSTEM_SETTINGS = 8;
+    private static final int SETTINGS_ROW_ABOUT           = 9;
+    private static final int SETTINGS_ROW_COUNT           = 10;
+
+    /** Settings rows that show a right-side state indicator (the rest are
+     *  plain action labels). */
+    private static boolean settingsRowHasIndicator(int i) {
+        return i == SETTINGS_ROW_SHOW_CLOCK
+            || i == SETTINGS_ROW_SLIDESHOW
+            || i == SETTINGS_ROW_SLIDESHOW_FOLDER;
+    }
+
+    /** Widest state string an indicator row can show, used to reserve width at
+     *  build time so the live value never clips the label. */
+    private static String settingsIndicatorWidestText(int i) {
+        if (i == SETTINGS_ROW_SLIDESHOW)        return "Restart";
+        if (i == SETTINGS_ROW_SLIDESHOW_FOLDER) return "Not set";
+        return "Full";   // SHOW_CLOCK
+    }
 
     /** Hides the selection ring whenever focus moves OUT of any shelf cell.
      *  Single source of truth for "ring should not be visible right now".
@@ -1458,6 +1514,12 @@ public class LauncherActivity extends Activity {
         registerTimeReceiver();
         registerNetworkCallback();   // live WiFi-state for the netBtn glyph
         refreshWifiState();          // pick up any change while we were away
+        // Wallpaper slideshow: resume the foreground rotation timer, and (once
+        // per process) roll to a new image in "each restart" mode. Both are
+        // no-ops when slideshow is off / no folder is set. Done after the
+        // instant snapshot has already painted, so cold start stays instant.
+        restartSlideshowTimer();
+        slideshowRestartAdvanceOnce();
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         // v1.5.x: finish the drawer teardown deferred from onPause (see
         // drawerWasOpenAtPause). Done here, not in onPause, so the app-launch
@@ -1570,6 +1632,7 @@ public class LauncherActivity extends Activity {
         uiPaused = true;
         stopClock();
         unregisterTimeReceiver();
+        uiHandler.removeCallbacks(slideshowTick);   // stop slideshow rotation while backgrounded
         // v1.5.x: if the drawer is open when we pause, persist any in-progress
         // move, but DO NOT restore the home shelf here. Repainting the home
         // screen now puts it into the frame the system snapshots for the
@@ -6058,6 +6121,8 @@ public class LauncherActivity extends Activity {
                 R.string.settings_row_manage_hidden,
                 R.string.settings_row_button_shortcuts,
                 R.string.settings_row_set_wallpaper,
+                R.string.settings_row_slideshow_folder,
+                R.string.settings_row_slideshow,
                 R.string.settings_row_show_clock,
                 R.string.settings_row_backup,
                 R.string.settings_row_restore,
@@ -6095,7 +6160,7 @@ public class LauncherActivity extends Activity {
             // width = label width exactly. equalizeSettingsRowWidths
             // then pads every row to the widest measured width so
             // selection pills still align consistently.
-            labelLp.setMarginEnd(i == SETTINGS_ROW_SHOW_CLOCK ? dp(14) : 0);
+            labelLp.setMarginEnd(settingsRowHasIndicator(i) ? dp(14) : 0);
             row.addView(label, labelLp);
 
             // [1] right-side indicator — only on the Show clock toggle
@@ -6109,12 +6174,16 @@ public class LauncherActivity extends Activity {
             //     refreshSettingsRows is index-tolerant: it tests
             //     row.getChildAt(1) for null before mutating, so the
             //     missing-indicator rows skip the indicator paint cleanly.
-            if (i == SETTINGS_ROW_SHOW_CLOCK) {
+            if (settingsRowHasIndicator(i)) {
                 TextView indicator = new TextView(this);
                 indicator.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
                 indicator.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
                 indicator.setSingleLine(true);
-                indicator.setText("\u2713"); // ✓
+                // Seed with the WIDEST state string for this row so the
+                // post-build width equalisation reserves enough room — the
+                // live text set in refreshSettingsRows is never wider, so the
+                // label can't get clipped when the indicator grows.
+                indicator.setText(settingsIndicatorWidestText(i));
                 row.addView(indicator,
                         new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
             }
@@ -6317,6 +6386,16 @@ public class LauncherActivity extends Activity {
                     } else {
                         ind.setTextColor(sel ? selTx : 0xFF7DD3FC); // sky cyan when on + idle
                     }
+                } else if (i == SETTINGS_ROW_SLIDESHOW) {
+                    ind.setText(slideshowLabel());
+                    boolean on = slideshowValue != 0;
+                    if (!on) ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
+                    else     ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
+                } else if (i == SETTINGS_ROW_SLIDESHOW_FOLDER) {
+                    boolean set = slideshowFolderUri != null;
+                    ind.setText(set ? "Set" : "Not set");
+                    if (!set) ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
+                    else      ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
                 } else {
                     ind.setTextColor(sel ? selTx : idleTx);
                 }
@@ -6337,6 +6416,12 @@ public class LauncherActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_DOWN:
                 settingsSelectedRow = (settingsSelectedRow + 1) % SETTINGS_ROW_COUNT;
                 refreshSettingsRows(); return true;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (settingsSelectedRow == SETTINGS_ROW_SLIDESHOW) stepSlideshow(-1);
+                return true;   // swallow on other rows (panel is modal)
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                if (settingsSelectedRow == SETTINGS_ROW_SLIDESHOW) stepSlideshow(+1);
+                return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
@@ -6415,6 +6500,18 @@ public class LauncherActivity extends Activity {
                     if (cv != null) cv.setVisibility(View.GONE);
                 }
                 refreshSettingsRows(); // repaint the state indicator
+                break;
+            case SETTINGS_ROW_SLIDESHOW_FOLDER:
+                // Folder picker is a system surface (SAF) — close the panel
+                // first so the dim backdrop doesn't sit behind it.
+                hideSettingsPanel();
+                pickSlideshowFolder();
+                break;
+            case SETTINGS_ROW_SLIDESHOW:
+                // OK advances the rotation setting (Off → Restart → 5..60 min);
+                // LEFT/RIGHT also step it. Panel stays open so the user sees
+                // the indicator change.
+                stepSlideshow(+1);
                 break;
             case SETTINGS_ROW_BACKUP:
                 // Export the small settings file via SAF. Close the panel
@@ -8920,6 +9017,156 @@ public class LauncherActivity extends Activity {
         showToast(getString(R.string.toast_restore_done));
     }
 
+    // ── Wallpaper slideshow engine ───────────────────────────────────────
+
+    /** Load persisted slideshow state into the in-memory fields. Called once
+     *  from {@link #initCaches}. */
+    private void loadSlideshowPrefs() {
+        slideshowFolderUri = prefs.getString(KEY_SLIDESHOW_FOLDER, null);
+        slideshowValue     = prefs.getInt(KEY_SLIDESHOW_VALUE, 0);
+        slideshowIndex     = Math.max(0, prefs.getInt(KEY_SLIDESHOW_INDEX, 0));
+        // Sanitise an out-of-range stored value to the nearest legal state.
+        boolean legal = false;
+        for (int s : SLIDESHOW_STEPS) if (s == slideshowValue) { legal = true; break; }
+        if (!legal) slideshowValue = 0;
+    }
+
+    /** Human label for the current slideshow setting. */
+    private String slideshowLabel() {
+        if (slideshowValue == 0) return "Off";
+        if (slideshowValue == 1) return "Restart";
+        return slideshowValue + " min";
+    }
+
+    @SuppressWarnings("deprecation")
+    private void pickSlideshowFolder() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try { startActivityForResult(i, REQ_PICK_SLIDESHOW_FOLDER); }
+        catch (Exception e) { showToast(getString(R.string.toast_no_file_picker)); }
+    }
+
+    /** Step the rotation setting through {@link #SLIDESHOW_STEPS}. Persists,
+     *  repaints the indicator, and (re)arms the timer. Turning ON from Off
+     *  shows an image immediately; stepping between intervals only re-arms the
+     *  timer (no flickery re-decode on every press). */
+    private void stepSlideshow(int dir) {
+        int idx = 0;
+        for (int i = 0; i < SLIDESHOW_STEPS.length; i++) {
+            if (SLIDESHOW_STEPS[i] == slideshowValue) { idx = i; break; }
+        }
+        int prev = slideshowValue;
+        idx = (idx + dir + SLIDESHOW_STEPS.length) % SLIDESHOW_STEPS.length;
+        slideshowValue = SLIDESHOW_STEPS[idx];
+        prefs.edit().putInt(KEY_SLIDESHOW_VALUE, slideshowValue).apply();
+        refreshSettingsRows();
+        if (slideshowValue != 0 && slideshowFolderUri == null) {
+            showToast(getString(R.string.toast_slideshow_pick_folder));
+        }
+        if (prev == 0 && slideshowValue != 0) kickSlideshowNow();
+        restartSlideshowTimer();
+    }
+
+    /** Show an image right away when the slideshow is first switched on. */
+    private void kickSlideshowNow() {
+        if (slideshowFolderUri == null) return;
+        if (slideshowImages == null) enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
+        else                         applyCurrentSlideshowImage();
+    }
+
+    /** Enumerate the folder's images on the app executor, then run
+     *  {@code onReady} on the UI thread. No-op if no folder is set. */
+    private void enumerateSlideshowAsync(Runnable onReady) {
+        final String folder = slideshowFolderUri;
+        if (folder == null) return;
+        try {
+            appExecutor.execute(() -> {
+                final String[] imgs = listSlideshowImages(folder);
+                uiHandler.post(() -> {
+                    if (destroyed) return;
+                    slideshowImages = imgs;
+                    if (onReady != null) onReady.run();
+                });
+            });
+        } catch (Exception ignored) { /* executor saturated/shut down */ }
+    }
+
+    /** List image child documents of a SAF tree, sorted by document id for a
+     *  stable sequential order. Runs on a background thread. Returns
+     *  {@code null} on any failure (revoked permission, unmounted storage). */
+    private String[] listSlideshowImages(String treeUriStr) {
+        try {
+            Uri tree = Uri.parse(treeUriStr);
+            String docId = android.provider.DocumentsContract.getTreeDocumentId(tree);
+            Uri childrenUri =
+                    android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
+            ArrayList<String> out = new ArrayList<>();
+            try (android.database.Cursor cur = getContentResolver().query(
+                    childrenUri,
+                    new String[]{
+                            android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                            android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE },
+                    null, null, null)) {
+                if (cur != null) {
+                    while (cur.moveToNext()) {
+                        String id   = cur.getString(0);
+                        String mime = cur.getString(1);
+                        if (id != null && mime != null && mime.startsWith("image/")) {
+                            out.add(android.provider.DocumentsContract
+                                    .buildDocumentUriUsingTree(tree, id).toString());
+                        }
+                    }
+                }
+            }
+            Collections.sort(out);
+            return out.toArray(new String[0]);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Apply the image at the current index via the existing wallpaper
+     *  pipeline (background decode + cross-fade + snapshot write). */
+    private void applyCurrentSlideshowImage() {
+        String[] imgs = slideshowImages;
+        if (imgs == null || imgs.length == 0 || wallpaperCtl == null) return;
+        int idx = ((slideshowIndex % imgs.length) + imgs.length) % imgs.length;
+        try {
+            Uri u = Uri.parse(imgs[idx]);
+            wallpaperCtl.resetUserLoadingGuard();
+            wallpaperCtl.applyFromUri(u);
+        } catch (Exception ignored) { /* bad uri — skip */ }
+    }
+
+    /** Advance to the next image and apply it. Re-enumerates first if the
+     *  list isn't ready yet (then retries via the onReady callback). */
+    private void advanceSlideshow() {
+        String[] imgs = slideshowImages;
+        if (imgs == null) { enumerateSlideshowAsync(this::advanceSlideshow); return; }
+        if (imgs.length == 0) return;
+        slideshowIndex = (slideshowIndex + 1) % imgs.length;
+        prefs.edit().putInt(KEY_SLIDESHOW_INDEX, slideshowIndex).apply();
+        applyCurrentSlideshowImage();
+    }
+
+    /** (Re)arm the foreground interval timer for the current setting, or cancel
+     *  it when off / paused / no folder. Cheap: one pending message at most. */
+    private void restartSlideshowTimer() {
+        uiHandler.removeCallbacks(slideshowTick);
+        if (uiPaused || slideshowFolderUri == null || slideshowValue < 5) return;
+        if (slideshowImages == null) enumerateSlideshowAsync(null);
+        uiHandler.postDelayed(slideshowTick, slideshowValue * 60_000L);
+    }
+
+    /** Once per process: when in "each restart" mode, roll to the next image
+     *  after the instant snapshot has already painted. */
+    private void slideshowRestartAdvanceOnce() {
+        if (slideshowRestartApplied) return;
+        if (slideshowValue != 1 || slideshowFolderUri == null) return;
+        slideshowRestartApplied = true;
+        advanceSlideshow();   // self-enumerates if needed
+    }
+
     @Override @SuppressWarnings("deprecation")
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
@@ -8931,6 +9178,25 @@ public class LauncherActivity extends Activity {
         if (req == REQ_BACKUP_IMPORT && res == RESULT_OK && data != null) {
             Uri uri = data.getData();
             if (uri != null) readBackup(uri);
+            return;
+        }
+        if (req == REQ_PICK_SLIDESHOW_FOLDER && res == RESULT_OK && data != null) {
+            Uri tree = data.getData();
+            if (tree != null) {
+                try { getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
+                catch (SecurityException e) { showToast(getString(R.string.toast_wallpaper_no_permission)); return; }
+                slideshowFolderUri = tree.toString();
+                slideshowIndex     = 0;
+                slideshowImages    = null;   // force re-enumeration of the new folder
+                prefs.edit()
+                        .putString(KEY_SLIDESHOW_FOLDER, slideshowFolderUri)
+                        .putInt(KEY_SLIDESHOW_INDEX, 0)
+                        .apply();
+                final boolean showNow = (slideshowValue != 0);
+                enumerateSlideshowAsync(() -> { if (showNow) applyCurrentSlideshowImage(); });
+                restartSlideshowTimer();
+                showToast(getString(R.string.toast_slideshow_folder_set));
+            }
             return;
         }
         if (req == REQ_PICK_WP && res == RESULT_OK && data != null) {
@@ -9179,6 +9445,7 @@ public class LauncherActivity extends Activity {
         }
         clockMode = storedMode;
         showClock = (clockMode != CLOCK_OFF);   // convenience gate for existing tick/visibility code
+        loadSlideshowPrefs();
     }
 
     @SuppressWarnings("deprecation")
