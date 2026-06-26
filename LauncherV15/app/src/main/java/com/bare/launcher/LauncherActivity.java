@@ -9106,8 +9106,24 @@ public class LauncherActivity extends Activity {
     }
 
     /** Whether the media-read permission needed to browse image folders is
-     *  granted. READ_MEDIA_IMAGES on Android 13+, READ_EXTERNAL_STORAGE below. */
+     *  granted.
+     *  <ul>
+     *    <li>API 26–32: READ_EXTERNAL_STORAGE</li>
+     *    <li>API 33   : READ_MEDIA_IMAGES (full library)</li>
+     *    <li>API 34+  : READ_MEDIA_IMAGES (full) OR
+     *                   READ_MEDIA_VISUAL_USER_SELECTED (partial — user
+     *                   picked specific photos). Either grant is sufficient
+     *                   for our MediaStore bucket query; partial access may
+     *                   return a smaller folder list, but that is fine.</li>
+     *  </ul> */
     private boolean hasMediaReadPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Android 14+: full OR partial grant is enough.
+            return checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    || checkSelfPermission("android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
         String p = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 ? android.Manifest.permission.READ_MEDIA_IMAGES
                 : android.Manifest.permission.READ_EXTERNAL_STORAGE;
@@ -9116,14 +9132,27 @@ public class LauncherActivity extends Activity {
 
     /** Open the slideshow folder picker: a custom, TV-native list of image
      *  folders from MediaStore (no SAF folder picker, which Google TV lacks).
-     *  Requests the media-read permission first if needed. */
+     *  Requests the media-read permission first if needed.
+     *  On API 34+ we request READ_MEDIA_IMAGES + READ_MEDIA_VISUAL_USER_SELECTED
+     *  together so the system shows the full chooser with the "Select photos"
+     *  partial-access option. */
     private void pickSlideshowFolder() {
         if (hasMediaReadPermission()) { scanAndShowFolderPicker(); return; }
-        String p = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                ? android.Manifest.permission.READ_MEDIA_IMAGES
-                : android.Manifest.permission.READ_EXTERNAL_STORAGE;
-        try { requestPermissions(new String[]{ p }, REQ_PERM_MEDIA); }
-        catch (Exception e) { showToast(getString(R.string.toast_slideshow_need_permission)); }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // Request both so the system dialog offers full AND partial access.
+                requestPermissions(new String[]{
+                        android.Manifest.permission.READ_MEDIA_IMAGES,
+                        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+                }, REQ_PERM_MEDIA);
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                requestPermissions(new String[]{ android.Manifest.permission.READ_MEDIA_IMAGES },
+                        REQ_PERM_MEDIA);
+            } else {
+                requestPermissions(new String[]{ android.Manifest.permission.READ_EXTERNAL_STORAGE },
+                        REQ_PERM_MEDIA);
+            }
+        } catch (Exception e) { showToast(getString(R.string.toast_slideshow_need_permission)); }
     }
 
     /** Scan image folders off the UI thread, then show the picker. Uses a
@@ -9228,12 +9257,14 @@ public class LauncherActivity extends Activity {
         if (bucketId == null || bucketId.isEmpty()) return new String[0];
         Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
         ArrayList<String> out = new ArrayList<>();
+        String colId     = android.provider.MediaStore.Images.ImageColumns.BUCKET_ID;
+        String colDispNm = android.provider.MediaStore.Images.Media.DISPLAY_NAME;
         try (android.database.Cursor cur = getContentResolver().query(
                 base,
                 new String[]{ android.provider.MediaStore.Images.Media._ID },
-                "bucket_id = ?",
+                colId + " = ?",
                 new String[]{ bucketId },
-                android.provider.MediaStore.Images.Media.DISPLAY_NAME + " ASC")) {
+                colDispNm + " ASC")) {
             if (cur != null) {
                 int idCol = cur.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media._ID);
                 while (cur.moveToNext()) {
@@ -9253,14 +9284,19 @@ public class LauncherActivity extends Activity {
     private java.util.List<String[]> scanImageFolders() {
         java.util.LinkedHashMap<String, String[]> byId = new java.util.LinkedHashMap<>();
         Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        // Use symbolic constants (available since API 29) where possible; fall
+        // back to the raw column-name strings (identical value, works on all
+        // API levels since the column has been stable since API 1).
+        String colId  = android.provider.MediaStore.Images.ImageColumns.BUCKET_ID;
+        String colNm  = android.provider.MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME;
         try (android.database.Cursor cur = getContentResolver().query(
                 base,
-                new String[]{ "bucket_id", "bucket_display_name" },
+                new String[]{ colId, colNm },
                 null, null,
-                "bucket_display_name ASC")) {
+                colNm + " ASC")) {
             if (cur != null) {
-                int idCol = cur.getColumnIndex("bucket_id");
-                int nmCol = cur.getColumnIndex("bucket_display_name");
+                int idCol = cur.getColumnIndex(colId);
+                int nmCol = cur.getColumnIndex(colNm);
                 if (idCol >= 0 && nmCol >= 0) {
                     while (cur.moveToNext()) {
                         String id = cur.getString(idCol);

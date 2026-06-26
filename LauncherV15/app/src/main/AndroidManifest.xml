@@ -14,8 +14,19 @@
          the chosen folder's images. Runtime-granted (a one-time "allow photos"
          prompt) and requested lazily — only when the user opens the slideshow
          folder picker. The launcher never touches media otherwise. On Android
-         12 and below the READ_EXTERNAL_STORAGE above covers it. -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+         12 and below the READ_EXTERNAL_STORAGE above covers it.
+         minSdkVersion="33": this permission does not exist before API 33 and
+         the OS installer would silently ignore it on older devices anyway, but
+         the attribute documents intent and suppresses lint. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
+        android:minSdkVersion="33" />
+
+    <!-- Android 14+: partial photo library access. The user can grant
+         access to only selected photos rather than the full library. We
+         request this alongside READ_MEDIA_IMAGES so the system shows the
+         "Select photos" option on the permission prompt. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+        android:minSdkVersion="34" />
 
     <!-- Set system wallpaper -->
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
