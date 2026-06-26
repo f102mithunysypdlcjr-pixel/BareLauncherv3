@@ -9451,7 +9451,7 @@ public class LauncherActivity extends Activity {
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
             row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(12), dp(9), dp(12), dp(9));
+            row.setPadding(dp(12), dp(8), dp(12), dp(8));
             android.graphics.drawable.GradientDrawable rb =
                     new android.graphics.drawable.GradientDrawable();
             rb.setCornerRadius(dp(9));
@@ -9465,13 +9465,19 @@ public class LauncherActivity extends Activity {
             name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             name.setSingleLine(true);
             name.setEllipsize(TextUtils.TruncateAt.END);
-            row.addView(name, new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f));
+            // maxWidth caps how much space the name can consume before the
+            // count is squeezed off-screen; leaves ~60 dp for the count badge.
+            name.setMaxWidth(dp(220));
+            // weight=0, WRAP so name only takes what it needs — no gap between
+            // name and count when the name is short.
+            row.addView(name, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
 
             TextView count = new TextView(this);
-            count.setText(f[2]);
-            count.setTextColor(0x88FFFFFF);
-            count.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
-            count.setPadding(dp(10), 0, 0, 0);
+            count.setText(" · " + f[2]);
+            count.setTextColor(0x66FFFFFF);
+            count.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+            count.setSingleLine(true);
+            // no extra left-padding — the separator " · " provides the gap
             row.addView(count, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
 
             final int idx = i;
@@ -9483,7 +9489,7 @@ public class LauncherActivity extends Activity {
                 selectFolder(idx);
             });
             android.widget.LinearLayout.LayoutParams rowLp =
-                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
+                    new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
             rowLp.bottomMargin = dp(2);
             col.addView(row, rowLp);
         }
@@ -9502,7 +9508,7 @@ public class LauncherActivity extends Activity {
             android.widget.LinearLayout row = (android.widget.LinearLayout) child;
             View nm = row.getChildAt(0), ct = row.getChildAt(1);
             if (nm instanceof TextView) ((TextView) nm).setTextColor(sel ? 0xFF111114 : 0xCCFFFFFF);
-            if (ct instanceof TextView) ((TextView) ct).setTextColor(sel ? 0xCC111114 : 0x88FFFFFF);
+            if (ct instanceof TextView) ((TextView) ct).setTextColor(sel ? 0xCC111114 : 0x66FFFFFF);
         }
     }
 
