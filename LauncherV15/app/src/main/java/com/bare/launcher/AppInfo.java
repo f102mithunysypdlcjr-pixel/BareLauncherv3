@@ -91,10 +91,38 @@ final class AppInfo {
      */
     String displayLabel;
 
+    /**
+     * Non-null only for a TV-input "app" (HDMI 1, AV, tuner, …) surfaced from
+     * the platform TV Input Framework. When set, this entry is launched by
+     * switching to the passthrough input via {@code TvContract} rather than by
+     * starting an activity, its banner tile is a generated input glyph, and
+     * the "Uninstall" / "App info" context-menu rows are suppressed (an input
+     * is not an installed package). Everything else — ordering, home/drawer
+     * placement, reorder, hide, remote-key binding — treats it exactly like a
+     * normal app. {@code null} for ordinary apps. See {@link TvInputs}.
+     */
+    final String tvInputId;
+
     AppInfo(String pkg, String lbl, ComponentName cmp, ResolveInfo r) {
+        this(pkg, lbl, cmp, r, null);
+    }
+
+    private AppInfo(String pkg, String lbl, ComponentName cmp, ResolveInfo r, String tvInput) {
         packageName = pkg;
         label       = lbl;
         component   = cmp;
         ri          = r;
+        tvInputId   = tvInput;
+    }
+
+    /** Build a TV-input entry. The synthetic {@link #packageName}
+     *  ({@code "tvinput://" + inputId}) is the stable key used everywhere a
+     *  package name is — order persistence, the hidden set, the icon/banner
+     *  caches, remote-key bindings — so an input round-trips through all of
+     *  them like any other app. It can never collide with a real package
+     *  (real package names are never of this shape) and contains no comma, so
+     *  it is safe inside the comma-separated persisted order string. */
+    static AppInfo tvInput(String inputId, String label) {
+        return new AppInfo("tvinput://" + inputId, label, null, null, inputId);
     }
 }

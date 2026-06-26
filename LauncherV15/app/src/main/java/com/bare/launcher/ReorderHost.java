@@ -34,4 +34,10 @@ interface ReorderHost {
 
     /** The user activated the Move row (confirm reorder). */
     void onMenuMove();
+
+    /** {@code true} when the app the menu is currently acting on is a TV
+     *  input (HDMI/AV/…). The activity uses this to suppress the Uninstall
+     *  and App-info rows — an input is not an installed package — while
+     *  keeping Move and Hide. */
+    boolean menuAppIsInput();
 }

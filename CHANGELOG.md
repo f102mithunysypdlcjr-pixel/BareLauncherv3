@@ -5,6 +5,24 @@ All notable changes to BareLauncher land here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-06-25
+
+### What's new
+
+- **TV inputs as tiles.** Your TV's HDMI, AV and other inputs now show up
+  as their own tiles (HDMI 1, HDMI 2, …) right alongside your apps. Open
+  one to switch straight to that input, and move, place, or hide it
+  anywhere just like an app. (Only appears on TVs that actually have these
+  inputs.)
+- A cleaner return from the app drawer to the home screen — the selected
+  app tile no longer looks slightly cut off at the top.
+- Uninstalling an app from the drawer now keeps you in the drawer, so you
+  can tidy up several apps in a row without it closing each time.
+- Unhiding an app now puts it back in the app drawer instead of bumping
+  one of your home-screen favourites out of place.
+- A fresh, rounded look for the support and latest-version QR codes, each
+  with its logo in the middle.
+
 ## [2.0.0] — 2026-06-25
 
 A brand-new look. BareLauncher gets a fresh home screen and a pull-down
