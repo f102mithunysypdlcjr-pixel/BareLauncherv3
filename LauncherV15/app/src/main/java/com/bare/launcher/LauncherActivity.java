@@ -9325,14 +9325,19 @@ public class LauncherActivity extends Activity {
     /** Apply the image at the current index via the wallpaper cross-fade
      *  pipeline. Uses {@code crossfadeUri} (not {@code applyFromUri}) so
      *  the slideshow rotation never writes a snapshot or updates prefs —
-     *  that work is for user-picks only. */
+     *  that work is for user-picks only.
+     *  <p>No {@code resetUserLoadingGuard()} call here — if the previous
+     *  image is still decoding, we let the guard silently drop this tick.
+     *  Resetting it would start two concurrent decodes that race to call
+     *  {@code crossfade()}, the second cancels the first's in-flight
+     *  animation, and the 200 ms fade never completes visibly. The timer
+     *  fires again at the next interval when the executor is clear. */
     private void applyCurrentSlideshowImage() {
         String[] imgs = slideshowImages;
         if (imgs == null || imgs.length == 0 || wallpaperCtl == null) return;
         int idx = ((slideshowIndex % imgs.length) + imgs.length) % imgs.length;
         try {
             Uri u = Uri.parse(imgs[idx]);
-            wallpaperCtl.resetUserLoadingGuard();
             wallpaperCtl.crossfadeUri(u);
         } catch (Exception ignored) { /* bad uri — skip */ }
     }
