@@ -350,9 +350,11 @@ public class LauncherActivity extends Activity {
     private int folderPickerSel = 0;
 
     // ── Idle UI hide (slideshow-only visual cleanup) ─────────────────────
-    /** Idle-hide timeout options in seconds: Off, 2 min, 3 min, 5 min. */
-    private static final int[]  IDLE_HIDE_STEPS_SEC = { 0, 120, 180, 300 };
+    /** Idle-hide timeout options in seconds: Off, 1 min, 2 min, 3 min, 5 min. */
+    private static final int[]  IDLE_HIDE_STEPS_SEC = { 0, 60, 120, 180, 300 };
     private static final String KEY_IDLE_HIDE       = "idle_hide_sec";
+    /** Default idle-hide timeout when slideshow folder is first picked. */
+    private static final int    IDLE_HIDE_DEFAULT_SEC = 120;  // 2 min
     /** Currently configured idle-hide timeout (0 = off). */
     private int     idleHideSec    = 0;
     /** True while the UI is hidden; restored immediately on any key. */
@@ -908,7 +910,7 @@ public class LauncherActivity extends Activity {
             case SR_SLIDESHOW_FOLDER:   return "Not set";
             case SR_SLIDESHOW_DURATION: return "< 1.5 min >";   // widest bracketed label
             case SR_SLIDESHOW_RESTART:  return "Off";
-            case SR_IDLE_HIDE:          return "5 min";
+            case SR_IDLE_HIDE:          return "5 min";         // widest label
             default:                    return "Full";           // SR_CLOCK
         }
     }
@@ -9738,7 +9740,10 @@ public class LauncherActivity extends Activity {
     /** Commit the chosen folder: store its bucket id, start the slideshow.
      *  If the slideshow was completely off (no interval, no each-restart),
      *  auto-enable a sensible default interval so picking a folder visibly
-     *  starts the rotation — the user shouldn't have to set a duration too. */
+     *  starts the rotation — the user shouldn't have to set a duration too.
+     *  Similarly, if idle-hide is off, auto-enable it to the default 2-min
+     *  timeout so the slideshow gets the "clean wallpaper + clock" experience
+     *  without requiring extra configuration. */
     private void selectFolder(int index) {
         if (index < 0 || index >= folderPickerData.size()) return;
         String bucketId = folderPickerData.get(index)[0];
@@ -9752,12 +9757,17 @@ public class LauncherActivity extends Activity {
             slideshowDurationSec = SLIDESHOW_DEFAULT_SEC;
             ed.putInt(KEY_SLIDESHOW_DURATION, slideshowDurationSec);
         }
+        if (idleHideSec == 0) {
+            idleHideSec = IDLE_HIDE_DEFAULT_SEC;
+            ed.putInt(KEY_IDLE_HIDE, idleHideSec);
+        }
         ed.apply();
         hideFolderPicker();
         refreshSettingsRows();   // reflect a duration we may have just auto-set
         // Show the first image now and arm the interval timer.
         enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
         restartSlideshowTimer();
+        scheduleIdleHide();      // arm idle-hide timer if it was just enabled
         showToast(getString(R.string.toast_slideshow_folder_set));
     }
 
