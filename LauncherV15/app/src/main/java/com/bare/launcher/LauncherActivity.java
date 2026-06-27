@@ -884,9 +884,9 @@ public class LauncherActivity extends Activity {
     private static String settingsIndicatorWidestText(int rowId) {
         switch (rowId) {
             case SR_SLIDESHOW_FOLDER:   return "Not set";
-            case SR_SLIDESHOW_DURATION: return "1.5 min";
+            case SR_SLIDESHOW_DURATION: return "< 1.5 min >";   // widest bracketed label
             case SR_SLIDESHOW_RESTART:  return "Off";
-            default:                    return "Full";   // SR_CLOCK
+            default:                    return "Full";           // SR_CLOCK
         }
     }
 
@@ -6447,6 +6447,14 @@ public class LauncherActivity extends Activity {
                 }
             }
         }
+        // Re-equalise row widths after any indicator text change so the card
+        // never clips the indicator (e.g. stepping duration from "< 45s >"
+        // to "< 1 min >" — different text widths). Cheap: just measures and
+        // sets LayoutParams on the already-built views, no inflation.
+        col.post(() -> {
+            if (col != settingsColumn) return;
+            equalizeSettingsRowWidths(col);
+        });
     }
 
     /** D-pad / OK / Back navigation inside the settings panel. Returns
@@ -8381,7 +8389,7 @@ public class LauncherActivity extends Activity {
         row.addView(tv, tvLp);
 
         android.widget.LinearLayout.LayoutParams rlp =
-                new android.widget.LinearLayout.LayoutParams(WRAP, dp(HIDE_ROW_H_DP));
+                new android.widget.LinearLayout.LayoutParams(MATCH, dp(HIDE_ROW_H_DP));
         rlp.bottomMargin = dp(2);
         list.addView(row, rlp);
     }
@@ -9470,8 +9478,11 @@ public class LauncherActivity extends Activity {
         sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         android.widget.LinearLayout colL = new android.widget.LinearLayout(this);
         colL.setOrientation(android.widget.LinearLayout.VERTICAL);
-        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(WRAP, WRAP));
-        card.addView(sv, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
+        // Fixed card content width: wide enough for a decent folder name +
+        // count, narrow enough to stay compact. Name uses weight=1 to fill
+        // this budget; count sits at the right edge.
+        card.addView(sv, new android.widget.LinearLayout.LayoutParams(dp(220), WRAP));
 
         // Anchor top-right (same as keymap / settings card).
         FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
@@ -9501,6 +9512,10 @@ public class LauncherActivity extends Activity {
             rb.setColor(Color.TRANSPARENT);
             row.setBackground(rb);
 
+            // Name: weight=1 so it fills the space between left edge and
+            // count badge — gives a full-width selector pill. Capped at
+            // dp(160) via maxWidth so a very long folder name never widens
+            // the card; it ellipsises instead.
             TextView name = new TextView(this);
             name.setText(f[1]);
             name.setTextColor(0xCCFFFFFF);
@@ -9508,19 +9523,17 @@ public class LauncherActivity extends Activity {
             name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             name.setSingleLine(true);
             name.setEllipsize(TextUtils.TruncateAt.END);
-            // maxWidth caps how much space the name can consume before the
-            // count is squeezed off-screen; leaves ~60 dp for the count badge.
-            name.setMaxWidth(dp(220));
-            // weight=0, WRAP so name only takes what it needs — no gap between
-            // name and count when the name is short.
-            row.addView(name, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
+            android.widget.LinearLayout.LayoutParams nameLp =
+                    new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
+            nameLp.setMarginEnd(dp(8));
+            row.addView(name, nameLp);
 
+            // Count: right-aligned, dim, no extra padding needed.
             TextView count = new TextView(this);
-            count.setText(" · " + f[2]);
+            count.setText(f[2]);
             count.setTextColor(0x66FFFFFF);
             count.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
             count.setSingleLine(true);
-            // no extra left-padding — the separator " · " provides the gap
             row.addView(count, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
 
             final int idx = i;
@@ -9532,7 +9545,7 @@ public class LauncherActivity extends Activity {
                 selectFolder(idx);
             });
             android.widget.LinearLayout.LayoutParams rowLp =
-                    new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
             rowLp.bottomMargin = dp(2);
             col.addView(row, rowLp);
         }
@@ -9551,7 +9564,7 @@ public class LauncherActivity extends Activity {
             android.widget.LinearLayout row = (android.widget.LinearLayout) child;
             View nm = row.getChildAt(0), ct = row.getChildAt(1);
             if (nm instanceof TextView) ((TextView) nm).setTextColor(sel ? 0xFF111114 : 0xCCFFFFFF);
-            if (ct instanceof TextView) ((TextView) ct).setTextColor(sel ? 0xCC111114 : 0x66FFFFFF);
+            if (ct instanceof TextView) ((TextView) ct).setTextColor(sel ? 0x99111114 : 0x66FFFFFF);
         }
     }
 
