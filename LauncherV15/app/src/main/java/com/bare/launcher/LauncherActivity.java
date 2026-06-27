@@ -148,9 +148,9 @@ public class LauncherActivity extends Activity {
     private static final int    REQ_PERM_MEDIA = 71;   // runtime media-read permission
     private static final String BACKUP_FILENAME   = "barelauncher-settings.txt";
     /** Slideshow duration steps (seconds):
-     *  Off, 20s, 30s, 1m, 1.5m, 2m, 3m. */
+     *  Off, 20s, 30s, 45s, 1m, 1.5m, 2m, 3m. */
     private static final int[]  SLIDESHOW_STEPS_SEC =
-            { 0, 20, 30, 60, 90, 120, 180 };
+            { 0, 20, 30, 45, 60, 90, 120, 180 };
     /** Interval auto-enabled when a folder is picked while the slideshow is
      *  completely off. Must be a member of {@link #SLIDESHOW_STEPS_SEC}. */
     private static final int    SLIDESHOW_DEFAULT_SEC = 30;
