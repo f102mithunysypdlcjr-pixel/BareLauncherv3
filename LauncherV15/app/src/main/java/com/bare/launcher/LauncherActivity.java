@@ -9443,7 +9443,7 @@ public class LauncherActivity extends Activity {
         advanceSlideshow();   // self-enumerates if needed
     }
 
-    // ── Idle UI hide ──────────────────────────────────────────────────────
+    // ── Idle UI hide (slideshow-only visual cleanup) ──────────────────────
 
     /** Cycle the idle-hide timeout to the next option. */
     private void stepIdleHide() {
