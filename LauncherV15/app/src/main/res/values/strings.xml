@@ -53,6 +53,7 @@
     <string name="settings_row_slideshow_folder">Slideshow folder</string>
     <string name="settings_row_slideshow_duration">Slideshow duration</string>
     <string name="settings_row_slideshow_restart">Change each restart</string>
+    <string name="settings_row_idle_hide">Hide UI when idle</string>
     <string name="settings_row_show_clock">Show clock</string>
     <string name="settings_row_backup">Back up settings</string>
     <string name="settings_row_restore">Restore settings</string>

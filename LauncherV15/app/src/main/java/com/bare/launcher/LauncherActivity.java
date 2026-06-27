@@ -147,15 +147,13 @@ public class LauncherActivity extends Activity {
     private static final int    REQ_BACKUP_IMPORT = 44;
     private static final int    REQ_PERM_MEDIA = 71;   // runtime media-read permission
     private static final String BACKUP_FILENAME   = "barelauncher-settings.txt";
-    /** Slideshow duration steps (seconds) cycled by the duration stepper:
-     *  Off, 30s, 45s, 1m, 1.5m, 2m, 3m, 5m, 10m. */
+    /** Slideshow duration steps (seconds):
+     *  Off, 20s, 30s, 1m, 1.5m, 2m, 3m. */
     private static final int[]  SLIDESHOW_STEPS_SEC =
-            { 0, 30, 45, 60, 90, 120, 180, 300, 600 };
+            { 0, 20, 30, 60, 90, 120, 180 };
     /** Interval auto-enabled when a folder is picked while the slideshow is
-     *  completely off, so choosing a folder visibly starts the rotation
-     *  without the user also having to set a duration. Must be a member of
-     *  {@link #SLIDESHOW_STEPS_SEC}. */
-    private static final int    SLIDESHOW_DEFAULT_SEC = 60;
+     *  completely off. Must be a member of {@link #SLIDESHOW_STEPS_SEC}. */
+    private static final int    SLIDESHOW_DEFAULT_SEC = 30;
 
     // Subtle focus pop — animations toned down for performance / stability.
     // No vertical lift (saves a frame of layout work and removes a class of
@@ -350,6 +348,23 @@ public class LauncherActivity extends Activity {
     /** Rows shown in the picker: each = {bucketId, displayName, count}. */
     private final java.util.List<String[]> folderPickerData = new ArrayList<>();
     private int folderPickerSel = 0;
+
+    // ── Idle UI hide (slideshow-only visual cleanup) ─────────────────────
+    /** Idle-hide timeout options in seconds: Off, 2 min, 3 min, 5 min. */
+    private static final int[]  IDLE_HIDE_STEPS_SEC = { 0, 120, 180, 300 };
+    private static final String KEY_IDLE_HIDE       = "idle_hide_sec";
+    /** Currently configured idle-hide timeout (0 = off). */
+    private int     idleHideSec    = 0;
+    /** True while the UI is hidden; restored immediately on any key. */
+    private boolean idleHideActive = false;
+    /** Single Runnable posted to {@link #uiHandler} after each user action.
+     *  Cancelled on key press, onPause, and when slideshow becomes inactive. */
+    private final Runnable idleHideTrigger = () -> {
+        if (!destroyed && !uiPaused && slideshowActive() && idleHideSec > 0
+                && !anyOverlayLogicallyOpen()) {
+            applyIdleHide(true);
+        }
+    };
 
 
     private final Runnable clockTick = new Runnable() {
@@ -830,12 +845,14 @@ public class LauncherActivity extends Activity {
     private static final int SR_SLIDESHOW_RESTART  = 10;
     private static final int SR_BACKUP             = 11;
     private static final int SR_RESTORE            = 12;
+    private static final int SR_IDLE_HIDE          = 13;  // hide UI when idle (slideshow sub-page)
 
     private static final int[] SROWS_MAIN = {
             SR_HIDE_APPS, SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK,
             SR_BACKUP_MENU, SR_SYSTEM, SR_ABOUT };
     private static final int[] SROWS_WALLPAPER = {
-            SR_SET_WALLPAPER, SR_SLIDESHOW_FOLDER, SR_SLIDESHOW_DURATION, SR_SLIDESHOW_RESTART };
+            SR_SET_WALLPAPER, SR_SLIDESHOW_FOLDER, SR_SLIDESHOW_DURATION,
+            SR_SLIDESHOW_RESTART, SR_IDLE_HIDE };
     private static final int[] SROWS_BACKUP = {
             SR_BACKUP, SR_RESTORE };
 
@@ -865,6 +882,7 @@ public class LauncherActivity extends Activity {
             case SR_SLIDESHOW_FOLDER:   return R.string.settings_row_slideshow_folder;
             case SR_SLIDESHOW_DURATION: return R.string.settings_row_slideshow_duration;
             case SR_SLIDESHOW_RESTART:  return R.string.settings_row_slideshow_restart;
+            case SR_IDLE_HIDE:          return R.string.settings_row_idle_hide;
             case SR_BACKUP:             return R.string.settings_row_backup;
             case SR_RESTORE:            return R.string.settings_row_restore;
             default:                    return R.string.settings_row_about;
@@ -876,7 +894,8 @@ public class LauncherActivity extends Activity {
         return rowId == SR_CLOCK
             || rowId == SR_SLIDESHOW_FOLDER
             || rowId == SR_SLIDESHOW_DURATION
-            || rowId == SR_SLIDESHOW_RESTART;
+            || rowId == SR_SLIDESHOW_RESTART
+            || rowId == SR_IDLE_HIDE;
     }
 
     /** Widest state string an indicator row can show, used to reserve width at
@@ -886,6 +905,7 @@ public class LauncherActivity extends Activity {
             case SR_SLIDESHOW_FOLDER:   return "Not set";
             case SR_SLIDESHOW_DURATION: return "< 1.5 min >";   // widest bracketed label
             case SR_SLIDESHOW_RESTART:  return "Off";
+            case SR_IDLE_HIDE:          return "5 min";
             default:                    return "Full";           // SR_CLOCK
         }
     }
@@ -1600,6 +1620,7 @@ public class LauncherActivity extends Activity {
         // instant snapshot has already painted, so cold start stays instant.
         restartSlideshowTimer();
         slideshowRestartAdvanceOnce();
+        scheduleIdleHide();
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         // v1.5.x: finish the drawer teardown deferred from onPause (see
         // drawerWasOpenAtPause). Done here, not in onPause, so the app-launch
@@ -1713,6 +1734,7 @@ public class LauncherActivity extends Activity {
         stopClock();
         unregisterTimeReceiver();
         uiHandler.removeCallbacks(slideshowTick);   // stop slideshow rotation while backgrounded
+        cancelAndRestoreIdleHide();                 // restore UI instantly, cancel timer
         // v1.5.x: if the drawer is open when we pause, persist any in-progress
         // move, but DO NOT restore the home shelf here. Repainting the home
         // screen now puts it into the frame the system snapshots for the
@@ -5982,6 +6004,19 @@ public class LauncherActivity extends Activity {
      *       storms on a held key. */
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        // If the idle-hide UI is active, the first key wakes it up.
+        // Swallow the key so it doesn't simultaneously open an app or
+        // activate a button shortcut. Re-arm the idle timer so the UI
+        // stays visible while the user is active.
+        if (idleHideActive) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                applyIdleHide(false);
+                scheduleIdleHide();
+            }
+            return true;  // swallow UP edge too so nothing bleeds through
+        }
+        // Any key press resets the idle timer (user is active).
+        if (event.getAction() == KeyEvent.ACTION_DOWN) scheduleIdleHide();
         FrameLayout ao = aboutOverlay;
         if (ao != null && ao.getVisibility() == View.VISIBLE) {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
@@ -6075,6 +6110,9 @@ public class LauncherActivity extends Activity {
      *  already-open settings panel) is a no-op so the dim level stays
      *  constant across the modal flow. */
     private void ensureOverlayBackdropVisible() {
+        // Any overlay opening cancels idle-hide immediately so the UI is
+        // fully visible while the user interacts with a modal card.
+        cancelAndRestoreIdleHide();
         View bd = overlayBackdrop;
         if (bd == null) return;
         if (bd.getVisibility() == View.VISIBLE && bd.getAlpha() >= 0.99f) return;
@@ -6259,6 +6297,19 @@ public class LauncherActivity extends Activity {
                 // Seed with the widest state string so equalisation reserves
                 // room — the live text (refreshSettingsRows) is never wider.
                 indicator.setText(settingsIndicatorWidestText(rowId));
+                // Gravity.END so the indicator text right-aligns within its
+                // fixed-width slot — keeps the right edge of the row stable
+                // as the text changes (e.g. "< 20s >" ↔ "< 1.5 min >").
+                indicator.setGravity(Gravity.END);
+                // Lock the minimum width to the widest possible value at
+                // build time. measureText is cheap (one measure pass on a
+                // ~12-char string). This prevents any layout reflow when
+                // the live text changes — the column stays the same size
+                // regardless of which value is showing.
+                indicator.measure(
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+                indicator.setMinWidth(indicator.getMeasuredWidth());
                 row.addView(indicator,
                         new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
             }
@@ -6442,6 +6493,10 @@ public class LauncherActivity extends Activity {
                     boolean set = slideshowFolderUri != null;
                     ind.setText(set ? "Set" : "Not set");
                     ind.setTextColor(set ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
+                } else if (rowId == SR_IDLE_HIDE) {
+                    ind.setText(idleHideLabel());
+                    boolean on = idleHideSec != 0;
+                    ind.setTextColor(on ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
                 } else {
                     ind.setTextColor(sel ? selTx : idleTx);
                 }
@@ -6594,6 +6649,9 @@ public class LauncherActivity extends Activity {
                 break;
             case SR_SLIDESHOW_RESTART:
                 toggleSlideshowRestart();
+                break;
+            case SR_IDLE_HIDE:
+                stepIdleHide();
                 break;
             case SR_BACKUP:
                 hideSettingsPanel();
@@ -9096,6 +9154,11 @@ public class LauncherActivity extends Activity {
         boolean legal = false;
         for (int s : SLIDESHOW_STEPS_SEC) if (s == slideshowDurationSec) { legal = true; break; }
         if (!legal) slideshowDurationSec = 0;
+        // Idle-hide timeout.
+        idleHideSec = prefs.getInt(KEY_IDLE_HIDE, 0);
+        boolean legalIdle = false;
+        for (int s : IDLE_HIDE_STEPS_SEC) if (s == idleHideSec) { legalIdle = true; break; }
+        if (!legalIdle) idleHideSec = 0;
     }
 
     /** {@code true} when the slideshow controls the wallpaper: a folder is set
@@ -9112,6 +9175,15 @@ public class LauncherActivity extends Activity {
         if (s == 90)  return "< 1.5 min >";
         if (s % 60 == 0) return "< " + (s / 60) + " min >";
         return "< " + s + "s >";
+    }
+
+    /** Human label for the idle-hide timeout setting. */
+    private String idleHideLabel() {
+        int s = idleHideSec;
+        if (s <= 0)  return "Off";
+        if (s < 60)  return s + "s";
+        if (s % 60 == 0) return (s / 60) + " min";
+        return s + "s";
     }
 
     /** Whether the media-read permission needed to browse image folders is
@@ -9369,6 +9441,57 @@ public class LauncherActivity extends Activity {
         if (!slideshowRestart || slideshowFolderUri == null) return;
         slideshowRestartApplied = true;
         advanceSlideshow();   // self-enumerates if needed
+    }
+
+    // ── Idle UI hide ──────────────────────────────────────────────────────
+
+    /** Cycle the idle-hide timeout to the next option. */
+    private void stepIdleHide() {
+        int idx = 0;
+        for (int i = 0; i < IDLE_HIDE_STEPS_SEC.length; i++) {
+            if (IDLE_HIDE_STEPS_SEC[i] == idleHideSec) { idx = i; break; }
+        }
+        idx = (idx + 1) % IDLE_HIDE_STEPS_SEC.length;
+        idleHideSec = IDLE_HIDE_STEPS_SEC[idx];
+        prefs.edit().putInt(KEY_IDLE_HIDE, idleHideSec).apply();
+        refreshSettingsRows();
+        scheduleIdleHide();
+    }
+
+    /** (Re)arm the idle-hide timer. Safe to call on every key press —
+     *  cancels any pending trigger and posts a fresh one if the feature
+     *  is configured and the slideshow is active. No-op otherwise. */
+    private void scheduleIdleHide() {
+        uiHandler.removeCallbacks(idleHideTrigger);
+        if (idleHideSec > 0 && slideshowActive() && !uiPaused)
+            uiHandler.postDelayed(idleHideTrigger, idleHideSec * 1000L);
+    }
+
+    /** Cancel the timer and, if the UI is hidden, restore it immediately
+     *  (no animation — used by onPause / overlay open). */
+    private void cancelAndRestoreIdleHide() {
+        uiHandler.removeCallbacks(idleHideTrigger);
+        if (idleHideActive) applyIdleHide(false);
+    }
+
+    /** Fade home UI in (active=false) or out (active=true).
+     *  Views hidden: shelf, netBtn, mapperBtnView, ringView.
+     *  Views kept visible: wallpaper (always), clockView (always).
+     *  Duration: 500 ms out, 250 ms in — smooth but snappy. */
+    private void applyIdleHide(boolean hide) {
+        if (idleHideActive == hide) return;
+        idleHideActive = hide;
+        float target = hide ? 0f : 1f;
+        long dur     = hide ? 500L : 250L;
+        RecyclingShelfView s = shelf;
+        View nb = netBtn, mb = mapperBtnView;
+        RingView rv = ringView;
+        if (s  != null) s .animate().alpha(target).setDuration(dur).start();
+        if (nb != null) nb.animate().alpha(hide ? 0f : 0.6f).setDuration(dur).start();
+        if (mb != null) mb.animate().alpha(hide ? 0f : 0.6f).setDuration(dur).start();
+        if (rv != null) rv.animate().alpha(target).setDuration(dur).start();
+        // Clock stays fully visible — it is the reason idle-hide exists
+        // (wallpaper + clock, nothing else).
     }
 
     // ── Slideshow folder picker overlay ──────────────────────────────────
