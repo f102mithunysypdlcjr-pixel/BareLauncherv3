@@ -910,7 +910,7 @@ public class LauncherActivity extends Activity {
             case SR_SLIDESHOW_FOLDER:   return "Not set";
             case SR_SLIDESHOW_DURATION: return "< 1.5 min >";   // widest bracketed label
             case SR_SLIDESHOW_RESTART:  return "Off";
-            case SR_IDLE_HIDE:          return "5 min";         // widest label
+            case SR_IDLE_HIDE:          return "< 5 min >";     // widest bracketed label
             default:                    return "Full";           // SR_CLOCK
         }
     }
@@ -6531,10 +6531,14 @@ public class LauncherActivity extends Activity {
                 if (n > 0) settingsSelectedRow = (settingsSelectedRow + 1) % n;
                 refreshSettingsRows(); return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (currentSettingsRowId() == SR_SLIDESHOW_DURATION) stepSlideshowDuration(-1);
+                int rowId = currentSettingsRowId();
+                if (rowId == SR_SLIDESHOW_DURATION) stepSlideshowDuration(-1);
+                else if (rowId == SR_IDLE_HIDE) stepIdleHide();
                 return true;   // swallow on other rows (panel is modal)
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (currentSettingsRowId() == SR_SLIDESHOW_DURATION) stepSlideshowDuration(+1);
+                rowId = currentSettingsRowId();
+                if (rowId == SR_SLIDESHOW_DURATION) stepSlideshowDuration(+1);
+                else if (rowId == SR_IDLE_HIDE) stepIdleHide();
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
@@ -9186,9 +9190,9 @@ public class LauncherActivity extends Activity {
     private String idleHideLabel() {
         int s = idleHideSec;
         if (s <= 0)  return "Off";
-        if (s < 60)  return s + "s";
-        if (s % 60 == 0) return (s / 60) + " min";
-        return s + "s";
+        if (s < 60)  return "< " + s + "s >";
+        if (s % 60 == 0) return "< " + (s / 60) + " min >";
+        return "< " + s + "s >";
     }
 
     /** Whether the media-read permission needed to browse image folders is
