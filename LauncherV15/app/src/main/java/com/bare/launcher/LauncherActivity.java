@@ -359,10 +359,13 @@ public class LauncherActivity extends Activity {
     private boolean idleHideActive = false;
     /** Single Runnable posted to {@link #uiHandler} after each user action.
      *  Cancelled on key press, onPause, and when slideshow becomes inactive. */
-    private final Runnable idleHideTrigger = () -> {
-        if (!destroyed && !uiPaused && slideshowActive() && idleHideSec > 0
-                && !anyOverlayLogicallyOpen()) {
-            applyIdleHide(true);
+    private final Runnable idleHideTrigger = new Runnable() {
+        @Override
+        public void run() {
+            if (!destroyed && !uiPaused && slideshowActive() && idleHideSec > 0
+                    && !anyOverlayLogicallyOpen()) {
+                applyIdleHide(true);
+            }
         }
     };
 
