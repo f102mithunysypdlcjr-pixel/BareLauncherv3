@@ -9198,7 +9198,7 @@ public class LauncherActivity extends Activity {
      *                   return a smaller folder list, but that is fine.</li>
      *  </ul> */
     private boolean hasMediaReadPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        if (Build.VERSION.SDK_INT >= 34) {  // UPSIDE_DOWN_CAKE
             // Android 14+: full OR partial grant is enough.
             return checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES)
                             == android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -9220,7 +9220,7 @@ public class LauncherActivity extends Activity {
     private void pickSlideshowFolder() {
         if (hasMediaReadPermission()) { scanAndShowFolderPicker(); return; }
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            if (Build.VERSION.SDK_INT >= 34) {  // UPSIDE_DOWN_CAKE
                 // Request both so the system dialog offers full AND partial access.
                 requestPermissions(new String[]{
                         android.Manifest.permission.READ_MEDIA_IMAGES,
