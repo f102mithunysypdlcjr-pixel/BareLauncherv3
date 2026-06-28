@@ -9336,6 +9336,11 @@ public class LauncherActivity extends Activity {
                     // null and re-enumerate forever. Empty stops cleanly; a
                     // folder re-pick resets this back to null to retry.
                     slideshowImages = (imgs != null) ? imgs : new String[0];
+                    // Reset retry counter on success (non-empty array) so future
+                    // retries work if MediaStore temporarily fails again.
+                    if (imgs != null && imgs.length > 0) {
+                        slideshowEnumerationRetries = 0;
+                    }
                     if (onReady != null) onReady.run();
                 });
             }, "wp-slideshow-scan").start();
