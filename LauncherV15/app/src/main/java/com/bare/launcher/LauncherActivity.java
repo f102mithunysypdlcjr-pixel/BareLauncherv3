@@ -327,6 +327,10 @@ public class LauncherActivity extends Activity {
     /** Guards the once-per-process "each restart" image change so returning
      *  from another app doesn't re-roll the wallpaper. */
     private boolean slideshowRestartApplied = false;
+    /** Retry counter for MediaStore enumeration failures (e.g., device reboot
+     *  when MediaStore isn't ready yet). Capped at 3 retries to prevent
+     *  infinite loops if MediaStore is genuinely broken. */
+    private int slideshowEnumerationRetries = 0;
     /** Foreground-only rotation tick. Re-posted by itself; cancelled in
      *  {@link #onPause} so the slideshow never runs (or wakes the device) in
      *  the background. */
@@ -9430,8 +9434,9 @@ public class LauncherActivity extends Activity {
         if (imgs == null) { enumerateSlideshowAsync(this::advanceSlideshow); return; }
         if (imgs.length == 0) {
             // Empty array means MediaStore query failed (likely device reboot).
-            // Retry after 2 seconds.
-            if (slideshowFolderUri != null && !destroyed) {
+            // Retry up to 3 times with 2-second delays.
+            if (slideshowEnumerationRetries < 3 && slideshowFolderUri != null && !destroyed) {
+                slideshowEnumerationRetries++;
                 uiHandler.postDelayed(() -> {
                     if (!destroyed && slideshowFolderUri != null) {
                         slideshowImages = null;  // Force re-enumeration
@@ -9488,15 +9493,20 @@ public class LauncherActivity extends Activity {
         String[] imgs = slideshowImages;
         if (imgs != null && imgs.length == 0 && slideshowFolderUri != null && !destroyed) {
             // Empty array means MediaStore query failed (likely device reboot).
-            // Retry after 2 seconds. MediaStore is usually ready within 1-3 seconds
-            // of boot on most devices.
-            uiHandler.postDelayed(() -> {
-                if (!destroyed && slideshowFolderUri != null) {
-                    slideshowImages = null;  // Force re-enumeration
-                    enumerateSlideshowAsync(this::applyCurrentSlideshowImageWithRetry);
-                }
-            }, 2000);
-            return;
+            // Retry up to 3 times with 2-second delays. MediaStore is usually
+            // ready within 1-6 seconds of boot on most devices.
+            if (slideshowEnumerationRetries < 3) {
+                slideshowEnumerationRetries++;
+                uiHandler.postDelayed(() -> {
+                    if (!destroyed && slideshowFolderUri != null) {
+                        slideshowImages = null;  // Force re-enumeration
+                        enumerateSlideshowAsync(this::applyCurrentSlideshowImageWithRetry);
+                    }
+                }, 2000);
+                return;
+            }
+            // Exceeded retry limit - MediaStore is broken or folder is empty.
+            // Fall through to applyCurrentSlideshowImage which will no-op.
         }
         applyCurrentSlideshowImage();
     }
