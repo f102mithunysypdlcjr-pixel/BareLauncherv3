@@ -9435,11 +9435,13 @@ public class LauncherActivity extends Activity {
     }
 
     /** (Re)arm the foreground interval timer for the current setting, or cancel
-     *  it when off / paused / no folder. Cheap: one pending message at most. */
+     *  it when off / paused / no folder. Cheap: one pending message at most.
+     *  Does NOT enumerate or show an image — that's handled by
+     *  {@link #slideshowRestartAdvanceOnce} on the first resume after process
+     *  start. This only arms the NEXT rotation. */
     private void restartSlideshowTimer() {
         uiHandler.removeCallbacks(slideshowTick);
         if (uiPaused || slideshowFolderUri == null || slideshowDurationSec <= 0) return;
-        if (slideshowImages == null) enumerateSlideshowAsync(null);
         uiHandler.postDelayed(slideshowTick, slideshowDurationSec * 1000L);
     }
 
