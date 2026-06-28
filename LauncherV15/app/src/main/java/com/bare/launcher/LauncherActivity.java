@@ -327,9 +327,6 @@ public class LauncherActivity extends Activity {
     /** Guards the once-per-process "each restart" image change so returning
      *  from another app doesn't re-roll the wallpaper. */
     private boolean slideshowRestartApplied = false;
-    /** Guards the first timer restart after cold start so the slideshow
-     *  resumes immediately rather than waiting for the full duration. */
-    private boolean slideshowTimerStarted = false;
     /** Foreground-only rotation tick. Re-posted by itself; cancelled in
      *  {@link #onPause} so the slideshow never runs (or wakes the device) in
      *  the background. */
@@ -9010,7 +9007,26 @@ public class LauncherActivity extends Activity {
     // forwards the four lifecycle / interaction calls below.
 
     private void loadWallpaper() {
-        if (wallpaperCtl != null) wallpaperCtl.loadStored();
+        if (wallpaperCtl != null) {
+            // Load the stored wallpaper (manual pick) or system wallpaper.
+            // When the snapshot has pre-painted, loadStored short-circuits
+            // to avoid re-decoding the same image.
+            wallpaperCtl.loadStored();
+            // If slideshow is active, also load/advance the slideshow image.
+            // This must happen even if the snapshot pre-painted, because the
+            // snapshot represents the LAST manually-picked wallpaper, not the
+            // current slideshow image. Without this, cold starts show the old
+            // snapshot until the first timer tick (which could be minutes away).
+            if (slideshowActive() && !slideshowRestartApplied) {
+                slideshowRestartApplied = true;
+                if (slideshowRestart) {
+                    advanceSlideshow();
+                } else {
+                    if (slideshowImages == null) enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
+                    else applyCurrentSlideshowImage();
+                }
+            }
+        }
     }
 
     private void loadSystemWallpaper() {
@@ -9445,12 +9461,7 @@ public class LauncherActivity extends Activity {
     private void restartSlideshowTimer() {
         uiHandler.removeCallbacks(slideshowTick);
         if (uiPaused || slideshowFolderUri == null || slideshowDurationSec <= 0) return;
-        // On cold start after process kill, resume the timer immediately rather
-        // than waiting for the full duration. After the first resume, use the
-        // normal interval.
-        long delay = slideshowTimerStarted ? slideshowDurationSec * 1000L : 0L;
-        slideshowTimerStarted = true;
-        uiHandler.postDelayed(slideshowTick, delay);
+        uiHandler.postDelayed(slideshowTick, slideshowDurationSec * 1000L);
     }
 
     /** Once per process: when in "each restart" mode, roll to the next image
