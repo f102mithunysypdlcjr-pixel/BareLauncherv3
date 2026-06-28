@@ -9437,10 +9437,10 @@ public class LauncherActivity extends Activity {
     private void advanceSlideshow() {
         String[] imgs = slideshowImages;
         if (imgs == null) { enumerateSlideshowAsync(this::advanceSlideshow); return; }
+        // Empty array means MediaStore query failed. Reset to null so the next
+        // timer tick will re-enumerate. The timer provides natural retry spacing.
         if (imgs.length == 0) {
-            // Empty array means MediaStore query failed (likely device reboot).
-            // Use the shared retry helper.
-            retryMediaStoreEnumerationIfNeeded(this::advanceSlideshow);
+            slideshowImages = null;
             return;
         }
         slideshowIndex = (slideshowIndex + 1) % imgs.length;
