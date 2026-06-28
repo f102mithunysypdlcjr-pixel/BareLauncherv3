@@ -1623,12 +1623,6 @@ public class LauncherActivity extends Activity {
         // per process) roll to a new image in "each restart" mode. Both are
         // no-ops when slideshow is off / no folder is set. Done after the
         // instant snapshot has already painted, so cold start stays instant.
-        // If the slideshow is active but no image is showing (e.g., process was
-        // killed and restarted), kick the current image now so the user doesn't
-        // see the stock wallpaper.
-        if (slideshowActive() && slideshowImages == null) {
-            enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
-        }
         restartSlideshowTimer();
         slideshowRestartAdvanceOnce();
         scheduleIdleHide();
@@ -9450,12 +9444,22 @@ public class LauncherActivity extends Activity {
     }
 
     /** Once per process: when in "each restart" mode, roll to the next image
-     *  after the instant snapshot has already painted. */
+     *  after the instant snapshot has already painted. When "each restart" is
+     *  off but the slideshow is active, restore the current image so a cold
+     *  restart doesn't leave the stock wallpaper visible. */
     private void slideshowRestartAdvanceOnce() {
         if (slideshowRestartApplied) return;
-        if (!slideshowRestart || slideshowFolderUri == null) return;
+        if (slideshowFolderUri == null) return;
+        if (!slideshowRestart && slideshowDurationSec <= 0) return;
         slideshowRestartApplied = true;
-        advanceSlideshow();   // self-enumerates if needed
+        if (slideshowRestart) {
+            advanceSlideshow();   // self-enumerates if needed, then advances index
+        } else {
+            // Duration is set but "each restart" is off — just show the current
+            // saved image without advancing the index.
+            if (slideshowImages == null) enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
+            else applyCurrentSlideshowImage();
+        }
     }
 
     // ── Idle UI hide (slideshow-only visual cleanup) ──────────────────────
