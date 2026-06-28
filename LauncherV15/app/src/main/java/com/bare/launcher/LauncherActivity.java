@@ -1623,6 +1623,12 @@ public class LauncherActivity extends Activity {
         // per process) roll to a new image in "each restart" mode. Both are
         // no-ops when slideshow is off / no folder is set. Done after the
         // instant snapshot has already painted, so cold start stays instant.
+        // If the slideshow is active but no image is showing (e.g., process was
+        // killed and restarted), kick the current image now so the user doesn't
+        // see the stock wallpaper.
+        if (slideshowActive() && slideshowImages == null) {
+            enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
+        }
         restartSlideshowTimer();
         slideshowRestartAdvanceOnce();
         scheduleIdleHide();
@@ -6533,12 +6539,12 @@ public class LauncherActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_LEFT:
                 int rowId = currentSettingsRowId();
                 if (rowId == SR_SLIDESHOW_DURATION) stepSlideshowDuration(-1);
-                else if (rowId == SR_IDLE_HIDE) stepIdleHide();
+                else if (rowId == SR_IDLE_HIDE) stepIdleHide(-1);
                 return true;   // swallow on other rows (panel is modal)
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 rowId = currentSettingsRowId();
                 if (rowId == SR_SLIDESHOW_DURATION) stepSlideshowDuration(+1);
-                else if (rowId == SR_IDLE_HIDE) stepIdleHide();
+                else if (rowId == SR_IDLE_HIDE) stepIdleHide(+1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
@@ -6660,7 +6666,7 @@ public class LauncherActivity extends Activity {
                 toggleSlideshowRestart();
                 break;
             case SR_IDLE_HIDE:
-                stepIdleHide();
+                stepIdleHide(+1);
                 break;
             case SR_BACKUP:
                 hideSettingsPanel();
@@ -9454,13 +9460,13 @@ public class LauncherActivity extends Activity {
 
     // ── Idle UI hide (slideshow-only visual cleanup) ──────────────────────
 
-    /** Cycle the idle-hide timeout to the next option. */
-    private void stepIdleHide() {
+    /** Cycle the idle-hide timeout. {@code dir} is +1 (forward) or -1 (back). */
+    private void stepIdleHide(int dir) {
         int idx = 0;
         for (int i = 0; i < IDLE_HIDE_STEPS_SEC.length; i++) {
             if (IDLE_HIDE_STEPS_SEC[i] == idleHideSec) { idx = i; break; }
         }
-        idx = (idx + 1) % IDLE_HIDE_STEPS_SEC.length;
+        idx = (idx + dir + IDLE_HIDE_STEPS_SEC.length) % IDLE_HIDE_STEPS_SEC.length;
         idleHideSec = IDLE_HIDE_STEPS_SEC[idx];
         prefs.edit().putInt(KEY_IDLE_HIDE, idleHideSec).apply();
         refreshSettingsRows();
