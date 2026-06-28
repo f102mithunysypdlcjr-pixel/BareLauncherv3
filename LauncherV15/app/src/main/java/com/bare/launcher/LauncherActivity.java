@@ -9296,6 +9296,11 @@ public class LauncherActivity extends Activity {
         idx = (idx + dir + SLIDESHOW_STEPS_SEC.length) % SLIDESHOW_STEPS_SEC.length;
         slideshowDurationSec = SLIDESHOW_STEPS_SEC[idx];
         prefs.edit().putInt(KEY_SLIDESHOW_DURATION, slideshowDurationSec).apply();
+        // Mutual exclusion: enabling the interval timer turns off "change each restart".
+        if (prev == 0 && slideshowDurationSec != 0 && slideshowRestart) {
+            slideshowRestart = false;
+            prefs.edit().putBoolean(KEY_SLIDESHOW_RESTART, false).apply();
+        }
         refreshSettingsRows();
         if (slideshowDurationSec != 0 && slideshowFolderUri == null) {
             showToast(getString(R.string.toast_slideshow_pick_folder));
@@ -9309,12 +9314,19 @@ public class LauncherActivity extends Activity {
     private void toggleSlideshowRestart() {
         slideshowRestart = !slideshowRestart;
         prefs.edit().putBoolean(KEY_SLIDESHOW_RESTART, slideshowRestart).apply();
+        // Mutual exclusion: enabling "change each restart" turns off the interval timer.
+        if (slideshowRestart && slideshowDurationSec != 0) {
+            slideshowDurationSec = 0;
+            prefs.edit().putInt(KEY_SLIDESHOW_DURATION, 0).apply();
+            restartSlideshowTimer();   // cancels the in-flight postDelayed
+        }
         refreshSettingsRows();
         if (slideshowRestart && slideshowFolderUri == null) {
             showToast(getString(R.string.toast_slideshow_pick_folder));
         }
-        // If the timer isn't already driving the wallpaper, surface an image now.
-        if (slideshowRestart && slideshowDurationSec == 0) kickSlideshowNow();
+        // Surface an image immediately when turning ON (duration is already 0 here,
+        // either it was always 0 or we just zeroed it above).
+        if (slideshowRestart) kickSlideshowNow();
     }
 
     /** Show an image right away when the slideshow is first switched on. */
