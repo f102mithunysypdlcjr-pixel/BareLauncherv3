@@ -331,10 +331,6 @@ public class LauncherActivity extends Activity {
      *  when MediaStore isn't ready yet). Capped at 3 retries to prevent
      *  infinite loops if MediaStore is genuinely broken. */
     private int slideshowEnumerationRetries = 0;
-    /** Set to true after first onResume completes, used to distinguish cold
-     *  starts (where we reset focus to first app) from returns from other apps
-     *  (where we restore saved focus position). */
-    private boolean firstResumeDone = false;
     /** Foreground-only rotation tick. Re-posted by itself; cancelled in
      *  {@link #onPause} so the slideshow never runs (or wakes the device) in
      *  the background. */
@@ -1690,13 +1686,6 @@ public class LauncherActivity extends Activity {
         RecyclingShelfView s = shelf;
         if (s != null && !drawerKeptOpen) {
             int saved = prefs.getInt(KEY_SCROLL_IDX, 0);
-            // On cold start (device boot / force stop), always start at first app
-            // regardless of saved position. On return from other apps, restore
-            // the saved position. This prevents the focus-jump-to-last-app issue
-            // on every boot while preserving position when returning from Settings etc.
-            if (!firstResumeDone) {
-                saved = 0;  // Force first app on cold start
-            }
             if (!appList.isEmpty()) {
                 // Clamp against the shelf's currently-displayed size so a
                 // saved index that points past the end of the filtered
@@ -1726,8 +1715,6 @@ public class LauncherActivity extends Activity {
             ViewTreeObserver vto = s.getViewTreeObserver();
             if (vto.isAlive()) vto.addOnGlobalLayoutListener(focusRestoreListener);
         }
-        // Mark first resume complete
-        firstResumeDone = true;
         FrameLayout r = root;
         if (r != null) {
             ViewTreeObserver rvto = r.getViewTreeObserver();
