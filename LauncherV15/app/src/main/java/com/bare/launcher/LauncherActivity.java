@@ -9469,7 +9469,10 @@ public class LauncherActivity extends Activity {
         if (!slideshowRestart && slideshowDurationSec <= 0) return;
         slideshowRestartApplied = true;
         if (slideshowRestart) {
-            advanceSlideshow();   // self-enumerates if needed, then advances index
+            // "Change on each restart" mode - advance with aggressive retry.
+            // On device reboot, MediaStore might not be ready yet, so we need
+            // the same retry logic as the duration-only path.
+            advanceSlideshowWithRetry();
         } else {
             // Duration is set but "each restart" is off — just show the current
             // saved image without advancing the index.
@@ -9482,6 +9485,25 @@ public class LauncherActivity extends Activity {
                 applyCurrentSlideshowImage();
             }
         }
+    }
+
+    /** Advance to next image with aggressive retry for cold-start scenarios. */
+    private void advanceSlideshowWithRetry() {
+        String[] imgs = slideshowImages;
+        if (imgs == null) { 
+            enumerateSlideshowAsync(this::advanceSlideshowWithRetry); 
+            return; 
+        }
+        if (imgs.length == 0) {
+            // Empty array means MediaStore query failed (likely device reboot).
+            // Use the shared retry helper.
+            retryMediaStoreEnumerationIfNeeded(this::advanceSlideshowWithRetry);
+            return;
+        }
+        // Success - advance and apply
+        slideshowIndex = (slideshowIndex + 1) % imgs.length;
+        prefs.edit().putInt(KEY_SLIDESHOW_INDEX, slideshowIndex).apply();
+        applyCurrentSlideshowImage();
     }
 
     /** Apply the current slideshow image, and if the images array is empty
