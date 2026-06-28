@@ -1709,7 +1709,10 @@ public class LauncherActivity extends Activity {
                     ViewTreeObserver vto = s.getViewTreeObserver();
                     if (vto.isAlive()) vto.removeOnGlobalLayoutListener(this);
                     focusRestoreListener = null;
-                    if (!destroyed) s.requestFocusOnIndex(s.focusedIndex);
+                    // Skip when appList was empty in onResume (pendingScrollIdx was
+                    // set). loadApps will call requestFocusOnIndex once the shelf is
+                    // populated; firing here would snap to focusedIndex=0 first → flash.
+                    if (!destroyed && pendingScrollIdx < 0) s.requestFocusOnIndex(s.focusedIndex);
                 }
             };
             ViewTreeObserver vto = s.getViewTreeObserver();
@@ -5222,7 +5225,15 @@ public class LauncherActivity extends Activity {
             });
             if (ok && !appList.isEmpty()) {
                 RecyclingShelfView s = shelf;
-                if (s != null) applyShelfApps(s);
+                if (s != null) {
+                    // Pre-seed so setApps posts the saved index, not 0.
+                    // loadApps runs synchronously in onCreate, before onResume reads
+                    // prefs, so focusedIndex is still 0 here. Without this seed,
+                    // setApps queues requestFocusOnIndex(0) which drains before the
+                    // focusRestoreListener fires → visible flash to first app on reboot.
+                    s.focusedIndex = prefs.getInt(KEY_SCROLL_IDX, 0);
+                    applyShelfApps(s);
+                }
             } else {
                 // Either no cache or it failed to parse. Drop any partial
                 // state defensively (parse() is "all-or-nothing" so this
