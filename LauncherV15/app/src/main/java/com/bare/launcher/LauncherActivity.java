@@ -9434,16 +9434,8 @@ public class LauncherActivity extends Activity {
         if (imgs == null) { enumerateSlideshowAsync(this::advanceSlideshow); return; }
         if (imgs.length == 0) {
             // Empty array means MediaStore query failed (likely device reboot).
-            // Retry up to 3 times with 2-second delays.
-            if (slideshowEnumerationRetries < 3 && slideshowFolderUri != null && !destroyed) {
-                slideshowEnumerationRetries++;
-                uiHandler.postDelayed(() -> {
-                    if (!destroyed && slideshowFolderUri != null) {
-                        slideshowImages = null;  // Force re-enumeration
-                        advanceSlideshow();
-                    }
-                }, 2000);
-            }
+            // Use the shared retry helper.
+            retryMediaStoreEnumerationIfNeeded(this::advanceSlideshow);
             return;
         }
         slideshowIndex = (slideshowIndex + 1) % imgs.length;
@@ -9491,24 +9483,30 @@ public class LauncherActivity extends Activity {
      *  (MediaStore not ready on device reboot), schedule a retry after a delay. */
     private void applyCurrentSlideshowImageWithRetry() {
         String[] imgs = slideshowImages;
-        if (imgs != null && imgs.length == 0 && slideshowFolderUri != null && !destroyed) {
+        if (imgs != null && imgs.length == 0) {
             // Empty array means MediaStore query failed (likely device reboot).
-            // Retry up to 3 times with 2-second delays. MediaStore is usually
-            // ready within 1-6 seconds of boot on most devices.
-            if (slideshowEnumerationRetries < 3) {
-                slideshowEnumerationRetries++;
-                uiHandler.postDelayed(() -> {
-                    if (!destroyed && slideshowFolderUri != null) {
-                        slideshowImages = null;  // Force re-enumeration
-                        enumerateSlideshowAsync(this::applyCurrentSlideshowImageWithRetry);
-                    }
-                }, 2000);
-                return;
-            }
-            // Exceeded retry limit - MediaStore is broken or folder is empty.
-            // Fall through to applyCurrentSlideshowImage which will no-op.
+            // Use the shared retry helper.
+            retryMediaStoreEnumerationIfNeeded(this::applyCurrentSlideshowImageWithRetry);
+            return;
         }
         applyCurrentSlideshowImage();
+    }
+
+    /** Shared retry helper for MediaStore enumeration failures. Retries up to
+     *  3 times with 2-second delays. MediaStore is usually ready within 1-6
+     *  seconds of device boot. */
+    private void retryMediaStoreEnumerationIfNeeded(Runnable onReady) {
+        if (slideshowEnumerationRetries < 3 && slideshowFolderUri != null && !destroyed) {
+            slideshowEnumerationRetries++;
+            uiHandler.postDelayed(() -> {
+                if (!destroyed && slideshowFolderUri != null) {
+                    slideshowImages = null;  // Force re-enumeration
+                    enumerateSlideshowAsync(onReady);
+                }
+            }, 2000);
+        }
+        // Exceeded retry limit - MediaStore is broken or folder is empty.
+        // The caller will handle this gracefully (no-op or fallback).
     }
 
     // ── Idle UI hide (slideshow-only visual cleanup) ──────────────────────
