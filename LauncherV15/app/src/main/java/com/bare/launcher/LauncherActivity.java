@@ -327,6 +327,9 @@ public class LauncherActivity extends Activity {
     /** Guards the once-per-process "each restart" image change so returning
      *  from another app doesn't re-roll the wallpaper. */
     private boolean slideshowRestartApplied = false;
+    /** Guards the first timer restart after cold start so the slideshow
+     *  resumes immediately rather than waiting for the full duration. */
+    private boolean slideshowTimerStarted = false;
     /** Foreground-only rotation tick. Re-posted by itself; cancelled in
      *  {@link #onPause} so the slideshow never runs (or wakes the device) in
      *  the background. */
@@ -9442,7 +9445,12 @@ public class LauncherActivity extends Activity {
     private void restartSlideshowTimer() {
         uiHandler.removeCallbacks(slideshowTick);
         if (uiPaused || slideshowFolderUri == null || slideshowDurationSec <= 0) return;
-        uiHandler.postDelayed(slideshowTick, slideshowDurationSec * 1000L);
+        // On cold start after process kill, resume the timer immediately rather
+        // than waiting for the full duration. After the first resume, use the
+        // normal interval.
+        long delay = slideshowTimerStarted ? slideshowDurationSec * 1000L : 0L;
+        slideshowTimerStarted = true;
+        uiHandler.postDelayed(slideshowTick, delay);
     }
 
     /** Once per process: when in "each restart" mode, roll to the next image
