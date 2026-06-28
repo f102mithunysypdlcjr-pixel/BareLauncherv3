@@ -9007,26 +9007,7 @@ public class LauncherActivity extends Activity {
     // forwards the four lifecycle / interaction calls below.
 
     private void loadWallpaper() {
-        if (wallpaperCtl != null) {
-            // Load the stored wallpaper (manual pick) or system wallpaper.
-            // When the snapshot has pre-painted, loadStored short-circuits
-            // to avoid re-decoding the same image.
-            wallpaperCtl.loadStored();
-            // If slideshow is active, also load/advance the slideshow image.
-            // This must happen even if the snapshot pre-painted, because the
-            // snapshot represents the LAST manually-picked wallpaper, not the
-            // current slideshow image. Without this, cold starts show the old
-            // snapshot until the first timer tick (which could be minutes away).
-            if (slideshowActive() && !slideshowRestartApplied) {
-                slideshowRestartApplied = true;
-                if (slideshowRestart) {
-                    advanceSlideshow();
-                } else {
-                    if (slideshowImages == null) enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
-                    else applyCurrentSlideshowImage();
-                }
-            }
-        }
+        if (wallpaperCtl != null) wallpaperCtl.loadStored();
     }
 
     private void loadSystemWallpaper() {
@@ -9447,7 +9428,19 @@ public class LauncherActivity extends Activity {
     private void advanceSlideshow() {
         String[] imgs = slideshowImages;
         if (imgs == null) { enumerateSlideshowAsync(this::advanceSlideshow); return; }
-        if (imgs.length == 0) return;
+        if (imgs.length == 0) {
+            // Empty array means MediaStore query failed (likely device reboot).
+            // Retry after 2 seconds.
+            if (slideshowFolderUri != null && !destroyed) {
+                uiHandler.postDelayed(() -> {
+                    if (!destroyed && slideshowFolderUri != null) {
+                        slideshowImages = null;  // Force re-enumeration
+                        advanceSlideshow();
+                    }
+                }, 2000);
+            }
+            return;
+        }
         slideshowIndex = (slideshowIndex + 1) % imgs.length;
         prefs.edit().putInt(KEY_SLIDESHOW_INDEX, slideshowIndex).apply();
         applyCurrentSlideshowImage();
@@ -9478,9 +9471,34 @@ public class LauncherActivity extends Activity {
         } else {
             // Duration is set but "each restart" is off — just show the current
             // saved image without advancing the index.
-            if (slideshowImages == null) enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
-            else applyCurrentSlideshowImage();
+            if (slideshowImages == null) {
+                // On device reboot, MediaStore might not be ready yet. The enumeration
+                // will retry automatically when the first timer tick fires. But we
+                // still attempt the load here so it works when MediaStore IS ready.
+                enumerateSlideshowAsync(this::applyCurrentSlideshowImageWithRetry);
+            } else {
+                applyCurrentSlideshowImage();
+            }
         }
+    }
+
+    /** Apply the current slideshow image, and if the images array is empty
+     *  (MediaStore not ready on device reboot), schedule a retry after a delay. */
+    private void applyCurrentSlideshowImageWithRetry() {
+        String[] imgs = slideshowImages;
+        if (imgs != null && imgs.length == 0 && slideshowFolderUri != null && !destroyed) {
+            // Empty array means MediaStore query failed (likely device reboot).
+            // Retry after 2 seconds. MediaStore is usually ready within 1-3 seconds
+            // of boot on most devices.
+            uiHandler.postDelayed(() -> {
+                if (!destroyed && slideshowFolderUri != null) {
+                    slideshowImages = null;  // Force re-enumeration
+                    enumerateSlideshowAsync(this::applyCurrentSlideshowImageWithRetry);
+                }
+            }, 2000);
+            return;
+        }
+        applyCurrentSlideshowImage();
     }
 
     // ── Idle UI hide (slideshow-only visual cleanup) ──────────────────────
