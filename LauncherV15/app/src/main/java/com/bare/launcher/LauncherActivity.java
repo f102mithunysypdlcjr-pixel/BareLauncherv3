@@ -5363,10 +5363,15 @@ public class LauncherActivity extends Activity {
                                 // instead of the closest valid one.
                                 if (pendingScrollIdx >= 0 && !freshFinal.isEmpty()) {
                                     int visibleCount = countVisible(freshFinal);
-                                    if (visibleCount > 0) {
-                                        s.focusedIndex = Math.min(pendingScrollIdx, visibleCount - 1);
+                                    int hc = effectiveHomeCount(visibleCount);
+                                    if (hc > 0) {
+                                        s.focusedIndex = Math.min(pendingScrollIdx, hc - 1);
                                     }
                                     pendingScrollIdx = -1;
+                                } else if (!freshFinal.isEmpty()) {
+                                    int visibleCount = countVisible(freshFinal);
+                                    int hc = effectiveHomeCount(visibleCount);
+                                    if (hc > 0) s.focusedIndex = Math.min(s.focusedIndex, hc - 1);
                                 }
                                 applyShelfApps(s);
                             }
