@@ -1270,6 +1270,13 @@ public class LauncherActivity extends Activity {
         if (d.closing) return;   // a close is already animating — ignore re-triggers (held DPAD-UP)
         final int drawerFocus = d.focusedIndex;
         if (d.reorderMode) d.exitReorderMode(false);
+        // Clear the wallpaper blur NOW (not in the close end-callback). If we
+        // waited until the slide finished, the translucent veil would fade to
+        // zero while the GPU blur was still applied, briefly revealing the bare
+        // blurred wallpaper before it snapped sharp — the "second blur" flash.
+        // Clearing it up front means the veil fades over an already-sharp
+        // wallpaper, and it drops the blur a few frames earlier (cheaper).
+        applyDrawerBlur(false);
         // Start the drawer's downward fade. close() hides the ring up front so
         // it can't trail the slide.
         d.close(null);
@@ -4743,7 +4750,6 @@ public class LauncherActivity extends Activity {
                     .setUpdateListener(null)
                     .withLayer()
                     .withEndAction(() -> {
-                        LauncherActivity.this.applyDrawerBlur(false);
                         setVisibility(GONE);
                         setTranslationY(0f); setAlpha(1f);
                         closing = false;
