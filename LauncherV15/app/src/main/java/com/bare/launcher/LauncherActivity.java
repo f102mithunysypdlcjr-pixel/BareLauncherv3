@@ -1243,16 +1243,16 @@ public class LauncherActivity extends Activity {
         // stays on the favourite. Clamp the home index defensively.
         int homeIdx = Math.min(Math.max(0, s.focusedIndex), Math.max(0, hc - 1));
         int focus = HomeDrawerModel.navDown(homeIdx, visible.size(), hc);
-        d.open(focus);
         // Hide the home shelf while the drawer covers the screen so we never
         // draw both grids at once (the drawer's row 0 already mirrors the home
         // row). INVISIBLE (not GONE) avoids a relayout on open/close.
         s.setVisibility(View.INVISIBLE);
+        setHomeChromeVisible(false);
         // Frosted backdrop: blur the wallpaper behind the translucent drawer.
         // The shared selection ring stays WHITE in the drawer (it reads well
         // over the frosted surface) — same colour as on the home shelf.
         applyDrawerBlur(true);
-        setHomeChromeVisible(false);
+        d.open(focus);
     }
 
     /** Close the drawer, re-derive the home row from the (possibly changed)
@@ -1270,14 +1270,6 @@ public class LauncherActivity extends Activity {
         if (d.closing) return;   // a close is already animating — ignore re-triggers (held DPAD-UP)
         final int drawerFocus = d.focusedIndex;
         if (d.reorderMode) d.exitReorderMode(false);
-        // Clear the wallpaper blur NOW (not in the close end-callback). If we
-        // waited until the slide finished, the translucent veil would fade to
-        // zero while the GPU blur was still applied, briefly revealing the bare
-        // blurred wallpaper before it snapped sharp — the "second blur" flash.
-        // Clearing it up front means the veil fades over an already-sharp
-        // wallpaper, and it drops the blur a few frames earlier (cheaper).
-        applyDrawerBlur(false);
-
         // Start the drawer's downward fade. close() hides the ring up front so
         // it can't trail the slide.
         d.close(null);
@@ -4751,6 +4743,7 @@ public class LauncherActivity extends Activity {
                     .setUpdateListener(null)
                     .withLayer()
                     .withEndAction(() -> {
+                        LauncherActivity.this.applyDrawerBlur(false);
                         setVisibility(GONE);
                         setTranslationY(0f); setAlpha(1f);
                         closing = false;
