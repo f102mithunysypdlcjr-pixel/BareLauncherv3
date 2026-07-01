@@ -4707,6 +4707,14 @@ public class LauncherActivity extends Activity {
         // ── open / close ─────────────────────────────────────────────────
         void open(int focusIdx) {
             closing = false;
+            // Defensive: a prior close() that was interrupted (animate().cancel()
+            // from onPause/forceHide, or a rapid close→open re-trigger) can leave
+            // this view pinned at LAYER_TYPE_HARDWARE with a stale cached GPU
+            // texture — withLayer()'s automatic layer-type restore only fires on
+            // natural animator completion, not on cancel(). Force it back to
+            // NONE up front so open() never starts its tween by re-blending an
+            // old snapshot (the "glitter" artifact).
+            setLayerType(LAYER_TYPE_NONE, null);
             setVisibility(VISIBLE);
             setAlpha(0f);
             int h = getHeight() > 0 ? getHeight() : screenH;
@@ -4752,6 +4760,17 @@ public class LauncherActivity extends Activity {
                     .withEndAction(() -> {
                         setVisibility(GONE);
                         setTranslationY(0f); setAlpha(1f);
+                        // Explicit layer-type reset. withLayer() is documented to
+                        // restore the pre-animation layer type on completion, but
+                        // that restore rides on the animator's end listener — the
+                        // same listener that a competing animate().cancel() (rapid
+                        // re-toggle, or onPause tearing down mid-close) can skip.
+                        // Setting it back to NONE here, unconditionally, is cheap
+                        // and makes the reset happen regardless of how the tween
+                        // actually ended, closing the gap that let a stale GPU
+                        // layer (and its blurred snapshot) survive into the next
+                        // open — the "blur lingers after close" regression.
+                        setLayerType(LAYER_TYPE_NONE, null);
                         closing = false;
                         if (after != null) after.run();
                     }).start();
@@ -4763,6 +4782,12 @@ public class LauncherActivity extends Activity {
             closing = false;
             if (reorderMode) exitReorderMode(false);
             animate().cancel();
+            // animate().cancel() does not reliably run withLayer()'s own restore
+            // (see close()'s withEndAction comment) — if forceHide() interrupts
+            // an in-flight close/open tween, the view can be left pinned at
+            // LAYER_TYPE_HARDWARE holding a stale texture. Reset explicitly so
+            // the drawer's next open() starts from a clean, live-rendered state.
+            setLayerType(LAYER_TYPE_NONE, null);
             setVisibility(GONE);
             setTranslationY(0f); setAlpha(1f);
             LauncherActivity.this.applyDrawerBlur(false);
