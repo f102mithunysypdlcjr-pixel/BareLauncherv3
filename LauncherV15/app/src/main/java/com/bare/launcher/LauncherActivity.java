@@ -5231,7 +5231,7 @@ public class LauncherActivity extends Activity {
                     // setApps queues requestFocusOnIndex(0) which drains before the
                     // focusRestoreListener fires → visible flash to first app on reboot.
                     s.focusedIndex = prefs.getInt(KEY_SCROLL_IDX, 0);
-                    applyShelfApps(s);
+                    applyShelfApps(s, false);
                 }
             } else {
                 // Either no cache or it failed to parse. Drop any partial
@@ -5942,7 +5942,23 @@ public class LauncherActivity extends Activity {
      *  per overlay-open, and {@link #preWarmIcon} early-returns on
      *  cache hit so the second-and-subsequent opens are O(N) cheap
      *  containsKey checks. */
-    private void applyShelfApps(RecyclingShelfView s) {
+    private void applyShelfApps(RecyclingShelfView s) { applyShelfApps(s, true); }
+
+    /** @param resolveCount  false for the cold-start cache pre-paint ONLY.
+     *  {@link AppListCache} deliberately excludes TV inputs (they are not
+     *  serialisable and are re-enumerated fresh from TIF every scan — see
+     *  {@link AppListCache#from}), so the cache-derived {@code visible}
+     *  list is missing however many TV inputs the device has. Feeding that
+     *  undercount into {@link #resolveHomeCount} would clamp — and PERSIST
+     *  — {@link #homeCount} down to the smaller cache-only size, silently
+     *  and permanently shrinking the home row (and stranding the saved
+     *  scroll index against a shelf smaller than the one it was saved
+     *  against) on every cold start where real-app count < the true count.
+     *  The authoritative call from the async PM-scan reconcile (which DOES
+     *  include TV inputs) passes {@code true} and resolves/persists
+     *  normally; the pre-paint call primes {@link #homeCount} from prefs
+     *  for rendering only, without the shrink-and-save side effect. */
+    private void applyShelfApps(RecyclingShelfView s, boolean resolveCount) {
         if (s == null) return;
         // Single source of truth: appList (full order) minus hiddenApps, split
         // at the home boundary. The home row shows the first homeCount apps;
@@ -5950,7 +5966,8 @@ public class LauncherActivity extends Activity {
         // snapshot into their own displayed list, so the shared visible list
         // (possibly the reused visibleScratch) never leaks across UI events.
         List<AppInfo> visible = buildVisibleList();
-        resolveHomeCount(visible.size());
+        if (resolveCount) resolveHomeCount(visible.size());
+        else if (homeCount < 0) homeCount = Math.max(1, prefs.getInt(KEY_HOME_COUNT, 1));
         int hc = effectiveHomeCount(visible.size());
         pushHomeRow(s, visible, hc);
         AppDrawer d = drawer;
