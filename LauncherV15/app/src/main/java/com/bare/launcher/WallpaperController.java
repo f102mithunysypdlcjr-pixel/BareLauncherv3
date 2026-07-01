@@ -124,6 +124,12 @@ final class WallpaperController {
     private final ThreadPoolExecutor      executor;
     private final AtomicBoolean           systemLoading  = new AtomicBoolean(false);
     private final AtomicBoolean           userLoading    = new AtomicBoolean(false);
+    /** Separate from {@link #userLoading} so a slideshow rotation tick and
+     *  a manual wallpaper pick landing in the same few hundred ms don't
+     *  silently drop one another via a shared guard. Both still funnel
+     *  through the single-thread {@link #executor}, so they queue and run
+     *  sequentially rather than racing. */
+    private final AtomicBoolean           slideshowLoading = new AtomicBoolean(false);
 
     /** Volatile because the executor thread reads them inside
      *  {@link #wpDrawable} / {@link #calcSampleSize}. Without volatile,
@@ -384,7 +390,8 @@ final class WallpaperController {
      *  {@link #crossfadeUri}. {@code persist} controls whether the URI
      *  is saved to prefs and the snapshot file is written. */
     private void decodeAndCrossfade(Uri uri, boolean persist) {
-        if (!userLoading.compareAndSet(false, true)) return;
+        final AtomicBoolean guard = persist ? userLoading : slideshowLoading;
+        if (!guard.compareAndSet(false, true)) return;
         executor.execute(() -> {
             Bitmap argb = null;
             try {
@@ -421,12 +428,19 @@ final class WallpaperController {
             if (persist && argb != null && !destroyed) writeSnapshotBestEffort(argb);
             // Promote to HARDWARE for display.
             final Bitmap fb = toHardwareOrSelf(argb);
-            userLoading.set(false);
+            guard.set(false);
             if (!destroyed) host.runOnUiThread(() -> {
                 if (fb != null) {
                     crossfade(fb);
                     if (persist) prefs.edit().putString(prefKeyUri, uri.toString()).apply();
-                } else {
+                } else if (persist) {
+                    // Only a user-initiated pick falls back to the system
+                    // wallpaper / surfaces a toast on decode failure. A
+                    // slideshow-rotation failure (one bad, deleted, or
+                    // permission-revoked photo) must not evict the user's
+                    // chosen folder wallpaper or pop a toast during an
+                    // unattended rotation — just skip this tick; the next
+                    // interval tries the next image.
                     if (toastFn != null) toastFn.show(host.getString(R.string.toast_wallpaper_load_failed));
                     loadSystem();
                 }

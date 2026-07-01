@@ -9425,7 +9425,11 @@ public class LauncherActivity extends Activity {
      *  {@code {bucketId, displayName, count}} rows, sorted by name. Background
      *  thread; one query. Returns an empty list on failure. */
     private java.util.List<String[]> scanImageFolders() {
-        java.util.LinkedHashMap<String, String[]> byId = new java.util.LinkedHashMap<>();
+        // Names/order kept in a LinkedHashMap (stable, sorted-by-query iteration);
+        // counts kept in a parallel int[]-valued map so tallying a bucket's photo
+        // count doesn't round-trip through Integer.parseInt/toString per row.
+        java.util.LinkedHashMap<String, String[]> names  = new java.util.LinkedHashMap<>();
+        java.util.HashMap<String, int[]>          counts = new java.util.HashMap<>();
         Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
         // Use symbolic constants (available since API 29) where possible; fall
         // back to the raw column-name strings (identical value, works on all
@@ -9444,16 +9448,25 @@ public class LauncherActivity extends Activity {
                     while (cur.moveToNext()) {
                         String id = cur.getString(idCol);
                         if (id == null) continue;
-                        String nm = cur.getString(nmCol);
-                        if (nm == null || nm.isEmpty()) nm = "(unnamed)";
-                        String[] row = byId.get(id);
-                        if (row == null) byId.put(id, new String[]{ id, nm, "1" });
-                        else row[2] = Integer.toString(Integer.parseInt(row[2]) + 1);
+                        int[] c = counts.get(id);
+                        if (c == null) {
+                            String nm = cur.getString(nmCol);
+                            if (nm == null || nm.isEmpty()) nm = "(unnamed)";
+                            names.put(id, new String[]{ id, nm, null });
+                            counts.put(id, new int[]{ 1 });
+                        } else {
+                            c[0]++;
+                        }
                     }
                 }
             }
         } catch (Exception ignored) { /* return whatever we gathered */ }
-        return new ArrayList<>(byId.values());
+        java.util.List<String[]> out = new ArrayList<>(names.size());
+        for (String[] row : names.values()) {
+            row[2] = Integer.toString(counts.get(row[0])[0]);
+            out.add(row);
+        }
+        return out;
     }
 
     /** Apply the image at the current index via the wallpaper cross-fade
@@ -9563,18 +9576,26 @@ public class LauncherActivity extends Activity {
         applyCurrentSlideshowImage();
     }
 
+    /** Max retries / spacing for {@link #retryMediaStoreEnumerationIfNeeded}.
+     *  6 retries at 3 s each gives a slow TV box up to 18 s after boot for
+     *  MediaStore to come up before the slideshow gives up for the session. */
+    private static final int  SLIDESHOW_ENUM_MAX_RETRIES = 6;
+    private static final long SLIDESHOW_ENUM_RETRY_MS    = 3000L;
+
     /** Shared retry helper for MediaStore enumeration failures. Retries up to
-     *  3 times with 2-second delays. MediaStore is usually ready within 1-6
-     *  seconds of device boot. */
+     *  {@link #SLIDESHOW_ENUM_MAX_RETRIES} times, spaced
+     *  {@link #SLIDESHOW_ENUM_RETRY_MS} apart. MediaStore is usually ready
+     *  within 1-6 seconds of device boot, but slower TV boxes can take longer. */
     private void retryMediaStoreEnumerationIfNeeded(Runnable onReady) {
-        if (slideshowEnumerationRetries < 3 && slideshowFolderUri != null && !destroyed) {
+        if (slideshowEnumerationRetries < SLIDESHOW_ENUM_MAX_RETRIES
+                && slideshowFolderUri != null && !destroyed) {
             slideshowEnumerationRetries++;
             uiHandler.postDelayed(() -> {
                 if (!destroyed && slideshowFolderUri != null) {
                     slideshowImages = null;  // Force re-enumeration
                     enumerateSlideshowAsync(onReady);
                 }
-            }, 2000);
+            }, SLIDESHOW_ENUM_RETRY_MS);
         }
         // Exceeded retry limit - MediaStore is broken or folder is empty.
         // The caller will handle this gracefully (no-op or fallback).
