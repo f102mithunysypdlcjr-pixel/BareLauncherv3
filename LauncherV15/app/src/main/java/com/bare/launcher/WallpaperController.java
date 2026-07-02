@@ -401,7 +401,17 @@ final class WallpaperController {
                     BitmapFactory.decodeStream(is, null, opts);
                 }
                 if (opts.outWidth <= 0 || opts.outHeight <= 0) {
-                    userLoading.set(false);
+                    // Must reset the SAME guard that decodeAndCrossfade
+                    // acquired above (guard = persist ? userLoading :
+                    // slideshowLoading), not unconditionally userLoading.
+                    // A slideshow tick (persist=false) that hits a bad,
+                    // deleted, or unreadable image previously leaked
+                    // slideshowLoading stuck at true forever, since this
+                    // branch always cleared userLoading instead — every
+                    // later crossfadeUri() call's compareAndSet(false,true)
+                    // then failed silently and the rotation never advanced
+                    // again for the rest of the process.
+                    guard.set(false);
                     return;
                 }
                 opts.inSampleSize       = calcSampleSize(opts.outWidth, opts.outHeight);

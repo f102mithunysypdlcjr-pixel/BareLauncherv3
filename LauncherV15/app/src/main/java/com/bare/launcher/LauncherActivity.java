@@ -3072,6 +3072,19 @@ public class LauncherActivity extends Activity {
         // tags the focus callback that fires inside requestFocus().
         boolean fastNav = false;
 
+        // True only while setApps() is tearing down the previously-attached
+        // cells (the setVisibility(GONE) loop). Hiding a cell that currently
+        // holds real platform focus can make the platform hand focus to
+        // another still-attached cell as a side effect of that visibility
+        // change — not a real user navigation. CellView's focus listener
+        // checks this flag and no-ops entirely while it's set, so that kind
+        // of transient, platform-driven focus churn can never overwrite
+        // focusedIndex with something other than what setApps() itself
+        // decided. See setApps()'s keepIdx for the rest of the story — this
+        // is the fix for the "focus lands correctly on resume, then snaps to
+        // the last home-row cell" bug.
+        boolean rebuildingApps = false;
+
         // MENU_HIDE=3 (top), MENU_UNINSTALL=0, MENU_APP_INFO=1, MENU_MOVE=2 (bottom).
         // Values are identifiers only — the menu's visual order (Hide, Uninstall,
         // App Info, Move) is set by the order rows are added in ensureMenuOverlay
@@ -3338,6 +3351,25 @@ public class LauncherActivity extends Activity {
         void setApps(List<AppInfo> apps) {
             if (reorderMode) exitReorderMode(false); // guard: don't corrupt dragIndex on list refresh
             hideContextMenu();
+            // Capture the caller's intended focus target BEFORE any cell is
+            // torn down. This is the fix for "focus lands correctly, then
+            // snaps to the last home-row cell": a background PM-scan
+            // reconcile calls applyShelfApps -> setApps a second time while
+            // the shelf is already visible and correctly focused, and
+            // hiding the currently-focused cell in the loop below is a
+            // platform-level visibility change that CellView's own focus
+            // listener reacts to. Without rebuildingApps, that listener can
+            // overwrite focusedIndex mid-teardown with whatever the
+            // platform's focus handling did as a side effect of the GONE
+            // calls — not what the shelf actually intends. Suppressing the
+            // listener for the duration of the loop and re-deriving the
+            // new index from keepIdx (not from focusedIndex, which the
+            // suppressed-but-still-possible churn should no longer be able
+            // to touch, but which we no longer trust as the source either)
+            // makes the outcome deterministic regardless of platform focus
+            // quirks.
+            final int keepIdx = focusedIndex;
+            rebuildingApps = true;
             for (int i = 0; i < attached.size(); i++) {
                 CellView cv = attached.valueAt(i);
                 // Detach from any pending icon loads
@@ -3349,6 +3381,7 @@ public class LauncherActivity extends Activity {
                 cv.setVisibility(GONE); pool.add(cv);
             }
             attached.clear();
+            rebuildingApps = false;
             // Snapshot the caller's list into our own so subsequent
             // mutations from the activity don't reach inside the shelf
             // (the activity may rebuild appList during a package broadcast
@@ -3357,7 +3390,7 @@ public class LauncherActivity extends Activity {
             displayed.clear();
             if (apps != null && !apps.isEmpty()) displayed.addAll(apps);
             if (displayed.isEmpty()) { focusedIndex = 0; scrollX = 0; }
-            else                     focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
+            else                     focusedIndex = Math.min(keepIdx, displayed.size() - 1);
             totalW = displayed.size() * stride; centerX = 0; needsRefill = true;
             requestLayout();
             for (AppInfo app : displayed) preWarmBanner(app);
@@ -3865,6 +3898,14 @@ public class LauncherActivity extends Activity {
                 });
 
                 setOnFocusChangeListener((v, f) -> {
+                    // setApps() hides the old cells one by one while rebuilding
+                    // the shelf; if one of them currently holds real focus, that
+                    // visibility change is itself capable of moving platform
+                    // focus around as a side effect. That's not a real user
+                    // navigation — ignore it entirely (including the focusedIndex
+                    // bookkeeping below) so it can never race with setApps()'s
+                    // own, authoritative focus decision. See rebuildingApps.
+                    if (rebuildingApps) return;
                     if (!reorderMode) {
                         animate().cancel();
                         if (fastNav) {
@@ -4282,6 +4323,11 @@ public class LauncherActivity extends Activity {
         int     dragIndex    = -1;
         int     menuSelection = RecyclingShelfView.MENU_MOVE;
         boolean fastNav      = false;
+        // See RecyclingShelfView.rebuildingApps — same fix, same reason,
+        // mirrored here so the drawer is not exposed to the identical
+        // focus-corruption risk on a package-broadcast reconcile that
+        // lands while the drawer happens to be open and focused.
+        boolean rebuildingApps = false;
 
         AppDrawer(Context ctx) {
             super(ctx);
@@ -4352,6 +4398,14 @@ public class LauncherActivity extends Activity {
         void setApps(List<AppInfo> apps, int hcIgnored) {
             if (reorderMode) exitReorderMode(false);
             hideContextMenu();
+            // See RecyclingShelfView.setApps for the full rationale: capture
+            // the intended focus target and suppress the cell listener's
+            // focusedIndex bookkeeping while the old cells are hidden, so a
+            // platform focus reassignment triggered by that visibility
+            // change can't clobber it before this method applies its own
+            // decision.
+            final int keepIdx = focusedIndex;
+            rebuildingApps = true;
             for (int i = 0; i < attached.size(); i++) {
                 DrawerCell cv = attached.valueAt(i);
                 if (cv.boundApp != null) {
@@ -4362,10 +4416,11 @@ public class LauncherActivity extends Activity {
                 cv.setVisibility(GONE); pool.add(cv);
             }
             attached.clear();
+            rebuildingApps = false;
             displayed.clear();
             if (apps != null && !apps.isEmpty()) displayed.addAll(apps);
             if (displayed.isEmpty()) { focusedIndex = 0; scrollY = 0; }
-            else focusedIndex = Math.min(focusedIndex, displayed.size() - 1);
+            else focusedIndex = Math.min(keepIdx, displayed.size() - 1);
             recomputeContentHeight();
             requestLayout();
             // No eager pre-warm of the whole list: banner tiles are heavier
@@ -5018,6 +5073,10 @@ public class LauncherActivity extends Activity {
                 });
 
                 setOnFocusChangeListener((v, f) -> {
+                    // See CellView's identical guard: ignore focus churn that
+                    // is a side effect of setApps() hiding this cell during
+                    // teardown, not a real navigation. See rebuildingApps.
+                    if (rebuildingApps) return;
                     if (!reorderMode || moveActive) {
                         animate().cancel();
                         if (fastNav) {
