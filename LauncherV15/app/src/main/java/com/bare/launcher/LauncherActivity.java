@@ -975,6 +975,19 @@ public class LauncherActivity extends Activity {
             // "minute boundary in the OLD timezone is 7 minutes off the
             // boundary in the NEW timezone" case where the next scheduled
             // tick would otherwise have fired at the wrong instant.
+            //
+            // The Calendar backing ClockFormatter captures a TimeZone
+            // reference once at construction and never re-queries
+            // TimeZone.getDefault() on its own -- only an explicit
+            // setTimeZone() call picks up a real zone change (a different
+            // Olson ID: the box moved, or a Google TV re-detected
+            // location). Routine DST does NOT need this -- it's computed
+            // dynamically off the same TimeZone object based on the date,
+            // so an existing Calendar already handles a spring-forward /
+            // fall-back correctly on its own. Without this call, the
+            // reset()+repaint below still fired on a real timezone change
+            // but rendered the wrong (old-zone) time.
+            clockFmt.setTimeZone(java.util.TimeZone.getDefault());
             clockFmt.reset();
             long now = System.currentTimeMillis();
             tickClock(now);
@@ -6053,6 +6066,17 @@ public class LauncherActivity extends Activity {
         if (resolveCount) resolveHomeCount(visible.size());
         else if (homeCount < 0) homeCount = Math.max(1, prefs.getInt(KEY_HOME_COUNT, 1));
         int hc = effectiveHomeCount(visible.size());
+        // Clamp BEFORE building the home row so every applyShelfApps()
+        // caller gets a safe focusedIndex for free. Without this, a stale
+        // index left over from a shrunk home row (hiding several home
+        // apps at once via the keymap overlay, a smaller-count settings
+        // restore, or a cache-vs-live mismatch on cold start) falls
+        // through to RecyclingShelfView.setApps()'s
+        // Math.min(keepIdx, displayed.size() - 1) fallback, which always
+        // lands on the LAST cell -- the "focus snaps to the extreme
+        // right" symptom. The async-reconcile call site already guards
+        // this explicitly for its own case; this covers every caller.
+        if (hc > 0) s.focusedIndex = Math.min(s.focusedIndex, hc - 1);
         pushHomeRow(s, visible, hc);
         AppDrawer d = drawer;
         if (d != null) d.setApps(visible, hc);

@@ -10,6 +10,7 @@ import android.text.style.TypefaceSpan;
 
 import java.util.Calendar;
 import java.util.Locale;
+import java.util.TimeZone;
 
 /**
  * Encapsulates the home-screen clock's text formatting.
@@ -123,6 +124,35 @@ final class ClockFormatter {
         // lastShownWithDate / lastShownAs24h intentionally left as-is.
         // shouldRepaint will still trigger a repaint because
         // lastShownMinute = -1 forces it.
+    }
+
+    /**
+     * Update the timezone used to compute wall-clock values for all
+     * subsequent {@link #shouldRepaint} / {@link #format} calls.
+     *
+     * <p>{@link #cal} captures a {@link TimeZone} reference once, at
+     * construction ({@code Calendar.getInstance()}), and never re-queries
+     * {@link TimeZone#getDefault()} on its own -- Calendar has no
+     * auto-refresh behaviour. Without an explicit call to this method, a
+     * real timezone change (a different Olson zone -- the device moved, or
+     * a Google TV re-detected location) leaves the clock rendering in the
+     * OLD zone indefinitely, even though {@link #reset} forces a repaint.
+     * Routine DST transitions do NOT need this: they're computed
+     * dynamically off the same {@link TimeZone} object based on the date,
+     * so an existing Calendar already handles a spring-forward / fall-back
+     * correctly with no help.
+     *
+     * <p>Callers should follow this with {@link #reset()} so the next
+     * paint is unconditional and reflects the new zone immediately instead
+     * of waiting for the minute to naturally roll over.
+     *
+     * @param tz new default timezone (typically {@code TimeZone.getDefault()}
+     *           read fresh inside an {@code ACTION_TIMEZONE_CHANGED}
+     *           handler). {@code null} is ignored -- {@link Calendar#setTimeZone}
+     *           does not accept null and there's no sane fallback here.
+     */
+    void setTimeZone(TimeZone tz) {
+        if (tz != null) cal.setTimeZone(tz);
     }
 
     /**
