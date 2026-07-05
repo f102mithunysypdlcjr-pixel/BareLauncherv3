@@ -179,37 +179,6 @@ public class HomeDrawerModelTest {
         assertEquals(list(20), order);
     }
 
-    @Test public void move_demote_fullRow_swapsWithCellBelow() {
-        List<String> order = list(20);
-        int hc = 6;                              // home full
-        // index 2 = home col 2. DOWN -> the home row is full, so there is
-        // no segment left to shrink into: this falls through to a straight
-        // vertical swap with the non-home cell directly below (index 8),
-        // the exact mirror of move_promote_fullRow_swapsWithCellAbove
-        // (same two indices, opposite direction).
-        HomeDrawerModel.MoveResult r = HomeDrawerModel.moveDown(order, 2, hc);
-        assertEquals(6, r.homeCount);            // home stays full -- no demote
-        assertEquals(8, r.index);                // moved app now at row1 col2
-        assertEquals("p2", order.get(8));        // moved app in the vacated slot
-        assertEquals("p8", order.get(2));        // cell-below app -> home slot
-        assertEquals(Arrays.asList("p0", "p1", "p8", "p3", "p4", "p5"), order.subList(0, 6));
-    }
-
-    @Test public void move_upThenDown_fullRow_isRoundTrip() {
-        // The behaviour move_demote_fullRow_swapsWithCellBelow guarantees in
-        // isolation should also compose: swapping an app up into a full
-        // home row and then immediately back down must restore the
-        // original order exactly, with homeCount never moving.
-        List<String> order = list(12);
-        int hc = 6;
-        HomeDrawerModel.MoveResult up = HomeDrawerModel.moveUp(order, 7, hc);
-        assertEquals(6, up.homeCount);
-        HomeDrawerModel.MoveResult down = HomeDrawerModel.moveDown(order, up.index, up.homeCount);
-        assertEquals(6, down.homeCount);
-        assertEquals(7, down.index);
-        assertEquals(list(12), order);           // exact round trip
-    }
-
     @Test public void move_demoteToZero_thenPromoteBack() {
         List<String> order = list(10);
         int hc = 1;

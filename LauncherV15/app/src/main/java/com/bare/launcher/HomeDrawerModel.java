@@ -29,11 +29,8 @@ import java.util.List;
  * is no separate favourites flag. In the drawer's Move mode, pushing an app
  * UP across the home boundary promotes it into the home row
  * ({@code homeCount++}, capped at {@link #COLS}); pushing a home app DOWN out
- * of a not-yet-full row 0 demotes it ({@code homeCount--}). Pushing one out
- * of a FULL row 0 is instead a same-column swap with the row below --
- * mirroring the full-row case of pushing UP -- so {@code homeCount} stays
- * put. Everything else is an ordinary grid swap that leaves
- * {@code homeCount} untouched.
+ * of row 0 demotes it ({@code homeCount--}). Everything else is an ordinary
+ * grid swap that leaves {@code homeCount} untouched.
  *
  * <p>This class is deliberately Android-free so the fiddly index math and the
  * promote/demote rules can be exercised by fast JVM unit tests
@@ -297,18 +294,10 @@ final class HomeDrawerModel {
      * Move the dragged app DOWN one row.
      *
      * <ul>
-     *   <li><b>Home row, not full</b> (row 0, {@code 0 < homeCount < COLS}):
-     *       DEMOTE. The app leaves the home segment and becomes the first
-     *       non-home app; {@code homeCount--}. (It stays in the drawer —
-     *       only its home membership changes.)</li>
-     *   <li><b>Home row, full</b> (row 0, {@code homeCount == COLS}): falls
-     *       through to the generic vertical-swap case below instead of
-     *       demoting -- a straight swap with the cell directly below (same
-     *       column), mirroring {@link #moveUp}'s full-home-row case, so
-     *       {@code homeCount} is unchanged. This is what makes an UP that
-     *       swapped an app into a full home row reversible: pressing DOWN
-     *       on it swaps it right back instead of demoting a different,
-     *       uninvolved app out of home.</li>
+     *   <li><b>Home row</b> (row 0, {@code homeCount > 0}): DEMOTE. The app
+     *       leaves the home segment and becomes the first non-home app;
+     *       {@code homeCount--}. (It stays in the drawer — only its home
+     *       membership changes.)</li>
      *   <li><b>Any other row</b>: ordinary vertical swap with the cell one row
      *       down ({@link #COLS} positions later), snapping to the nearest existing cell
      *       when the row below is shorter. No-op on the last row.</li>
@@ -320,29 +309,16 @@ final class HomeDrawerModel {
         if (index < 0 || size == 0) return new MoveResult(homeCount, Math.max(0, index));
         int row = rowOf(index, homeCount);
 
-        if (homeCount > 0 && homeCount < COLS && row == 0) {
+        if (homeCount > 0 && row == 0) {
             // DEMOTE: move just past the (shrinking) home segment so it becomes
             // the first non-home app. Removing index then inserting at
             // homeCount-1 lands it exactly at the head of the non-home run.
-            //
-            // Guarded to the not-full case only. When homeCount == COLS,
-            // this condition is now false and execution falls through to
-            // the generic vertical-swap code below -- deliberately: the
-            // only way an app can be sitting in a FULL home row is via
-            // moveUp's vertical swap (there's no PROMOTE path into a full
-            // row), so DOWN undoes that swap symmetrically instead of
-            // demoting a different, uninvolved app out of home. This
-            // mirrors moveUp's own "row == base && homeCount < COLS" PROMOTE
-            // guard falling through to its generic swap-with-above case.
             T app = order.remove(index);
             int dest = homeCount - 1;
             order.add(dest, app);
             return new MoveResult(homeCount - 1, dest);
         }
         // Ordinary vertical swap with the cell directly below (same column).
-        // Also handles the full-home-row DOWN case falling through from
-        // above: row is 0, homeCount == COLS, so this swaps with row 1 at
-        // the same column -- the exact inverse of moveUp's full-row swap.
         int col = colOf(index, homeCount);
         int belowLen = rowLength(row + 1, size, homeCount);
         if (belowLen <= 0) return new MoveResult(homeCount, index); // last row

@@ -3375,7 +3375,8 @@ public class LauncherActivity extends Activity {
             // overwrite focusedIndex mid-teardown with whatever the
             // platform's focus handling did as a side effect of the GONE
             // calls — not what the shelf actually intends. Suppressing the
-            // listener for the duration of the loop and re-deriving the
+            // listener for the full teardown-and-rebuild sequence (see the
+            // extended note further down) and re-deriving the
             // new index from keepIdx (not from focusedIndex, which the
             // suppressed-but-still-possible churn should no longer be able
             // to touch, but which we no longer trust as the source either)
@@ -3394,7 +3395,23 @@ public class LauncherActivity extends Activity {
                 cv.setVisibility(GONE); pool.add(cv);
             }
             attached.clear();
-            rebuildingApps = false;
+            // rebuildingApps stays true past this point -- deliberately NOT
+            // reset here. On real hardware the platform's focus reassignment
+            // in reaction to the GONE calls above does not always land inside
+            // this synchronous loop; it can be dispatched slightly later
+            // (e.g. during the requestLayout() pass just below), which used
+            // to land AFTER rebuildingApps had already flipped back to
+            // false -- so CellView's focus listener ran un-suppressed and
+            // called positionRing() against whatever cell the platform's
+            // focus search picked (observed landing on the shelf's rightmost
+            // cell), producing a one-frame visible ring flash to the far
+            // right before the legitimate posted requestFocusOnIndex() below
+            // ran and snapped it back to the correct cell. Keeping
+            // rebuildingApps true across that entire gap and clearing it
+            // only once the posted callback is about to run closes the
+            // window completely: every focus reaction in between is
+            // suppressed, not just the ones inside this loop.
+            //
             // Snapshot the caller's list into our own so subsequent
             // mutations from the activity don't reach inside the shelf
             // (the activity may rebuild appList during a package broadcast
@@ -3409,7 +3426,15 @@ public class LauncherActivity extends Activity {
             for (AppInfo app : displayed) preWarmBanner(app);
             final int targetIdx = focusedIndex;
             final boolean snap = snapNextFocus; snapNextFocus = false;
-            post(() -> requestFocusOnIndex(targetIdx, snap));
+            post(() -> {
+                // Only now is it safe to let the focus listener run normally
+                // again -- requestFocusOnIndex() below is about to make the
+                // real, authoritative focus call, so any stray platform
+                // reassignment that happened while we were torn down has
+                // already been superseded by the time this runs.
+                rebuildingApps = false;
+                requestFocusOnIndex(targetIdx, snap);
+            });
         }
 
         void requestFocusOnIndex(int idx) { requestFocusOnIndex(idx, false); }
