@@ -3098,6 +3098,21 @@ public class LauncherActivity extends Activity {
         // the last home-row cell" bug.
         boolean rebuildingApps = false;
 
+        // Ticket counter for setApps(). Cold start can call setApps() twice
+        // in quick succession -- once from the cache fast-path, again when
+        // the background PM-scan reconcile lands -- and each call posts its
+        // own requestFocusOnIndex() for the following frame. If the FIRST
+        // call's posted work runs after the SECOND call has already replaced
+        // displayed/focusedIndex, it would briefly refocus using its own,
+        // now-stale targetIdx before the second (correct) posted call runs
+        // right behind it and corrects it -- a small, fast focus/ring
+        // flicker distinct from (and on top of) the rebuildingApps race
+        // above. Each setApps() call takes the next ticket and stamps its
+        // posted lambda with it; the lambda checks the ticket is still
+        // current before doing anything, so a superseded call's posted work
+        // is simply dropped instead of briefly acting on stale data.
+        int setAppsGen = 0;
+
         // MENU_HIDE=3 (top), MENU_UNINSTALL=0, MENU_APP_INFO=1, MENU_MOVE=2 (bottom).
         // Values are identifiers only — the menu's visual order (Hide, Uninstall,
         // App Info, Move) is set by the order rows are added in ensureMenuOverlay
@@ -3362,6 +3377,7 @@ public class LauncherActivity extends Activity {
         @Override public boolean hasOverlappingRendering() { return false; }
 
         void setApps(List<AppInfo> apps) {
+            final int myGen = ++setAppsGen;
             if (reorderMode) exitReorderMode(false); // guard: don't corrupt dragIndex on list refresh
             hideContextMenu();
             // Capture the caller's intended focus target BEFORE any cell is
@@ -3427,6 +3443,13 @@ public class LauncherActivity extends Activity {
             final int targetIdx = focusedIndex;
             final boolean snap = snapNextFocus; snapNextFocus = false;
             post(() -> {
+                // A newer setApps() has since started and posted its own,
+                // fresher callback -- that one is the authoritative answer
+                // now, not this one. Leave rebuildingApps alone too: it's
+                // either already false (the newer call's own callback beat
+                // us here) or the newer call is still mid-teardown and will
+                // clear it itself when its turn comes.
+                if (myGen != setAppsGen) return;
                 // Only now is it safe to let the focus listener run normally
                 // again -- requestFocusOnIndex() below is about to make the
                 // real, authoritative focus call, so any stray platform
