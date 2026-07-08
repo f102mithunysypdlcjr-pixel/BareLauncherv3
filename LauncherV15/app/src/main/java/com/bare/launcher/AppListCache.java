@@ -107,6 +107,22 @@ final class AppListCache {
      *  10 000 apps is well above any realistic install. */
     private static final int MAX_ENTRIES = 10_000;
 
+    /** Same synthetic-packageName prefix {@link AppInfo#tvInput} uses.
+     *  Duplicated here (rather than exposing AppInfo's private literal)
+     *  since {@link #toAppInfo} needs it purely as a string prefix check —
+     *  no coupling to AppInfo's internals beyond the format both already
+     *  agree on. */
+    private static final String TVINPUT_PKG_PREFIX = "tvinput://";
+
+    /** Placeholder written to the on-disk "activity class" field for a
+     *  TV-input entry, which has no real activity class. Any non-empty
+     *  string works — {@link #parse}/{@link #serialize} only require the
+     *  field to be non-empty, and {@link #toAppInfo} never reads it back
+     *  for a tvinput:// entry (it branches to {@link AppInfo#tvInput}
+     *  before the class field is used). Chosen to be self-documenting in
+     *  a hex dump / manual inspection of the cache file. */
+    private static final String TVINPUT_CLASS_PLACEHOLDER = "tvinput";
+
     // ── Pure-Java core (JVM testable) ─────────────────────────────────────
 
     /** Read-only view of one cache entry. The shipped {@link AppInfo}
@@ -296,13 +312,24 @@ final class AppListCache {
      *  serialisation path the JVM tests exercise. */
     static Entry from(final AppInfo a) {
         if (a == null) return null;
-        // TV-input entries are not persisted to the cold-start cache — they
-        // carry no serialisable package/activity and are re-enumerated fresh
-        // from the TV Input Framework on every {@code loadApps} scan. Skipping
-        // them here keeps the cache to real apps; the live order (KEY_APP_ORDER)
-        // still records their position so they reappear where the user put them.
-        if (a.tvInputId != null) return null;
-        final String cls = a.component != null ? a.component.getClassName() : null;
+        // TV-input entries used to be skipped here — "re-enumerated fresh
+        // from the TV Input Framework on every loadApps scan" — on the
+        // theory that KEY_APP_ORDER alone would put them back in place.
+        // In practice that meant the input's shelf slot didn't exist for
+        // the instant cold-start paint (which reads only this cache), so
+        // the slot had to be spliced in a moment later once the background
+        // PM scan's TvInputs.enumerate() call completed — visible on every
+        // restart as the input tile popping into its home-row position and
+        // shoving/overlapping the app next to it. Persisting the input here
+        // too (its synthetic "tvinput://" packageName is already a stable,
+        // self-sufficient key — see AppInfo.tvInput) lets it render in its
+        // correct slot on the very first frame, same as any real app. The
+        // 3-line format requires a non-empty class field; a TV input has no
+        // real activity class, so TVINPUT_CLASS_PLACEHOLDER stands in — it
+        // is never read back as a real ComponentName (see toAppInfo).
+        final String cls = a.tvInputId != null
+                ? TVINPUT_CLASS_PLACEHOLDER
+                : (a.component != null ? a.component.getClassName() : null);
         return new Entry() {
             @Override public String pkg()           { return a.packageName; }
             @Override public String label()         { return a.label; }
@@ -420,6 +447,14 @@ final class AppListCache {
      * {@code null}-ri AppInfo instances.
      */
     static AppInfo toAppInfo(String pkg, String label, String activityClass) {
+        // Mirror of the tvinput:// packageName convention AppInfo.tvInput()
+        // establishes — a cached TV-input entry round-trips back through
+        // that factory instead of the real-app path below, which would
+        // otherwise build a nonsense ComponentName from the placeholder
+        // class field written in from().
+        if (pkg != null && pkg.startsWith(TVINPUT_PKG_PREFIX)) {
+            return AppInfo.tvInput(pkg.substring(TVINPUT_PKG_PREFIX.length()), label);
+        }
         ComponentName cn = new ComponentName(pkg, activityClass);
         return new AppInfo(pkg, label, cn, null);
     }
