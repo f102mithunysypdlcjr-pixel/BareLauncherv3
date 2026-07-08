@@ -1,0 +1,216 @@
+diff --git a/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java b/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
+index 67ba0a6..6b19f46 100644
+--- a/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
++++ b/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
+@@ -4250,9 +4250,26 @@ public class LauncherActivity extends Activity {
+                     drawIcon(canvas, cx, icy);
+                 }
+ 
+-                // Show label: always for focused+normal, always for drag target in reorder
++                // Show label: always for focused+normal, always for drag target in reorder.
++                //
++                // The !rebuildingApps guard closes a gap the ring-position
++                // fix above doesn't: isFocused() reads real, low-level
++                // Android focus state directly, completely bypassing
++                // CellView's own OnFocusChangeListener (and therefore the
++                // rebuildingApps suppression inside it). During the
++                // teardown-and-rebuild window the platform can genuinely,
++                // if transiently, hand real focus to some other still-
++                // attached cell as a side effect of the GONE calls -- the
++                // ring correctly ignores that now, but onDraw() doesn't go
++                // through the listener at all, so isFocused() would still
++                // honestly report "yes" for whichever cell the platform
++                // picked and draw ITS label for a frame: a small, fast
++                // label flash on the wrong cell with the ring itself
++                // staying put. Suppressing the label the same way the ring
++                // is suppressed -- for the identical window, using the
++                // identical flag -- closes this the same way.
+                 boolean showLabel = (!labelDisplay.isEmpty()) &&
+-                        ((isFocused() && !reorderMode) || isDragTarget);
++                        ((isFocused() && !reorderMode && !rebuildingApps) || isDragTarget);
+                 if (showLabel) {
+                     float labelY = icy + labelOffsetY;
+                     if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);
+diff --git a/LauncherV15/bare-launcher-slideshow-fixes.patch b/LauncherV15/bare-launcher-slideshow-fixes.patch
+deleted file mode 100644
+index eb098cc..0000000
+--- a/LauncherV15/bare-launcher-slideshow-fixes.patch
++++ /dev/null
+@@ -1,125 +0,0 @@
+---- a/WallpaperController.java
+-+++ b/WallpaperController.java
+-@@ -124,6 +124,12 @@
+-     private final ThreadPoolExecutor      executor;
+-     private final AtomicBoolean           systemLoading  = new AtomicBoolean(false);
+-     private final AtomicBoolean           userLoading    = new AtomicBoolean(false);
+-+    /** Separate from {@link #userLoading} so a slideshow rotation tick and
+-+     *  a manual wallpaper pick landing in the same few hundred ms don't
+-+     *  silently drop one another via a shared guard. Both still funnel
+-+     *  through the single-thread {@link #executor}, so they queue and run
+-+     *  sequentially rather than racing. */
+-+    private final AtomicBoolean           slideshowLoading = new AtomicBoolean(false);
+- 
+-     /** Volatile because the executor thread reads them inside
+-      *  {@link #wpDrawable} / {@link #calcSampleSize}. Without volatile,
+-@@ -384,7 +390,8 @@
+-      *  {@link #crossfadeUri}. {@code persist} controls whether the URI
+-      *  is saved to prefs and the snapshot file is written. */
+-     private void decodeAndCrossfade(Uri uri, boolean persist) {
+--        if (!userLoading.compareAndSet(false, true)) return;
+-+        final AtomicBoolean guard = persist ? userLoading : slideshowLoading;
+-+        if (!guard.compareAndSet(false, true)) return;
+-         executor.execute(() -> {
+-             Bitmap argb = null;
+-             try {
+-@@ -421,12 +428,19 @@
+-             if (persist && argb != null && !destroyed) writeSnapshotBestEffort(argb);
+-             // Promote to HARDWARE for display.
+-             final Bitmap fb = toHardwareOrSelf(argb);
+--            userLoading.set(false);
+-+            guard.set(false);
+-             if (!destroyed) host.runOnUiThread(() -> {
+-                 if (fb != null) {
+-                     crossfade(fb);
+-                     if (persist) prefs.edit().putString(prefKeyUri, uri.toString()).apply();
+--                } else {
+-+                } else if (persist) {
+-+                    // Only a user-initiated pick falls back to the system
+-+                    // wallpaper / surfaces a toast on decode failure. A
+-+                    // slideshow-rotation failure (one bad, deleted, or
+-+                    // permission-revoked photo) must not evict the user's
+-+                    // chosen folder wallpaper or pop a toast during an
+-+                    // unattended rotation — just skip this tick; the next
+-+                    // interval tries the next image.
+-                     if (toastFn != null) toastFn.show(host.getString(R.string.toast_wallpaper_load_failed));
+-                     loadSystem();
+-                 }
+---- a/LauncherActivity.java
+-+++ b/LauncherActivity.java
+-@@ -9425,7 +9425,11 @@
+-      *  {@code {bucketId, displayName, count}} rows, sorted by name. Background
+-      *  thread; one query. Returns an empty list on failure. */
+-     private java.util.List<String[]> scanImageFolders() {
+--        java.util.LinkedHashMap<String, String[]> byId = new java.util.LinkedHashMap<>();
+-+        // Names/order kept in a LinkedHashMap (stable, sorted-by-query iteration);
+-+        // counts kept in a parallel int[]-valued map so tallying a bucket's photo
+-+        // count doesn't round-trip through Integer.parseInt/toString per row.
+-+        java.util.LinkedHashMap<String, String[]> names  = new java.util.LinkedHashMap<>();
+-+        java.util.HashMap<String, int[]>          counts = new java.util.HashMap<>();
+-         Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+-         // Use symbolic constants (available since API 29) where possible; fall
+-         // back to the raw column-name strings (identical value, works on all
+-@@ -9444,16 +9448,25 @@
+-                     while (cur.moveToNext()) {
+-                         String id = cur.getString(idCol);
+-                         if (id == null) continue;
+--                        String nm = cur.getString(nmCol);
+--                        if (nm == null || nm.isEmpty()) nm = "(unnamed)";
+--                        String[] row = byId.get(id);
+--                        if (row == null) byId.put(id, new String[]{ id, nm, "1" });
+--                        else row[2] = Integer.toString(Integer.parseInt(row[2]) + 1);
+-+                        int[] c = counts.get(id);
+-+                        if (c == null) {
+-+                            String nm = cur.getString(nmCol);
+-+                            if (nm == null || nm.isEmpty()) nm = "(unnamed)";
+-+                            names.put(id, new String[]{ id, nm, null });
+-+                            counts.put(id, new int[]{ 1 });
+-+                        } else {
+-+                            c[0]++;
+-+                        }
+-                     }
+-                 }
+-             }
+-         } catch (Exception ignored) { /* return whatever we gathered */ }
+--        return new ArrayList<>(byId.values());
+-+        java.util.List<String[]> out = new ArrayList<>(names.size());
+-+        for (String[] row : names.values()) {
+-+            row[2] = Integer.toString(counts.get(row[0])[0]);
+-+            out.add(row);
+-+        }
+-+        return out;
+-     }
+- 
+-     /** Apply the image at the current index via the wallpaper cross-fade
+-@@ -9563,18 +9576,26 @@
+-         applyCurrentSlideshowImage();
+-     }
+- 
+-+    /** Max retries / spacing for {@link #retryMediaStoreEnumerationIfNeeded}.
+-+     *  6 retries at 3 s each gives a slow TV box up to 18 s after boot for
+-+     *  MediaStore to come up before the slideshow gives up for the session. */
+-+    private static final int  SLIDESHOW_ENUM_MAX_RETRIES = 6;
+-+    private static final long SLIDESHOW_ENUM_RETRY_MS    = 3000L;
+-+
+-     /** Shared retry helper for MediaStore enumeration failures. Retries up to
+--     *  3 times with 2-second delays. MediaStore is usually ready within 1-6
+--     *  seconds of device boot. */
+-+     *  {@link #SLIDESHOW_ENUM_MAX_RETRIES} times, spaced
+-+     *  {@link #SLIDESHOW_ENUM_RETRY_MS} apart. MediaStore is usually ready
+-+     *  within 1-6 seconds of device boot, but slower TV boxes can take longer. */
+-     private void retryMediaStoreEnumerationIfNeeded(Runnable onReady) {
+--        if (slideshowEnumerationRetries < 3 && slideshowFolderUri != null && !destroyed) {
+-+        if (slideshowEnumerationRetries < SLIDESHOW_ENUM_MAX_RETRIES
+-+                && slideshowFolderUri != null && !destroyed) {
+-             slideshowEnumerationRetries++;
+-             uiHandler.postDelayed(() -> {
+-                 if (!destroyed && slideshowFolderUri != null) {
+-                     slideshowImages = null;  // Force re-enumeration
+-                     enumerateSlideshowAsync(onReady);
+-                 }
+--            }, 2000);
+-+            }, SLIDESHOW_ENUM_RETRY_MS);
+-         }
+-         // Exceeded retry limit - MediaStore is broken or folder is empty.
+-         // The caller will handle this gracefully (no-op or fallback).
+diff --git a/LauncherV15/fix-homecount-corruption-v4.patch b/LauncherV15/fix-homecount-corruption-v4.patch
+deleted file mode 100644
+index d6c7afd..0000000
+--- a/LauncherV15/fix-homecount-corruption-v4.patch
++++ /dev/null
+@@ -1,46 +0,0 @@
+---- /mnt/user-data/uploads/LauncherActivity.java	2026-07-01 02:41:08.752431000 +0000
+-+++ /home/claude/LauncherActivity_v4.java	2026-07-01 02:49:52.391297179 +0000
+-@@ -5231,7 +5231,7 @@
+-                     // setApps queues requestFocusOnIndex(0) which drains before the
+-                     // focusRestoreListener fires → visible flash to first app on reboot.
+-                     s.focusedIndex = prefs.getInt(KEY_SCROLL_IDX, 0);
+--                    applyShelfApps(s);
+-+                    applyShelfApps(s, false);
+-                 }
+-             } else {
+-                 // Either no cache or it failed to parse. Drop any partial
+-@@ -5942,7 +5942,23 @@
+-      *  per overlay-open, and {@link #preWarmIcon} early-returns on
+-      *  cache hit so the second-and-subsequent opens are O(N) cheap
+-      *  containsKey checks. */
+--    private void applyShelfApps(RecyclingShelfView s) {
+-+    private void applyShelfApps(RecyclingShelfView s) { applyShelfApps(s, true); }
+-+
+-+    /** @param resolveCount  false for the cold-start cache pre-paint ONLY.
+-+     *  {@link AppListCache} deliberately excludes TV inputs (they are not
+-+     *  serialisable and are re-enumerated fresh from TIF every scan — see
+-+     *  {@link AppListCache#from}), so the cache-derived {@code visible}
+-+     *  list is missing however many TV inputs the device has. Feeding that
+-+     *  undercount into {@link #resolveHomeCount} would clamp — and PERSIST
+-+     *  — {@link #homeCount} down to the smaller cache-only size, silently
+-+     *  and permanently shrinking the home row (and stranding the saved
+-+     *  scroll index against a shelf smaller than the one it was saved
+-+     *  against) on every cold start where real-app count < the true count.
+-+     *  The authoritative call from the async PM-scan reconcile (which DOES
+-+     *  include TV inputs) passes {@code true} and resolves/persists
+-+     *  normally; the pre-paint call primes {@link #homeCount} from prefs
+-+     *  for rendering only, without the shrink-and-save side effect. */
+-+    private void applyShelfApps(RecyclingShelfView s, boolean resolveCount) {
+-         if (s == null) return;
+-         // Single source of truth: appList (full order) minus hiddenApps, split
+-         // at the home boundary. The home row shows the first homeCount apps;
+-@@ -5950,7 +5966,8 @@
+-         // snapshot into their own displayed list, so the shared visible list
+-         // (possibly the reused visibleScratch) never leaks across UI events.
+-         List<AppInfo> visible = buildVisibleList();
+--        resolveHomeCount(visible.size());
+-+        if (resolveCount) resolveHomeCount(visible.size());
+-+        else if (homeCount < 0) homeCount = Math.max(1, prefs.getInt(KEY_HOME_COUNT, 1));
+-         int hc = effectiveHomeCount(visible.size());
+-         pushHomeRow(s, visible, hc);
+-         AppDrawer d = drawer;

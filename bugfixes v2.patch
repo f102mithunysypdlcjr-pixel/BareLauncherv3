@@ -1,0 +1,170 @@
+diff --git a/LauncherV15/app/src/main/java/com/bare/launcher/HomeDrawerModel.java b/LauncherV15/app/src/main/java/com/bare/launcher/HomeDrawerModel.java
+index f195c1c..1a11b26 100644
+--- a/LauncherV15/app/src/main/java/com/bare/launcher/HomeDrawerModel.java
++++ b/LauncherV15/app/src/main/java/com/bare/launcher/HomeDrawerModel.java
+@@ -29,11 +29,8 @@ import java.util.List;
+  * is no separate favourites flag. In the drawer's Move mode, pushing an app
+  * UP across the home boundary promotes it into the home row
+  * ({@code homeCount++}, capped at {@link #COLS}); pushing a home app DOWN out
+- * of a not-yet-full row 0 demotes it ({@code homeCount--}). Pushing one out
+- * of a FULL row 0 is instead a same-column swap with the row below --
+- * mirroring the full-row case of pushing UP -- so {@code homeCount} stays
+- * put. Everything else is an ordinary grid swap that leaves
+- * {@code homeCount} untouched.
++ * of row 0 demotes it ({@code homeCount--}). Everything else is an ordinary
++ * grid swap that leaves {@code homeCount} untouched.
+  *
+  * <p>This class is deliberately Android-free so the fiddly index math and the
+  * promote/demote rules can be exercised by fast JVM unit tests
+@@ -297,18 +294,10 @@ final class HomeDrawerModel {
+      * Move the dragged app DOWN one row.
+      *
+      * <ul>
+-     *   <li><b>Home row, not full</b> (row 0, {@code 0 < homeCount < COLS}):
+-     *       DEMOTE. The app leaves the home segment and becomes the first
+-     *       non-home app; {@code homeCount--}. (It stays in the drawer —
+-     *       only its home membership changes.)</li>
+-     *   <li><b>Home row, full</b> (row 0, {@code homeCount == COLS}): falls
+-     *       through to the generic vertical-swap case below instead of
+-     *       demoting -- a straight swap with the cell directly below (same
+-     *       column), mirroring {@link #moveUp}'s full-home-row case, so
+-     *       {@code homeCount} is unchanged. This is what makes an UP that
+-     *       swapped an app into a full home row reversible: pressing DOWN
+-     *       on it swaps it right back instead of demoting a different,
+-     *       uninvolved app out of home.</li>
++     *   <li><b>Home row</b> (row 0, {@code homeCount > 0}): DEMOTE. The app
++     *       leaves the home segment and becomes the first non-home app;
++     *       {@code homeCount--}. (It stays in the drawer — only its home
++     *       membership changes.)</li>
+      *   <li><b>Any other row</b>: ordinary vertical swap with the cell one row
+      *       down ({@link #COLS} positions later), snapping to the nearest existing cell
+      *       when the row below is shorter. No-op on the last row.</li>
+@@ -320,29 +309,16 @@ final class HomeDrawerModel {
+         if (index < 0 || size == 0) return new MoveResult(homeCount, Math.max(0, index));
+         int row = rowOf(index, homeCount);
+ 
+-        if (homeCount > 0 && homeCount < COLS && row == 0) {
++        if (homeCount > 0 && row == 0) {
+             // DEMOTE: move just past the (shrinking) home segment so it becomes
+             // the first non-home app. Removing index then inserting at
+             // homeCount-1 lands it exactly at the head of the non-home run.
+-            //
+-            // Guarded to the not-full case only. When homeCount == COLS,
+-            // this condition is now false and execution falls through to
+-            // the generic vertical-swap code below -- deliberately: the
+-            // only way an app can be sitting in a FULL home row is via
+-            // moveUp's vertical swap (there's no PROMOTE path into a full
+-            // row), so DOWN undoes that swap symmetrically instead of
+-            // demoting a different, uninvolved app out of home. This
+-            // mirrors moveUp's own "row == base && homeCount < COLS" PROMOTE
+-            // guard falling through to its generic swap-with-above case.
+             T app = order.remove(index);
+             int dest = homeCount - 1;
+             order.add(dest, app);
+             return new MoveResult(homeCount - 1, dest);
+         }
+         // Ordinary vertical swap with the cell directly below (same column).
+-        // Also handles the full-home-row DOWN case falling through from
+-        // above: row is 0, homeCount == COLS, so this swaps with row 1 at
+-        // the same column -- the exact inverse of moveUp's full-row swap.
+         int col = colOf(index, homeCount);
+         int belowLen = rowLength(row + 1, size, homeCount);
+         if (belowLen <= 0) return new MoveResult(homeCount, index); // last row
+diff --git a/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java b/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
+index b107ae0..a085c91 100644
+--- a/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
++++ b/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
+@@ -3375,7 +3375,8 @@ public class LauncherActivity extends Activity {
+             // overwrite focusedIndex mid-teardown with whatever the
+             // platform's focus handling did as a side effect of the GONE
+             // calls — not what the shelf actually intends. Suppressing the
+-            // listener for the duration of the loop and re-deriving the
++            // listener for the full teardown-and-rebuild sequence (see the
++            // extended note further down) and re-deriving the
+             // new index from keepIdx (not from focusedIndex, which the
+             // suppressed-but-still-possible churn should no longer be able
+             // to touch, but which we no longer trust as the source either)
+@@ -3394,7 +3395,23 @@ public class LauncherActivity extends Activity {
+                 cv.setVisibility(GONE); pool.add(cv);
+             }
+             attached.clear();
+-            rebuildingApps = false;
++            // rebuildingApps stays true past this point -- deliberately NOT
++            // reset here. On real hardware the platform's focus reassignment
++            // in reaction to the GONE calls above does not always land inside
++            // this synchronous loop; it can be dispatched slightly later
++            // (e.g. during the requestLayout() pass just below), which used
++            // to land AFTER rebuildingApps had already flipped back to
++            // false -- so CellView's focus listener ran un-suppressed and
++            // called positionRing() against whatever cell the platform's
++            // focus search picked (observed landing on the shelf's rightmost
++            // cell), producing a one-frame visible ring flash to the far
++            // right before the legitimate posted requestFocusOnIndex() below
++            // ran and snapped it back to the correct cell. Keeping
++            // rebuildingApps true across that entire gap and clearing it
++            // only once the posted callback is about to run closes the
++            // window completely: every focus reaction in between is
++            // suppressed, not just the ones inside this loop.
++            //
+             // Snapshot the caller's list into our own so subsequent
+             // mutations from the activity don't reach inside the shelf
+             // (the activity may rebuild appList during a package broadcast
+@@ -3409,7 +3426,15 @@ public class LauncherActivity extends Activity {
+             for (AppInfo app : displayed) preWarmBanner(app);
+             final int targetIdx = focusedIndex;
+             final boolean snap = snapNextFocus; snapNextFocus = false;
+-            post(() -> requestFocusOnIndex(targetIdx, snap));
++            post(() -> {
++                // Only now is it safe to let the focus listener run normally
++                // again -- requestFocusOnIndex() below is about to make the
++                // real, authoritative focus call, so any stray platform
++                // reassignment that happened while we were torn down has
++                // already been superseded by the time this runs.
++                rebuildingApps = false;
++                requestFocusOnIndex(targetIdx, snap);
++            });
+         }
+ 
+         void requestFocusOnIndex(int idx) { requestFocusOnIndex(idx, false); }
+diff --git a/LauncherV15/app/src/test/java/com/bare/launcher/HomeDrawerModelTest.java b/LauncherV15/app/src/test/java/com/bare/launcher/HomeDrawerModelTest.java
+index ce6eacf..b55eb49 100644
+--- a/LauncherV15/app/src/test/java/com/bare/launcher/HomeDrawerModelTest.java
++++ b/LauncherV15/app/src/test/java/com/bare/launcher/HomeDrawerModelTest.java
+@@ -179,37 +179,6 @@ public class HomeDrawerModelTest {
+         assertEquals(list(20), order);
+     }
+ 
+-    @Test public void move_demote_fullRow_swapsWithCellBelow() {
+-        List<String> order = list(20);
+-        int hc = 6;                              // home full
+-        // index 2 = home col 2. DOWN -> the home row is full, so there is
+-        // no segment left to shrink into: this falls through to a straight
+-        // vertical swap with the non-home cell directly below (index 8),
+-        // the exact mirror of move_promote_fullRow_swapsWithCellAbove
+-        // (same two indices, opposite direction).
+-        HomeDrawerModel.MoveResult r = HomeDrawerModel.moveDown(order, 2, hc);
+-        assertEquals(6, r.homeCount);            // home stays full -- no demote
+-        assertEquals(8, r.index);                // moved app now at row1 col2
+-        assertEquals("p2", order.get(8));        // moved app in the vacated slot
+-        assertEquals("p8", order.get(2));        // cell-below app -> home slot
+-        assertEquals(Arrays.asList("p0", "p1", "p8", "p3", "p4", "p5"), order.subList(0, 6));
+-    }
+-
+-    @Test public void move_upThenDown_fullRow_isRoundTrip() {
+-        // The behaviour move_demote_fullRow_swapsWithCellBelow guarantees in
+-        // isolation should also compose: swapping an app up into a full
+-        // home row and then immediately back down must restore the
+-        // original order exactly, with homeCount never moving.
+-        List<String> order = list(12);
+-        int hc = 6;
+-        HomeDrawerModel.MoveResult up = HomeDrawerModel.moveUp(order, 7, hc);
+-        assertEquals(6, up.homeCount);
+-        HomeDrawerModel.MoveResult down = HomeDrawerModel.moveDown(order, up.index, up.homeCount);
+-        assertEquals(6, down.homeCount);
+-        assertEquals(7, down.index);
+-        assertEquals(list(12), order);           // exact round trip
+-    }
+-
+     @Test public void move_demoteToZero_thenPromoteBack() {
+         List<String> order = list(10);
+         int hc = 1;

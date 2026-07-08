@@ -4250,9 +4250,26 @@ public class LauncherActivity extends Activity {
                     drawIcon(canvas, cx, icy);
                 }
 
-                // Show label: always for focused+normal, always for drag target in reorder
+                // Show label: always for focused+normal, always for drag target in reorder.
+                //
+                // The !rebuildingApps guard closes a gap the ring-position
+                // fix above doesn't: isFocused() reads real, low-level
+                // Android focus state directly, completely bypassing
+                // CellView's own OnFocusChangeListener (and therefore the
+                // rebuildingApps suppression inside it). During the
+                // teardown-and-rebuild window the platform can genuinely,
+                // if transiently, hand real focus to some other still-
+                // attached cell as a side effect of the GONE calls -- the
+                // ring correctly ignores that now, but onDraw() doesn't go
+                // through the listener at all, so isFocused() would still
+                // honestly report "yes" for whichever cell the platform
+                // picked and draw ITS label for a frame: a small, fast
+                // label flash on the wrong cell with the ring itself
+                // staying put. Suppressing the label the same way the ring
+                // is suppressed -- for the identical window, using the
+                // identical flag -- closes this the same way.
                 boolean showLabel = (!labelDisplay.isEmpty()) &&
-                        ((isFocused() && !reorderMode) || isDragTarget);
+                        ((isFocused() && !reorderMode && !rebuildingApps) || isDragTarget);
                 if (showLabel) {
                     float labelY = icy + labelOffsetY;
                     if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);
