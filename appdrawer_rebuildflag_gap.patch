@@ -1,0 +1,91 @@
+--- LauncherActivity.java.orig	2026-07-08 04:05:12.351183736 +0000
++++ LauncherActivity.java	2026-07-08 04:06:05.211508367 +0000
+@@ -4407,6 +4407,15 @@
+         // lands while the drawer happens to be open and focused.
+         boolean rebuildingApps = false;
+ 
++        // See RecyclingShelfView.setAppsGen — every applyShelfApps() call
++        // reaches this drawer too (not only when it's open), so the same
++        // two-calls-in-quick-succession race the shelf guards against
++        // (cache fast-path immediately followed by the PM-scan reconcile)
++        // reaches setApps() here just as often. Same fix: each call takes
++        // a ticket, and a superseded call's posted focus-restore checks the
++        // ticket is still current before touching rebuildingApps or focus.
++        int setAppsGen = 0;
++
+         AppDrawer(Context ctx) {
+             super(ctx);
+             scroller = new OverScroller(ctx, SCROLL_EASE);
+@@ -4474,6 +4483,7 @@
+         }
+ 
+         void setApps(List<AppInfo> apps, int hcIgnored) {
++            final int myGen = ++setAppsGen;
+             if (reorderMode) exitReorderMode(false);
+             hideContextMenu();
+             // See RecyclingShelfView.setApps for the full rationale: capture
+@@ -4494,7 +4504,19 @@
+                 cv.setVisibility(GONE); pool.add(cv);
+             }
+             attached.clear();
+-            rebuildingApps = false;
++            // rebuildingApps deliberately stays true past this point — see
++            // RecyclingShelfView.setApps's extended note on why an early
++            // reset here (the drawer used to reset it right on the next
++            // line) leaves the requestLayout() gap unprotected and lets a
++            // platform focus reassignment during that pass paint the ring
++            // on the wrong drawer cell for a frame. It's cleared below:
++            // inside the posted callback when one is coming (the normal
++            // "drawer is open" case — the callback's requestFocusOnIndex
++            // is the authoritative call this suppression is protecting),
++            // or immediately when none is coming (drawer not visible / no
++            // apps — nothing will ever reach the posted branch to clear it,
++            // so there is no gap left to protect and leaving it true would
++            // wedge every future DrawerCell focus/label update).
+             displayed.clear();
+             if (apps != null && !apps.isEmpty()) displayed.addAll(apps);
+             if (displayed.isEmpty()) { focusedIndex = 0; scrollY = 0; }
+@@ -4513,7 +4535,23 @@
+             // silently lost mid-browse.
+             if (getVisibility() == View.VISIBLE && !displayed.isEmpty()) {
+                 final int fi = focusedIndex;
+-                post(() -> { if (getVisibility() == View.VISIBLE) requestFocusOnIndex(fi, true); });
++                post(() -> {
++                    // A newer setApps() has since started (see
++                    // RecyclingShelfView's identical check) — that call is
++                    // authoritative now, not this one. Leave rebuildingApps
++                    // alone: it's either already false (the newer call's own
++                    // branch beat us here) or the newer call is still
++                    // mid-teardown and will settle it itself.
++                    if (myGen != setAppsGen) return;
++                    rebuildingApps = false;
++                    if (getVisibility() == View.VISIBLE) requestFocusOnIndex(fi, true);
++                });
++            } else {
++                // No focus-restore callback is being posted for this call
++                // (drawer not visible, or nothing to focus), so nothing will
++                // clear the flag later — clear it now. Safe: with no posted
++                // callback there is no requestLayout() gap left to guard.
++                rebuildingApps = false;
+             }
+         }
+ 
+@@ -5306,8 +5344,17 @@
+                 } else {
+                     drawIcon(canvas, cx, icy);
+                 }
++                // The !rebuildingApps guard mirrors CellView.onDraw's
++                // identical fix: isFocused() reads real platform focus
++                // directly, bypassing DrawerCell's own focus-listener (and
++                // therefore the rebuildingApps suppression inside it). During
++                // the teardown-and-rebuild window a transient platform focus
++                // reassignment would otherwise still make this draw the
++                // label on the wrong cell for a frame even though the ring
++                // itself is correctly suppressed. See RecyclingShelfView's
++                // rebuildingApps for the full history.
+                 boolean showLabel = (!labelDisplay.isEmpty())
+-                        && ((isFocused() && !reorderMode) || isDragTarget);
++                        && ((isFocused() && !reorderMode && !rebuildingApps) || isDragTarget);
+                 if (showLabel) {
+                     float labelY = icy + labelOffsetY;
+                     if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);

@@ -1,0 +1,62 @@
+diff --git a/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java b/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
+index 44430aa..ffd20cd 100644
+--- a/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
++++ b/LauncherV15/app/src/main/java/com/bare/launcher/LauncherActivity.java
+@@ -3557,6 +3557,7 @@ public class LauncherActivity extends Activity {
+                 CellView cv = attached.get(idx);
+                 if (cv != null) {
+                     cv.requestFocus();
++                    forceRingAndLabelSync(cv);
+                 } else {
+                     // Cell not yet attached — post a retry after layout.
+                     final int target = idx;
+@@ -3569,6 +3570,7 @@ public class LauncherActivity extends Activity {
+                             fastNav = fastDeferred;
+                             try { cv2.requestFocus(); }
+                             finally { fastNav = p; }
++                            forceRingAndLabelSync(cv2);
+                         }
+                     });
+                 }
+@@ -3603,6 +3605,41 @@ public class LauncherActivity extends Activity {
+             }
+         }
+ 
++        /**
++         * Force the ring and the focused-label draw state onto {@code cv}
++         * without depending on {@code OnFocusChangeListener} firing.
++         *
++         * <p>{@link android.view.View#requestFocus()} is a no-op when the
++         * view already holds real platform focus — Android doesn't re-fire
++         * the listener for a focus grant that doesn't actually change
++         * anything. That's the normal case almost always, but cold start
++         * has a window (documented at length around {@code rebuildingApps}
++         * above) where the platform can genuinely, if transiently, hand
++         * real focus to a cell WHILE the listener is still suppressed. When
++         * that happens, the subsequent, legitimate
++         * {@code cv.requestFocus()} call here sees "already focused" and
++         * does nothing — the listener never runs a second time, so neither
++         * {@link #positionRing} nor a fresh draw pass (which is what makes
++         * {@code CellView.onDraw}'s label check re-evaluate) ever actually
++         * happens. The cell genuinely has focus the whole time — that part
++         * was never wrong — but nothing ever painted it, so the ring stays
++         * invisible and the label's fate depends on whatever unrelated
++         * redraw happens to touch that cell next (an icon finishing an
++         * async decode, for instance) rather than anything deterministic.
++         * That's why it looked random rather than tied to any one cell.
++         *
++         * <p>Calling this unconditionally after every {@code requestFocus()}
++         * call in this method closes the gap regardless of whether that
++         * call actually changed anything: {@link #positionRing} is cheap
++         * and idempotent, and {@code invalidate()} forces the redraw that
++         * makes the label check run with current state either way.
++         */
++        private void forceRingAndLabelSync(CellView cv) {
++            if (cv == null || !cv.isAttachedToWindow() || cv.getWidth() <= 0) return;
++            positionRing(cv);
++            cv.invalidate();
++        }
++
+         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+             super.onSizeChanged(w, h, ow, oh);
+             if (w > 0) centerX = (totalW < w) ? (w - totalW) / 2 : dp(24);
