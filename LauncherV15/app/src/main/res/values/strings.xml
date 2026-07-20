@@ -48,7 +48,15 @@
     <string name="settings_row_manage_hidden">Manage hidden apps</string>
     <string name="settings_row_button_shortcuts">Button shortcuts</string>
     <string name="settings_row_set_wallpaper">Set wallpaper</string>
+    <string name="settings_row_wallpaper_menu">Wallpaper / Slideshow</string>
+    <string name="settings_row_backup_menu">Backup &amp; restore</string>
+    <string name="settings_row_slideshow_folder">Slideshow folder</string>
+    <string name="settings_row_slideshow_duration">Slideshow duration</string>
+    <string name="settings_row_slideshow_restart">Change each restart</string>
+    <string name="settings_row_idle_hide">Hide UI when idle</string>
     <string name="settings_row_show_clock">Show clock</string>
+    <string name="settings_row_backup">Back up settings</string>
+    <string name="settings_row_restore">Restore settings</string>
     <string name="settings_row_system_settings">System Settings</string>
     <string name="settings_row_about">About</string>
 
@@ -87,4 +95,18 @@
     <string name="toast_wallpaper_no_permission">Could not get permission for this image</string>
     <!-- %1$s is the user-visible label of the app being uninstalled. -->
     <string name="toast_cannot_uninstall">Cannot uninstall %1$s</string>
+
+    <!-- Backup / restore (settings panel). -->
+    <string name="toast_backup_saved">Settings backed up</string>
+    <string name="toast_backup_failed">Couldn\'t save the backup</string>
+    <string name="toast_restore_done">Settings restored</string>
+    <string name="toast_restore_failed">Couldn\'t read the backup file</string>
+    <string name="toast_restore_invalid">Not a valid BareLauncher backup</string>
+
+    <!-- Wallpaper slideshow. -->
+    <string name="toast_slideshow_folder_set">Slideshow folder set</string>
+    <string name="toast_slideshow_pick_folder">Pick a slideshow folder first</string>
+    <string name="toast_slideshow_need_permission">Photo access is needed to choose a folder</string>
+    <string name="toast_slideshow_no_folders">No image folders found</string>
+    <string name="folder_picker_title">Choose a slideshow folder</string>
 </resources>

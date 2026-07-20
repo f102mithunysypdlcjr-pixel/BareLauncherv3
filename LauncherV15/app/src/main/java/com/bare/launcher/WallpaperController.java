@@ -124,6 +124,12 @@ final class WallpaperController {
     private final ThreadPoolExecutor      executor;
     private final AtomicBoolean           systemLoading  = new AtomicBoolean(false);
     private final AtomicBoolean           userLoading    = new AtomicBoolean(false);
+    /** Separate from {@link #userLoading} so a slideshow rotation tick and
+     *  a manual wallpaper pick landing in the same few hundred ms don't
+     *  silently drop one another via a shared guard. Both still funnel
+     *  through the single-thread {@link #executor}, so they queue and run
+     *  sequentially rather than racing. */
+    private final AtomicBoolean           slideshowLoading = new AtomicBoolean(false);
 
     /** Volatile because the executor thread reads them inside
      *  {@link #wpDrawable} / {@link #calcSampleSize}. Without volatile,
@@ -364,7 +370,28 @@ final class WallpaperController {
      * surfaces a toast.
      */
     void applyFromUri(Uri uri) {
-        if (!userLoading.compareAndSet(false, true)) return;
+        decodeAndCrossfade(uri, true);
+    }
+
+    /**
+     * Decode and cross-fade exactly like {@link #applyFromUri}, but
+     * skip the snapshot write and the prefs update. Used by the
+     * slideshow rotation: writing a screen-sized WebP on every tick
+     * wastes I/O and encoder memory (the snapshot's only purpose is
+     * instant cold-start paint, and the last manually-picked wallpaper
+     * is already persisted). The user-pick path still calls
+     * {@link #applyFromUri} so the snapshot stays current.
+     */
+    void crossfadeUri(Uri uri) {
+        decodeAndCrossfade(uri, false);
+    }
+
+    /** Shared implementation for {@link #applyFromUri} and
+     *  {@link #crossfadeUri}. {@code persist} controls whether the URI
+     *  is saved to prefs and the snapshot file is written. */
+    private void decodeAndCrossfade(Uri uri, boolean persist) {
+        final AtomicBoolean guard = persist ? userLoading : slideshowLoading;
+        if (!guard.compareAndSet(false, true)) return;
         executor.execute(() -> {
             Bitmap argb = null;
             try {
@@ -374,12 +401,22 @@ final class WallpaperController {
                     BitmapFactory.decodeStream(is, null, opts);
                 }
                 if (opts.outWidth <= 0 || opts.outHeight <= 0) {
-                    userLoading.set(false);
+                    // Must reset the SAME guard that decodeAndCrossfade
+                    // acquired above (guard = persist ? userLoading :
+                    // slideshowLoading), not unconditionally userLoading.
+                    // A slideshow tick (persist=false) that hits a bad,
+                    // deleted, or unreadable image previously leaked
+                    // slideshowLoading stuck at true forever, since this
+                    // branch always cleared userLoading instead — every
+                    // later crossfadeUri() call's compareAndSet(false,true)
+                    // then failed silently and the rotation never advanced
+                    // again for the rest of the process.
+                    guard.set(false);
                     return;
                 }
                 opts.inSampleSize       = calcSampleSize(opts.outWidth, opts.outHeight);
                 opts.inJustDecodeBounds = false;
-                // Decode as ARGB_8888 first (NOT HARDWARE) because we need
+                // Decode as ARGB_8888 first (NOT HARDWARE) because we may need
                 // to compress() the bitmap to write the snapshot, and
                 // Bitmap.compress returns false on HARDWARE config. After
                 // the snapshot is on disk we promote to HARDWARE for
@@ -393,27 +430,27 @@ final class WallpaperController {
                 argb = null;
             }
             // High-quality downscale + center-crop to the exact panel size.
-            // The decode above (computeSampleSizeAtLeast) guarantees argb is
-            // at or above the screen on both axes, so this only ever shrinks
-            // — bilinear-filtered and baked, so the displayed wallpaper is
-            // pixel-exact to the panel (no ImageView upscale → no blur) and
-            // screen-sized (smallest snapshot + graphics-memory footprint).
             if (argb != null) argb = scaleToScreenCrop(argb);
-            // Snapshot write happens BEFORE HARDWARE conversion. Best-
-            // effort: a write failure does not block the user's wallpaper
-            // change — it just means the next cold start does a full
-            // URI decode instead of an instant snapshot render.
-            if (argb != null && !destroyed) writeSnapshotBestEffort(argb);
-            // Promote to HARDWARE for display. Recycles the ARGB on
-            // success; falls through with the ARGB unchanged if the
-            // platform fails the conversion (rare GPU driver issue).
+            // Snapshot write only on user-picks, not slideshow rotation.
+            // Slideshow rotation would write a screen-sized WebP on every
+            // tick — wasted I/O and encoder heap. The snapshot's only job
+            // is instant cold-start paint of the last user-chosen image.
+            if (persist && argb != null && !destroyed) writeSnapshotBestEffort(argb);
+            // Promote to HARDWARE for display.
             final Bitmap fb = toHardwareOrSelf(argb);
-            userLoading.set(false);
+            guard.set(false);
             if (!destroyed) host.runOnUiThread(() -> {
                 if (fb != null) {
                     crossfade(fb);
-                    prefs.edit().putString(prefKeyUri, uri.toString()).apply();
-                } else {
+                    if (persist) prefs.edit().putString(prefKeyUri, uri.toString()).apply();
+                } else if (persist) {
+                    // Only a user-initiated pick falls back to the system
+                    // wallpaper / surfaces a toast on decode failure. A
+                    // slideshow-rotation failure (one bad, deleted, or
+                    // permission-revoked photo) must not evict the user's
+                    // chosen folder wallpaper or pop a toast during an
+                    // unattended rotation — just skip this tick; the next
+                    // interval tries the next image.
                     if (toastFn != null) toastFn.show(host.getString(R.string.toast_wallpaper_load_failed));
                     loadSystem();
                 }

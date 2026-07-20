@@ -422,14 +422,15 @@ android {
         // update banner-refresh pass. See CHANGELOG.md [2.0.0] for the
         // user-facing summary.
         //
-        // Bumped 28 → 29: 2.1.0 adds hardware TV inputs (HDMI / AV /
-        // component) as first-class app-like tiles via the platform TV Input
-        // Framework — they sort, place, move, hide, and bind exactly like
-        // apps, launch by switching to the passthrough source, and need NO
-        // special permission. A pure no-op on devices without TV inputs
-        // (streaming sticks, most boxes). SemVer MINOR — additive feature.
-        versionCode   = 29
-        versionName   = "2.1.0"
+        // Bumped 29 → 30: 2.2.0 adds two additive features — settings
+        // Back up / Restore (a tiny dependency-free SAF text file: app order,
+        // home count, button shortcuts, hidden apps, clock mode; atomic
+        // import; wallpaper deliberately excluded) and a wallpaper slideshow
+        // (pick a folder, rotate each restart or every 5–60 min; the timer
+        // runs foreground-only and the instant snapshot cold-start is
+        // preserved). SemVer MINOR — additive, no behaviour change when unused.
+        versionCode   = 30
+        versionName   = "2.2.0"
         resourceConfigurations += listOf("en")
 
         // Instrumentation test runner. Required so :app:connectedDebugAndroidTest
