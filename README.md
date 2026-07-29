@@ -61,16 +61,21 @@ Most TV launchers are heavy, online, and crowded with promotions. BareLauncher i
 
 | | |
 |---|---|
-| ⚡ **Instant navigation** | Zero-lag scrolling on a TV remote, via a custom recycling shelf — no `RecyclerView`. |
-| 🗂️ **Home row + app drawer** | Favourites on the home screen, a pull-down drawer for the rest. Reorder freely with the D-pad. |
-| 🎛️ **Button shortcuts** | Assign remote colour/menu keys to any app, right from the home screen — no Accessibility Service. |
-| 🗃️ **Manage apps** | Long-press any app to move, hide, open App info, or uninstall. Hidden apps stay installed, just off your home screen. |
-| 🖼️ **Wallpaper support** | Any wallpaper, rendered with hardware bitmaps that save 8–32 MB of RAM. |
-| 🕒 **3-state clock** | Full (time + day/date), time-only, or off. Locale-aware, 12/24-hour, instant timezone updates. |
-| 📶 **Wi-Fi & settings pills** | Live Wi-Fi indicator, plus a gear pill — long-press it to open system settings instantly. |
-| ℹ️ **About screen** | Version, links and a Ko-fi QR generated **on-device** — no library, no network. |
+| ⚡ **Instant navigation** | Zero-lag scrolling on a TV remote via a custom recycling shelf — no `RecyclerView`. |
+| 🗂️ **Home row + app drawer** | Favorites on the home screen, a pull-down drawer for the rest. Reorder everything freely with the D-pad. |
+| 🎛️ **Button shortcuts** | Assign remote colour/menu keys to any app directly from the home screen — no Accessibility Service required. |
+| 🗃️ **Manage apps** | Long-press any app to move, hide, open App info, or uninstall. Hidden apps stay installed, just out of sight. |
+| 🖼️ **Wallpaper system** | Static wallpapers, folder-based slideshows, startup wallpaper rotation, and hardware bitmap rendering that saves 8–32 MB of RAM. |
+| 🎞️ **Wallpaper slideshows** | Turn any folder of photos or wallpapers into a rotating home screen background. Supports internal storage and USB/SD media with configurable intervals (20 sec–3 min). |
+| 🌙 **Hide UI when idle** | Automatically hides the launcher interface after inactivity, leaving only the clock so your wallpapers can fill the entire screen until the screensaver starts. |
+| 💾 **Backup & Restore** | Save and restore your launcher setup, including app order, hidden apps, clock settings, and preferences. |
+| 📺 **TV input tiles** | Add HDMI, AV, and other supported TV inputs directly to the home screen for quick access. |
+| 🕒 **3-state clock** | Full (time + day/date), time-only, or off. Locale-aware, 12/24-hour support with instant timezone updates. |
+| 📶 **Wi-Fi & settings pills** | Live Wi-Fi indicator plus a Settings pill — long-press it to open system settings instantly. |
+| ✨ **Smooth animations** | Lightweight app launch animations that make navigation feel smoother without sacrificing speed. |
+| ℹ️ **About screen** | Version info, project links, and GitHub/Ko-fi QR codes generated entirely on-device — no libraries, no network requests. |
 | 🚫 **Zero telemetry** | No analytics, no crash reporting, no background calls. Your usage stays on your device. |
-| 🚀 **Cold-start cache** | Wallpaper, shelf, and icons paint in the very first frame after the first launch. |
+| 🚀 **Cold-start cache** | Wallpaper, shelf, and icons appear immediately after startup for a smooth, flash-free first frame. |
 
 ---
 
