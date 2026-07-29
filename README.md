@@ -14,6 +14,7 @@ No ads. No telemetry. No recommendations. Just your apps.
 [![Downloader code 3465597](https://img.shields.io/badge/Downloader-3465597-FF6B2C?style=for-the-badge&logo=amazonfiretv&logoColor=white)](https://aftv.news/3465597)
 [![Website](https://img.shields.io/badge/Website-Live-3A86FF?style=for-the-badge)](https://f102mithunysypdlcjr-pixel.github.io/BareLauncherv3/)
 [![License](https://img.shields.io/badge/License-PolyForm%20NC%201.0-8b5cf6?style=for-the-badge)](./LICENSE)
+[![Reddit](https://img.shields.io/badge/Reddit-r%2FBareLauncher-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/r/BareLauncher/)
 
 </div>
 
